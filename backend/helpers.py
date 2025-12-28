@@ -1,5 +1,24 @@
 # backend/helpers.py
+import json
+import os
+from typing import Any
+
+def save_json(obj: Any, path: str):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+def load_json(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def chunk_text(text: str, max_chars: int = 2000, overlap: int = 200):
+    """
+    Break text into overlapping chunks.
+    - max_chars: target chunk size (chars)
+    - overlap: number of chars to overlap between chunks
+    """
     text = text.strip()
     if not text:
         return []

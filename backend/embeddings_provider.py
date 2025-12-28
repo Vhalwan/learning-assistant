@@ -203,3 +203,13 @@ def get_embedding_provider() -> BaseEmbeddingProvider:
     except Exception as e:
         logger.exception("Failed to initialize GoogleEmbeddingProvider; falling back to SafeEmbeddingProvider: %s", e)
         return SafeEmbeddingProvider(dim=EMBED_DIM)
+
+
+# Small helper for tests
+def embed_texts_for_tests(texts: List[str], dim: int = EMBED_DIM) -> List[List[float]]:
+    """
+    Convenience wrapper used by rag_query when tests inject embed_call.
+    Returns list[list[float]] and matches the provider.embed signature.
+    """
+    provider = get_embedding_provider()
+    return provider.embed(texts, dim=dim, batch_size=1)

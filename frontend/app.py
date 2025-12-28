@@ -25,6 +25,10 @@ from backend.create_embeddings import (
 from backend.embeddings_provider import deterministic_vector, get_embedding_provider
 from backend.rag_query import rag_answer_from_embeddings
 
+# generate quiz + SRS
+from backend.generate_quiz import generate_quiz_from_context
+from backend.study_srs import SRSManager
+
 # faiss builder
 try:
     from backend.vectorstore.faiss_store import build_faiss_index
@@ -132,30 +136,72 @@ if uploaded:
             with st.spinner("Retrieving relevant chunks and asking Gemini..."):
                 try:
 
-                    ans, retrieved = rag_answer_from_embeddings(
+                    # Request rich metadata so we can show scores & provenance
+                    ans, retrieved_chunks, prompt_used, provenance = rag_answer_from_embeddings(
                         question,
                         str(embeddings_path),
                         top_k=int(k),
                         use_faiss=bool(use_faiss_search),
                         faiss_index_path=candidate_index_path,
-                        use_safe=(True if os.environ.get("USE_SAFE_EMBEDDINGS","1") in ("1","true","yes") else False)
+                        use_safe=(True if os.environ.get("USE_SAFE_EMBEDDINGS","1") in ("1","true","yes") else False),
+                        use_query_expansion=False,
+                        return_meta=True,
+                        llm_call=None
                     )
 
                     st.subheader("Top retrieved chunks (expand to read)")
-                    if not retrieved:
+                    if not retrieved_chunks:
                         st.info("No chunks retrieved.")
                     else:
-                        for i, chunk in enumerate(retrieved, start=1):
-                            with st.expander(f"{i}. chunk (preview)"):
-                                st.write(chunk[:1000] + ("..." if len(chunk) > 1000 else ""))
+                        for i, chunk in enumerate(retrieved_chunks, start=1):
+                            score = chunk.get("score", 0.0)
+                            cid = chunk.get("id")
+                            pos = chunk.get("pos")
+                            with st.expander(f"{i}. chunk (id={cid} pos={pos} score={score:.4f})"):
+                                st.write(chunk.get("text", "")[:2000] + ("..." if len(chunk.get("text","")) > 2000 else ""))
 
                     st.subheader("Answer")
                     st.write(ans)
+
+                    st.subheader("Provenance (sentence -> chunk)")
+                    if provenance and provenance.get("sentences"):
+                        for s in provenance.get("sentences", []):
+                            st.write(f"- \"{s['sentence']}\"  → chunk_id={s.get('chunk_id')} (score={s.get('score'):.3f})")
+                    else:
+                        st.info("No provenance available.")
+
+                    with st.expander("Prompt used (debug)"):
+                        st.code(prompt_used[:4000])
+
                 except FileNotFoundError as fe:
                     st.error("File missing for retrieval.")
                     st.exception(fe)
                 except Exception as e:
                     st.error("RAG failed — see details.")
+                    st.exception(e)
+
+    st.markdown("---")
+    st.subheader("Study/Quiz")
+    n_q = st.number_input("Number of quiz items", min_value=1, max_value=20, value=5)
+    if st.button("Generate Quiz from lecture"):
+        if not text:
+            st.warning("No document text extracted.")
+        else:
+            with st.spinner("Generating quiz..."):
+                try:
+                    quiz = generate_quiz_from_context(stem, text, n=int(n_q), llm_call=None)
+                    st.success(f"Quiz generated: {len(quiz.get('questions', []))} items.")
+                    # display flashcards
+                    for q in quiz.get("questions", []):
+                        with st.expander(f"Q: {q.get('question')[:120]}"):
+                            st.write("Answer:", q.get("answer"))
+                            st.write("ID:", q.get("id"))
+                            if st.button(f"Start SRS for {q.get('id')}", key=f"srs_{q.get('id')}"):
+                                mgr = SRSManager()
+                                mgr.ensure_card(q.get("id"))
+                                st.info(f"Registered card {q.get('id')} in SRS.")
+                except Exception as e:
+                    st.error("Quiz generation failed.")
                     st.exception(e)
 
     st.markdown("---")
