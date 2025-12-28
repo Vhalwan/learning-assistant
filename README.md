@@ -23,7 +23,7 @@ Future phases will add quiz generation and spaced-repetition support.
 - Python
 - FAISS (optional, for fast vector search)
 - NumPy
-- (Optional) Google Gemini APIs for embeddings and LLMs
+- Google Gemini APIs for embeddings and LLMs
 - PyPDF (or other PDF extraction)
 - Streamlit (frontend)
 
