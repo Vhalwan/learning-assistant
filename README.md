@@ -60,9 +60,6 @@ test_rag_query.py
 frontend/
 app.py # Streamlit UI (upload, embed, build index, query, quiz)
 
-yaml
-Copy code
-
 ---
 
 ## Environment (.env example)
@@ -82,9 +79,6 @@ EMBED_DIM=1536
 Optional custom endpoint for testing
 EMBEDDING_API_URL=https://example.com/v1/embeddings
 
-yaml
-Copy code
-
 ---
 
 ## Installation
@@ -99,19 +93,14 @@ Mac/Linux
 source venv/bin/activate
 
 markdown
-Copy code
 
 2. Install dependencies:
 pip install -r requirements.txt
 
 sql
-Copy code
 
 3. (Optional) Install FAISS for local similarity search:
 pip install faiss-cpu
-
-yaml
-Copy code
 
 ---
 
@@ -120,17 +109,14 @@ Copy code
 Start the Streamlit UI:
 streamlit run frontend/app.py
 
-yaml
-Copy code
-
 Typical workflow in the UI:
 1. Upload PDF (data/raw/)
 2. Extract preview and chunk
 3. Toggle SAFE vs REAL embeddings
 4. Create embeddings file (data/processed/<stem>_embeddings.json)
-5. Build FAISS index (optional)
+5. Can build FAISS index
 6. Ask a question (RAG) — retrieved chunks + LLM answer displayed
-7. (Optional) Generate quiz and use SRS
+7. Can generate quiz and use SRS
 
 ---
 
@@ -138,9 +124,6 @@ Typical workflow in the UI:
 
 Run the test suite:
 pytest -q
-
-yaml
-Copy code
 
 Notes:
 - Tests include provider normalization checks, FAISS build/search correctness, and RAG behavior with mocks.
@@ -152,7 +135,7 @@ Notes:
 1. PDF -> extract plain text (`backend/extract_pdf.py`)
 2. Text -> chunking (`backend/helpers.py`)
 3. Chunks -> embeddings (`backend/create_embeddings.py` uses `embeddings_provider.py`)
-4. (Optional) Embeddings -> FAISS index (`backend/vectorstore/faiss_store.py`)
+4. Embeddings -> FAISS index (`backend/vectorstore/faiss_store.py`)
 5. Query -> embed query -> retrieve top-k chunks (FAISS or NumPy)
 6. Combine retrieved chunks + question into a prompt -> send to LLM (`backend/rag_query.py`)
 7. Show LLM answer and the supporting chunks for provenance
