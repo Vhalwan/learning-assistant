@@ -1,0 +1,25 @@
+# Python / virtualenv
+venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# data/process artifacts
+data/processed/
+*.sqlite
+*.db
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# distribution / build
+dist/
+build/
+*.egg-info/
+
+# logs
+*.log
