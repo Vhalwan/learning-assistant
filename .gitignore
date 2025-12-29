@@ -1,6 +1,8 @@
 # Python / virtualenv
 venv/
+.venv/
 .env
+.env.*
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -23,3 +25,9 @@ build/
 
 # logs
 *.log
+
+# data / indexes
+*.index
+*.meta.json
+data/processed/*.index
+data/processed/*.meta.json

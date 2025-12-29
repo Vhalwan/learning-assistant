@@ -1,4 +1,4 @@
-# backend/vectorstore/faiss_store.py
+# backend/vectorstore/summarize_file.py
 import json
 import os
 import numpy as np
@@ -116,3 +116,100 @@ def rebuild_index_if_needed(embeddings_json_path: str, index_path: str, force: b
         build_faiss_index(embeddings_json_path, index_path)
         return True
     return False
+
+def append_to_index(embeddings_json_path: str, index_path: str) -> int:
+    """
+    Append vectors from embeddings_json_path to existing FAISS index at index_path.
+
+    Returns:
+        int: number of vectors appended.
+
+    Behavior:
+      - If FAISS is not available -> raises RuntimeError
+      - If index_path or its meta is missing -> builds a new index from embeddings_json_path and returns n_vectors (same as build)
+      - Ensures dim compatibility between existing index metadata and new embeddings
+      - Normalizes new vectors before adding (so IndexFlatIP acts as cosine)
+      - Updates <index_path>.meta.json by appending new items and updating n_vectors
+    """
+    _ensure_faiss_available()
+
+    if not os.path.exists(embeddings_json_path):
+        raise FileNotFoundError(f"Embeddings file not found: {embeddings_json_path}")
+
+    # load new rows
+    with open(embeddings_json_path, "r", encoding="utf-8") as f:
+        rows = json.load(f)
+    if not rows:
+        logger.info("No rows to append from %s", embeddings_json_path)
+        return 0
+
+    new_vecs = np.array([r["embedding"] for r in rows], dtype=np.float32)
+    new_vecs = np.ascontiguousarray(new_vecs)
+    faiss.normalize_L2(new_vecs)
+    new_count = int(new_vecs.shape[0])
+    new_dim = int(new_vecs.shape[1])
+
+    # If index or meta missing, build fresh index instead of append
+    if not os.path.exists(index_path) or not os.path.exists(index_path + META_EXT):
+        logger.info("Index or metadata missing; building fresh index at %s", index_path)
+        build_faiss_index(embeddings_json_path, index_path)
+        return new_count
+
+    # load existing meta to check dim and n_vectors
+    try:
+        with open(index_path + META_EXT, "r", encoding="utf-8") as f:
+            meta_obj = json.load(f)
+    except Exception as e:
+        logger.exception("Failed to read FAISS meta file: %s", e)
+        raise
+
+    existing_dim = meta_obj.get("dim")
+    existing_n = meta_obj.get("n_vectors", 0)
+    if existing_dim is not None and int(existing_dim) != new_dim:
+        raise ValueError(f"Dimension mismatch: existing index dim={existing_dim}, new embeddings dim={new_dim}")
+
+    # load index
+    try:
+        index = faiss.read_index(index_path)
+    except Exception as e:
+        logger.exception("Failed to read FAISS index at %s: %s", index_path, e)
+        raise
+
+    # add vectors
+    try:
+        index.add(new_vecs)
+    except Exception as e:
+        logger.exception("Failed to append vectors to FAISS index: %s", e)
+        raise
+
+    # atomic write index
+    tmp_index = index_path + ".tmp"
+    try:
+        faiss.write_index(index, tmp_index)
+        os.replace(tmp_index, index_path)
+    except Exception as e:
+        logger.exception("Failed to write FAISS index after append: %s", e)
+        raise
+
+    # append metadata items
+    new_metas = [{"id": r.get("id"), "text": r.get("text")} for r in rows]
+    meta_obj.setdefault("items", [])
+    meta_obj["items"].extend(new_metas)
+    meta_obj["n_vectors"] = int(existing_n) + new_count
+    # record update timestamp
+    meta_obj["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    # ensure dim present
+    meta_obj["dim"] = int(new_dim)
+
+    # write meta file atomically
+    tmp_meta = index_path + META_EXT + ".tmp"
+    try:
+        with open(tmp_meta, "w", encoding="utf-8") as f:
+            json.dump(meta_obj, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_meta, index_path + META_EXT)
+    except Exception as e:
+        logger.exception("Failed to write FAISS meta file after append: %s", e)
+        raise
+
+    logger.info("Appended %d vectors to index %s (new total: %d)", new_count, index_path, meta_obj["n_vectors"])
+    return new_count

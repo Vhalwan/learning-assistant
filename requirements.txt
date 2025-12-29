@@ -1,0 +1,11 @@
+pdfplumber
+streamlit
+numpy
+pandas
+
+fastapi
+uvicorn
+faiss-cpu
+
+google-generativeai
+pytest
