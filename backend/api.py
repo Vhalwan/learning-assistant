@@ -1,4 +1,4 @@
-# backend/api.py
+# frontend/api.py
 """
 FastAPI application exposing programmatic access to core Learning Assistant flows.
 
@@ -17,9 +17,10 @@ Notes:
 from __future__ import annotations
 import time
 import logging
+import os
 from typing import Optional, Any, Dict, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
 
 from backend.logging_config import configure_logging
@@ -39,6 +40,34 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Learning Assistant API", version="0.1.0")
+
+
+# Simple auth guard dependency
+def check_token(authorization: Optional[str] = Header(None)) -> bool:
+    """
+    If API_TOKEN env var is set, require requests to send Authorization: Bearer <token>.
+    If API_TOKEN is not set, allow requests (useful for local dev).
+    """
+    api_token = os.getenv("API_TOKEN", "") or ""
+    if not api_token:
+        # no token configured -> allow access
+        return True
+
+    if not authorization:
+        logger.warning("Missing Authorization header")
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if not authorization.startswith("Bearer "):
+        logger.warning("Malformed Authorization header")
+        raise HTTPException(status_code=401, detail="Malformed Authorization header")
+
+    token = authorization.split(" ", 1)[1].strip()
+    if token != api_token:
+        logger.warning("Invalid API token provided")
+        raise HTTPException(status_code=401, detail="Invalid API token")
+
+    # authorized
+    return True
 
 
 # Request / response models
@@ -79,7 +108,7 @@ def _default_index_path_for_embeddings(embeddings_path: str) -> str:
 
 # Endpoints
 @app.post("/query")
-def post_query(body: QueryRequest) -> Dict[str, Any]:
+def post_query(body: QueryRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
     """
     Run a RAG query and return the answer with retrieved chunks, prompt and provenance.
     """
@@ -90,7 +119,8 @@ def post_query(body: QueryRequest) -> Dict[str, Any]:
             body.embeddings_path,
             top_k=body.top_k,
             use_faiss=bool(body.use_faiss),
-            faiss_index_path=body.faiss_index_path or (_default_index_path_for_embeddings(body.embeddings_path) if body.use_faiss else None),
+            faiss_index_path=body.faiss_index_path
+            or (_default_index_path_for_embeddings(body.embeddings_path) if body.use_faiss else None),
             use_safe=body.use_safe,
             use_query_expansion=bool(body.use_query_expansion),
             return_meta=True,
@@ -122,12 +152,15 @@ def post_query(body: QueryRequest) -> Dict[str, Any]:
         "provenance": provenance,
         "latency_s": elapsed,
     }
-    logger.info("RAG query completed", extra={"latency_s": elapsed, "question_hash": hash(body.question)})
+    logger.info(
+        "RAG query completed",
+        extra={"latency_s": elapsed, "question_hash": hash(body.question)},
+    )
     return resp
 
 
 @app.post("/build_index")
-def post_build_index(body: BuildIndexRequest) -> Dict[str, Any]:
+def post_build_index(body: BuildIndexRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
     """
     Build or rebuild a FAISS index from embeddings JSON.
     If force=True, rebuilds always. Otherwise rebuilds only if needed.
@@ -151,7 +184,7 @@ def post_build_index(body: BuildIndexRequest) -> Dict[str, Any]:
 
 
 @app.post("/append_index")
-def post_append_index(body: AppendIndexRequest) -> Dict[str, Any]:
+def post_append_index(body: AppendIndexRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
     """
     Append embeddings from embeddings_path into an existing index (or create it if missing).
     Returns appended_count and new status.
@@ -174,7 +207,7 @@ def post_append_index(body: AppendIndexRequest) -> Dict[str, Any]:
 
 
 @app.post("/generate_quiz")
-def post_generate_quiz(body: GenerateQuizRequest) -> Dict[str, Any]:
+def post_generate_quiz(body: GenerateQuizRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
     """
     Generate a quiz from context_text. Writes JSON file to data/processed/<stem>_quiz.json.
     """
@@ -192,7 +225,9 @@ def post_generate_quiz(body: GenerateQuizRequest) -> Dict[str, Any]:
 
 
 @app.get("/status")
-def get_status(index_path: Optional[str] = None, embeddings_path: Optional[str] = None) -> Dict[str, Any]:
+def get_status(
+    index_path: Optional[str] = None, embeddings_path: Optional[str] = None, _auth: Any = Depends(check_token)
+) -> Dict[str, Any]:
     """
     Return index status. Provide either index_path or embeddings_path (index inferred).
     """
@@ -209,6 +244,7 @@ def get_status(index_path: Optional[str] = None, embeddings_path: Optional[str] 
     try:
         # lazy import check
         import backend.vectorstore.faiss_store as fs
+
         faiss_available = getattr(fs, "FAISS_AVAILABLE", True)
     except Exception:
         faiss_available = False
