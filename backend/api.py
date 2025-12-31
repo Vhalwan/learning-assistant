@@ -1,32 +1,26 @@
-# frontend/api.py
 """
 FastAPI application exposing programmatic access to core Learning Assistant flows.
 
 Endpoints:
- - POST /query         -> run RAG query against embeddings + optional FAISS index
+ - POST /query         -> run RAG query against embeddings + optional FAISS index (Q&A mode)
+ - POST /summarize     -> produce document-level summary from embeddings (Summary mode)
  - POST /build_index   -> build (or rebuild) a FAISS index from embeddings JSON
  - POST /append_index  -> append new embeddings into an existing FAISS index
  - POST /generate_quiz -> generate a quiz from provided context (writes JSON file)
  - GET  /status        -> index status (exists, n_vectors, dim, created_at, index_mtime)
-
-Notes:
- - This module favors using the deterministic "safe" embedding path by default
-   via rag_answer_from_embeddings's default behavior (USE_SAFE_EMBEDDINGS=1).
- - Responses include latency_s where applicable.
 """
 from __future__ import annotations
 import time
 import logging
 import os
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
 
 from backend.logging_config import configure_logging
 
-# core functions from your backend
-from backend.rag_query import rag_answer_from_embeddings
+from backend.rag_query import rag_answer_from_embeddings, rag_generate_summary_from_embeddings
 from backend.vectorstore.faiss_store import (
     build_faiss_index,
     append_to_index,
@@ -35,11 +29,10 @@ from backend.vectorstore.faiss_store import (
 )
 from backend.generate_quiz import generate_quiz_from_context
 
-# configure logging once
 configure_logging()
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Learning Assistant API", version="0.1.0")
+app = FastAPI(title="Learning Assistant API", version="0.2.0")
 
 
 # Simple auth guard dependency
@@ -50,7 +43,7 @@ def check_token(authorization: Optional[str] = Header(None)) -> bool:
     """
     api_token = os.getenv("API_TOKEN", "") or ""
     if not api_token:
-        # no token configured -> allow access
+        # no token configured to allow access
         return True
 
     if not authorization:
@@ -79,6 +72,13 @@ class QueryRequest(BaseModel):
     faiss_index_path: Optional[str] = None
     use_safe: Optional[bool] = None
     use_query_expansion: Optional[bool] = False
+
+
+class SummarizeRequest(BaseModel):
+    embeddings_path: str
+    summary_type: Optional[str] = "brief"  # "brief" or "detailed"
+    top_k: Optional[int] = None
+    use_safe: Optional[bool] = None
 
 
 class BuildIndexRequest(BaseModel):
@@ -110,7 +110,8 @@ def _default_index_path_for_embeddings(embeddings_path: str) -> str:
 @app.post("/query")
 def post_query(body: QueryRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
     """
-    Run a RAG query and return the answer with retrieved chunks, prompt and provenance.
+    Run a RAG query (Q&A mode) and return the answer with retrieved chunks, prompt and provenance.
+    This endpoint intentionally does NOT produce a document-level summary.
     """
     start = time.perf_counter()
     try:
@@ -133,7 +134,6 @@ def post_query(body: QueryRequest, _auth: Any = Depends(check_token)) -> Dict[st
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     elapsed = time.perf_counter() - start
-    # rag_answer_from_embeddings returns (answer, retrieved_chunks, prompt, provenance)
     try:
         answer, retrieved_chunks, prompt_used, provenance = answer_tuple
     except Exception:
@@ -156,6 +156,38 @@ def post_query(body: QueryRequest, _auth: Any = Depends(check_token)) -> Dict[st
         "RAG query completed",
         extra={"latency_s": elapsed, "question_hash": hash(body.question)},
     )
+    return resp
+
+
+@app.post("/summarize")
+def post_summarize(body: SummarizeRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
+    """
+    Produce a document-level summary using the embeddings JSON as the source.
+    Returns summary text and extracted key concepts and optionally the used chunks.
+    """
+    start = time.perf_counter()
+    try:
+        out, used_chunks = rag_generate_summary_from_embeddings(
+            body.embeddings_path,
+            summary_type=body.summary_type or "brief",
+            top_k=body.top_k,
+            use_safe=body.use_safe,
+            return_meta=False,
+        )
+    except FileNotFoundError as e:
+        logger.warning("Summarize failed: %s", e)
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Summarize failed unexpectedly: %s", e)
+        raise HTTPException(status_code=500, detail=f"Summarize failed: {e}")
+
+    elapsed = time.perf_counter() - start
+    resp = {
+        "out": out,  # contains 'summary' and 'key_concepts'
+        "used_chunks": used_chunks,
+        "latency_s": elapsed,
+    }
+    logger.info("Summarize completed", extra={"embeddings_path": body.embeddings_path, "time_s": elapsed})
     return resp
 
 

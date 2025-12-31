@@ -1,4 +1,3 @@
-# backend/rag_query.py
 """
 RAG wrapper supporting:
  - deterministic (safe) query embeddings
@@ -9,16 +8,13 @@ RAG wrapper supporting:
  - optional metadata return: retrieved chunks (with score/id/pos/vec),
    prompt_used, and provenance mapping sentences->chunk ids
 
-Public API:
-  rag_answer_from_embeddings(question, embeddings_path, top_k=3,
-                             use_faiss=False, faiss_index_path=None, use_safe=None,
-                             use_query_expansion=False, return_meta=False,
-                             llm_call=None, embed_call=None)
-Returns:
-  If return_meta==False:
-    (answer_str, list_of_retrieved_texts)
-  If return_meta==True:
-    (answer_str, retrieved_chunks, prompt_used, provenance)
+This file exposes two high-level operations to support the UI design:
+  1) rag_answer_from_embeddings(...)  -- Q&A mode (fast, uses top_k chunks only)
+  2) rag_generate_summary_from_embeddings(...) -- Summary mode (document-level)
+
+Notes:
+ - The Q&A path will **not** produce a document-level summary.
+ - The Summary path retrieves all chunks (or top_k if provided) and produces a summary only.
 """
 from __future__ import annotations
 import os
@@ -167,7 +163,41 @@ def _embed_texts_for_provenance(texts: List[str], use_safe: bool, dim: Optional[
     arr = arr / norms
     return [arr[i] for i in range(arr.shape[0])]
 
-# main function
+# Utility to strip a trailing "Key Concepts" block from model answers in QA mode.
+# We preserve the main answer and optionally capture the key concepts text (not used in UI by default).
+_KEY_CONCEPTS_PATTERNS = [
+    r"\n+\d+\s*Key Concepts\s*:\s*",   # "5 Key Concepts:"
+    r"\n+Key Concepts\s*:\s*",
+    r"\n+Key concepts\s*:\s*",
+    r"\n+Key concepts / highlights\s*:\s*",
+    r"\n+Key concepts / highlights\s*-",  # fallback
+]
+
+def _separate_key_concepts_block(answer: str) -> Tuple[str, Optional[str]]:
+    """
+    If the answer contains a trailing 'Key Concepts' (or similar) block, split and return (main_answer, key_block).
+    If not found, returns (answer, None).
+    """
+    if not isinstance(answer, str):
+        return str(answer), None
+    # search for any of the patterns (case-insensitive by lowercasing search)
+    # simpler approach: find first occurrence of a line that starts with "Key Concepts" (case-insensitive)
+    m = re.search(r"\n+(?:\d+\s*)?Key\s+Concepts?\b", answer, flags=re.IGNORECASE)
+    if not m:
+        # also try "Key concepts / highlights" variations
+        m2 = re.search(r"\n+Key\s+concepts\b", answer, flags=re.IGNORECASE)
+        if m2:
+            idx = m2.start()
+            return answer[:idx].strip(), answer[idx:].strip()
+        return answer.strip(), None
+    idx = m.start()
+    main = answer[:idx].strip()
+    rest = answer[idx:].strip()
+    return main, rest
+
+# ----------------------
+# Q&A (fast, targeted)
+# ----------------------
 def rag_answer_from_embeddings(
     question: str,
     embeddings_path: str,
@@ -181,8 +211,7 @@ def rag_answer_from_embeddings(
     embed_call: Optional[Callable[[List[str], Optional[int]], List[List[float]]]] = None,
 ) -> Tuple[Any, Any]:
     """
-    Programmatic RAG wrapper.
-
+    Q&A mode -- returns concise answer using ONLY the top_k retrieved chunks.
     If return_meta is False (default): returns (answer_str, [texts...])
     If return_meta is True: returns (answer_str, retrieved_chunks, prompt_used, provenance)
     """
@@ -196,12 +225,11 @@ def rag_answer_from_embeddings(
 
     # cache key
     qhash = _sha256_hex(question)[:16]
-    cache_key = ("rag", qhash, embeddings_path, int(emb_mtime), top_k, bool(use_faiss), bool(use_query_expansion), bool(use_safe))
+    cache_key = ("rag_qa", qhash, embeddings_path, int(emb_mtime), top_k, bool(use_faiss), bool(use_query_expansion), bool(use_safe))
     cached = _RAG_CACHE.get(cache_key)
     if cached is not None:
-        logger.debug("RAG cache hit")
+        logger.debug("RAG QA cache hit")
         cached_qvec, retrieved_chunks = cached
-        # still call LLM
     else:
         # possibly expand query
         if use_query_expansion:
@@ -233,10 +261,8 @@ def rag_answer_from_embeddings(
             try:
                 idx_path = faiss_index_path or (os.path.splitext(embeddings_path)[0] + ".index")
                 index, metas = load_faiss_index(idx_path)
-                # search_faiss expects to have raw query vector
                 results = search_faiss(index, metas, qvec, k=top_k)
                 if results:
-                    # results is list of (score, meta, pos)
                     for score, meta, pos in results:
                         retrieved_chunks.append({
                             "score": float(score),
@@ -270,7 +296,6 @@ def rag_answer_from_embeddings(
                 })
         else:
             # we used FAISS: populate vecs using embeddings file
-            # load embeddings to get vecs for the positions reported by FAISS
             try:
                 ids, texts, vecs = load_embeddings(embeddings_path)
                 for ch in retrieved_chunks:
@@ -288,14 +313,12 @@ def rag_answer_from_embeddings(
         except Exception:
             pass
 
-    # If cache hit we need qvec and retrieved_chunks variables in scope
     if cached is not None:
         qvec, retrieved_chunks = cached
 
     # Build prompt
     context_parts = []
     for ch in retrieved_chunks:
-        # use pos and id for traceability
         context_parts.append(f"[chunk:pos={ch.get('pos')} id={ch.get('id')} score={ch.get('score'):.4f}]\n{ch.get('text')}")
     prompt_context = "\n\n".join(context_parts)
     prompt = (
@@ -311,19 +334,32 @@ def rag_answer_from_embeddings(
     else:
         answer = llm_call(prompt)
         if isinstance(answer, dict):
-            # if tests pass dict then allow string extraction
             answer = answer.get("answer") or json.dumps(answer)
 
     if not isinstance(answer, str):
         answer = str(answer)
 
+    # Strip trailing "Key Concepts" block if present (so the Q&A UI stays concise)
+    try:
+        answer_main, key_block = _separate_key_concepts_block(answer)
+        # For Q&A mode we deliberately return the concise answer (without appended key concepts block).
+        # If return_meta is True we still produce provenance; key_block isn't returned separately by the API,
+        # but could be attached to provenance if desired.
+        answer = answer_main
+        if key_block:
+            # attach to provenance for debugging/inspection if return_meta requested
+            # provenance will be populated later; temporarily stash it in a local var
+            extra_key_block = key_block
+        else:
+            extra_key_block = None
+    except Exception:
+        extra_key_block = None
+
     # Provenance mapping
     provenance = {"sentences": [], "by_chunk": {}}
     try:
-        # split into sentences
         sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', answer) if s.strip()][:8]
         if sents:
-            # try to reuse dim inference
             dim = None
             try:
                 if os.path.exists(embeddings_path):
@@ -334,7 +370,6 @@ def rag_answer_from_embeddings(
             except Exception:
                 pass
             sent_vecs = _embed_texts_for_provenance(sents, use_safe=(use_safe if use_safe is not None else (os.getenv("USE_SAFE_EMBEDDINGS","1").lower() in ("1","true","yes"))), dim=dim, embed_call=embed_call)
-            # compute cosine with each retrieved chunk vec if there otherwise fallback lexical match
             for si, s in enumerate(sents):
                 best_score = -1.0
                 best_chunk_id = None
@@ -353,6 +388,10 @@ def rag_answer_from_embeddings(
     except Exception as e:
         logger.debug("Provenance mapping failed: %s", e)
 
+    # Attach any extracted key_block for inspection
+    if extra_key_block:
+        provenance["extracted_key_block"] = extra_key_block
+
     # Prepare return values
     if not return_meta:
         texts = [ch.get("text", "") for ch in retrieved_chunks]
@@ -361,17 +400,92 @@ def rag_answer_from_embeddings(
     # else return rich tuple
     return answer, retrieved_chunks, prompt, provenance
 
-# CLI convenience
-if __name__ == "__main__":
-    path = os.getenv("EMBED_FILE", DEFAULT_EMBED_FILE)
-    if not os.path.exists(path):
-        print("Embeddings file not found; create embeddings first.")
-        raise SystemExit(1)
+# ----------------------
+# Summary (document-level)
+# ----------------------
+def rag_generate_summary_from_embeddings(
+    embeddings_path: str,
+    summary_type: str = "brief",
+    top_k: Optional[int] = None,
+    use_safe: Optional[bool] = None,
+    llm_call: Optional[Callable[[str], str]] = None,
+    embed_call: Optional[Callable[[List[str], Optional[int]], List[List[float]]]] = None,
+    return_meta: bool = False,
+) -> Tuple[Any, Any]:
+    """
+    Document-level summary mode.
 
-    q = input("Question: ").strip() or "What is the main idea?"
-    ans, retrieved = rag_answer_from_embeddings(q, path, top_k=3, use_faiss=False)
-    print("\n--- Retrieved ---")
-    for t in retrieved:
-        print(t[:300], "...\n---")
-    print("\n--- Answer ---\n")
-    print(ans)
+    - embeddings_path: path to embeddings JSON produced by create_embeddings_for_text
+    - summary_type: "brief" or "detailed" (affects prompt instruction)
+    - top_k: if None -> use ALL chunks; otherwise use first top_k chunks
+    - return_meta: if True returns (summary, used_chunks, prompt_used) else (summary, [texts...])
+
+    This function concatenates the requested chunks (in document order) and asks the LLM to summarize.
+    """
+    if not os.path.exists(embeddings_path):
+        raise FileNotFoundError(f"Embeddings file not found: {embeddings_path}")
+
+    ids, texts, vecs = load_embeddings(embeddings_path)
+    if len(ids) == 0:
+        raise RuntimeError("Embeddings file contained no rows")
+
+    # choose chunks: default = all (in order). If top_k is provided, choose first top_k
+    if top_k is None or top_k <= 0 or top_k >= len(texts):
+        chosen_idxs = list(range(len(texts)))
+    else:
+        chosen_idxs = list(range(min(top_k, len(texts))))
+
+    # compose context (keeping chunk separators and ids for traceability)
+    context_parts = []
+    used_chunks = []
+    for i in chosen_idxs:
+        used_chunks.append({"id": ids[i], "pos": i, "text": texts[i]})
+        context_parts.append(f"[chunk:pos={i} id={ids[i]}]\n{texts[i]}")
+
+    prompt_context = "\n\n".join(context_parts)
+
+    # build summary prompt
+    if summary_type == "detailed":
+        instruct = "Write a DETAILED, structured summary of the following lecture. Include section headings, key concepts, and bullet-pointed takeaways. Keep it faithful to the text and do not hallucinate facts."
+    else:
+        instruct = "Write a BRIEF summary (3-6 sentences) capturing the main ideas and key takeaways of the following lecture. Be concise and factual."
+
+    prompt = f"{instruct}\n\nContext:\n{prompt_context}\n\nSummary:"
+
+    # LLM call
+    if llm_call is None:
+        summary = summarize_with_gemini(prompt)
+    else:
+        summary = llm_call(prompt)
+        if isinstance(summary, dict):
+            summary = summary.get("summary") or json.dumps(summary)
+
+    if not isinstance(summary, str):
+        summary = str(summary)
+
+    # Extract variable-length key concepts using the LLM
+    key_concepts: List[str] = []
+    try:
+        kc_prompt = (
+            "Extract short key concepts / phrases from the summary below. "
+            "Return them as a comma-separated list. Aim for a concise set (typically 3-8 items), but return however many are appropriate.\n\nSummary:\n" + summary
+        )
+        if llm_call is None:
+            kc_resp = summarize_with_gemini(kc_prompt)
+        else:
+            kc_resp = llm_call(kc_prompt)
+        if isinstance(kc_resp, dict):
+            kc_resp = str(kc_resp)
+        if isinstance(kc_resp, str):
+            parts = [p.strip() for p in re.split(r'[,\n;]+', kc_resp) if p.strip()]
+            key_concepts = parts[:16]  # allow up to a sensible cap
+    except Exception:
+        logger.debug("Key concepts extraction failed; continuing without them")
+
+    out = {"summary": summary.strip(), "key_concepts": key_concepts}
+
+    if not return_meta:
+        texts_out = [c["text"] for c in used_chunks]
+        return out, texts_out
+
+    return out, used_chunks, prompt
