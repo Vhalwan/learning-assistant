@@ -2,7 +2,7 @@ import os
 import sys
 import re
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -25,7 +25,11 @@ from backend.create_embeddings import (
     EMBED_DIM,
 )
 from backend.embeddings_provider import deterministic_vector, get_embedding_provider
-from backend.rag_query import rag_answer_from_embeddings, rag_generate_summary_from_embeddings
+from backend.rag_query import (
+    rag_answer_from_embeddings,
+    rag_generate_summary_from_embeddings,
+    rag_chat_answer,
+)
 
 # generate quiz + SRS
 from backend.generate_quiz import generate_quiz_from_context
@@ -50,9 +54,10 @@ Upload a lecture PDF. Controls:
 - Build FAISS index (optional).
 - Toggle FAISS vs NumPy search for retrieval.
 
-Two primary modes:
+Three primary modes:
 - Ask a Question (fast, targeted) — default
 - Generate Summary (document-level overview) — explicit
+- Chat (conversational, maintains history) — new
 """
 )
 
@@ -90,10 +95,6 @@ def call_query_api(
     api_base: str = API_DEFAULT,
     token: str = "",
 ) -> Dict[str, Any]:
-    """
-    Call the FastAPI /query endpoint and return parsed JSON.
-    Raises requests.HTTPError on non-2xx responses.
-    """
     url = f"{api_base.rstrip('/')}/query"
     payload = {
         "question": question,
@@ -106,7 +107,6 @@ def call_query_api(
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-
     resp = requests.post(url, json=payload, headers=headers, timeout=60)
     resp.raise_for_status()
     return resp.json()
@@ -119,19 +119,39 @@ def call_summarize_api(
     api_base: str = API_DEFAULT,
     token: str = "",
 ) -> Dict[str, Any]:
-    """
-    Call the FastAPI /summarize endpoint and return parsed JSON.
-    """
     url = f"{api_base.rstrip('/')}/summarize"
+    payload = {"embeddings_path": embeddings_path, "summary_type": summary_type, "top_k": top_k}
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = requests.post(url, json=payload, headers=headers, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def call_chat_api(
+    question: str,
+    embeddings_path: str,
+    history: Optional[List[Dict[str, str]]],
+    top_k: int,
+    use_faiss: bool,
+    faiss_index_path: Optional[str] = None,
+    api_base: str = API_DEFAULT,
+    token: str = "",
+) -> Dict[str, Any]:
+    url = f"{api_base.rstrip('/')}/chat"
     payload = {
+        "question": question,
         "embeddings_path": embeddings_path,
-        "summary_type": summary_type,
+        "history": history or [],
         "top_k": top_k,
+        "use_faiss": use_faiss,
+        "faiss_index_path": faiss_index_path,
+        "use_query_expansion": False,
     }
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-
     resp = requests.post(url, json=payload, headers=headers, timeout=120)
     resp.raise_for_status()
     return resp.json()
@@ -140,7 +160,7 @@ def call_summarize_api(
 # presentation helpers
 def _strip_key_concepts_from_answer(answer: str) -> str:
     """
-    Remove any trailing 'Key Concepts' style block from an LLM answer for the Q&A UI.
+    Remove any trailing 'Key Concepts' style block from an LLM answer for the Q&A / Chat UI.
     Keeps the main answer concise.
     """
     if not isinstance(answer, str):
@@ -154,13 +174,10 @@ def _strip_key_concepts_from_answer(answer: str) -> str:
         return answer[:m2.start()].strip()
     return answer.strip()
 
+
 def _clean_summary_text(summary: str) -> str:
-    """
-    Remove leading boilerplate like "Here's a concise summary..." if present (cosmetic).
-    """
     if not isinstance(summary, str):
         return str(summary)
-    # remove a common leading phrase
     cleaned = re.sub(r"^\s*Here(?:'|’)s (?:a|an) (?:concise|brief) summary[^\n]*\n*[:\-]*\s*", "", summary, flags=re.IGNORECASE)
     return cleaned.strip()
 
@@ -189,7 +206,7 @@ if uploaded:
     embeddings_path = Path(f"data/processed/{stem}_embeddings.json")
     index_path = Path(f"data/processed/{stem}_embeddings.index")
 
-    # UI control
+    # UI controls
     col1, col2, col3 = st.columns(3)
     with col1:
         use_safe_toggle = st.checkbox(
@@ -201,9 +218,7 @@ if uploaded:
     with col3:
         build_index_btn = st.button("Build FAISS index")
 
-    # Toggle for search the backend
     use_faiss_search = st.checkbox("Use FAISS for retrieval (if available)", value=False)
-
     os.environ["USE_SAFE_EMBEDDINGS"] = "1" if use_safe_toggle else "0"
 
     # Create embeddings when missing or when they are requested
@@ -226,7 +241,7 @@ if uploaded:
         ids, texts, vecs = [], [], np.array([])
         st.warning("Embeddings file not found. Click (Re)create embeddings.")
 
-    # Build FAISS index if it is requested
+    # Build FAISS index if requested
     if build_index_btn:
         if not embeddings_path.exists():
             st.error("Cannot build FAISS index — embeddings file missing. Create embeddings first.")
@@ -242,8 +257,7 @@ if uploaded:
                 st.exception(e)
 
     st.markdown("---")
-    # Two tabs: Ask a Question (default) and Generate Summary
-    tab1, tab2 = st.tabs(["Ask a Question", "Generate Summary"])
+    tab1, tab2, tab3 = st.tabs(["Ask a Question", "Generate Summary", "Chat"])
 
     # -------------------
     # Tab: Ask a Question
@@ -260,9 +274,7 @@ if uploaded:
             elif not question or not question.strip():
                 st.warning("Please enter a question.")
             else:
-
                 candidate_index_path = str(index_path) if index_path.exists() else None
-
                 with st.spinner("Retrieving relevant chunks and asking Gemini..."):
                     try:
                         if st.session_state.use_api_mode:
@@ -296,10 +308,8 @@ if uploaded:
                             )
                             latency = None
 
-                        # strip any appended Key Concepts block from Q&A answers for concise display
                         display_answer = _strip_key_concepts_from_answer(ans or "")
 
-                        # Display retrieved chunks
                         st.subheader("Top retrieved chunks (expand to read)")
                         if not retrieved_chunks:
                             st.info("No chunks retrieved.")
@@ -329,7 +339,6 @@ if uploaded:
                                 st.code(prompt_used[:4000])
                             else:
                                 st.info("No prompt captured.")
-
                     except requests.HTTPError as he:
                         try:
                             err_json = he.response.json()
@@ -382,11 +391,8 @@ if uploaded:
                                 return_meta=False,
                                 llm_call=None,
                             )
-                            # out is a dict with 'summary' and 'key_concepts'
                             summary = out.get("summary", "")
                             key_concepts = out.get("key_concepts", [])
-                            # used_chunks is a list of chunk text strings (or in other modes could be dicts)
-                        # cosmetic cleaning
                         summary_display = _clean_summary_text(summary)
 
                         st.subheader("Summary")
@@ -394,7 +400,6 @@ if uploaded:
 
                         st.subheader("Key concepts / highlights")
                         if key_concepts:
-                            # variable-length set — display joined and count
                             st.write(f"{len(key_concepts)} items — " + ", ".join(key_concepts))
                         else:
                             st.info("No key concepts extracted.")
@@ -403,22 +408,17 @@ if uploaded:
                             if not used_chunks:
                                 st.info("No chunks available.")
                             else:
-                                # be resilient: each element might be a dict with id/pos/text OR a plain text string
                                 for c in used_chunks:
                                     if isinstance(c, dict):
-                                        # dict path (id/pos/text)
                                         cid = c.get("id", "<no-id>")
                                         pos = c.get("pos", "<no-pos>")
                                         txt = c.get("text", "")
                                         st.write(f"- id={cid} pos={pos}: {txt[:300]}{'...' if len(txt) > 300 else ''}")
                                     elif isinstance(c, str):
-                                        # plain string path (preview)
                                         st.write(f"- chunk text preview: {c[:300]}{'...' if len(c) > 300 else ''}")
                                     else:
-                                        # unknown type — just str()
                                         s = str(c)
                                         st.write(f"- {s[:300]}{'...' if len(s) > 300 else ''}")
-
                     except requests.HTTPError as he:
                         try:
                             detail = he.response.json().get("detail", str(he))
@@ -429,6 +429,150 @@ if uploaded:
                     except Exception as e:
                         st.error("Summary generation failed.")
                         st.exception(e)
+
+    # -----------------------
+    # Tab: Chat (conversation)
+    # -----------------------
+    with tab3:
+        st.subheader("Chat with the lecture (conversational)")
+
+        # ensure a per-document chat history in session state
+        hist_key = f"chat_history_{stem}"
+        if hist_key not in st.session_state:
+            st.session_state[hist_key] = []  # list of {"role": "user"/"assistant", "content": "...", "meta": {...}}
+
+        # Chat controls (keep above the form)
+        chat_k = st.number_input("Top-k chunks to retrieve for each turn", min_value=1, max_value=10, value=3, step=1, key="chat_k")
+        if st.button("Clear chat history"):
+            st.session_state[hist_key] = []
+            st.success("Chat history cleared for this document.")
+
+        # --- Input form comes first now ---
+        with st.form(key=f"chat_form_{stem}"):
+            user_msg = st.text_input("Message to assistant", key=f"chat_input_{stem}")
+            send_pressed = st.form_submit_button("Send")
+
+        # If the user submitted, process and update session_state before rendering the history
+        if send_pressed:
+            if len(ids) == 0:
+                st.error("Embeddings not loaded. Create embeddings first.")
+            elif not user_msg or not user_msg.strip():
+                st.warning("Please enter a message.")
+            else:
+                candidate_index_path = str(index_path) if index_path.exists() else None
+                payload_history = [{"role": h.get("role"), "content": h.get("content")} for h in st.session_state[hist_key]]
+
+                with st.spinner("Running conversational RAG..."):
+                    try:
+                        if st.session_state.use_api_mode:
+                            api_base = os.getenv("API_BASE", API_DEFAULT)
+                            token = st.session_state.api_token or ""
+                            resp = call_chat_api(
+                                question=user_msg,
+                                embeddings_path=str(embeddings_path),
+                                history=payload_history,
+                                top_k=int(chat_k),
+                                use_faiss=bool(use_faiss_search),
+                                faiss_index_path=candidate_index_path,
+                                api_base=api_base,
+                                token=token,
+                            )
+                            ans = resp.get("answer")
+                            updated_history = resp.get("history", None)
+                            retrieved = resp.get("retrieved", [])
+                            prompt_used = resp.get("prompt")
+                            provenance = resp.get("provenance")
+                        else:
+                            qa_out = rag_chat_answer(
+                                user_msg,
+                                str(embeddings_path),
+                                history=payload_history,
+                                top_k=int(chat_k),
+                                use_faiss=bool(use_faiss_search),
+                                faiss_index_path=candidate_index_path,
+                                use_safe=(True if os.environ.get("USE_SAFE_EMBEDDINGS", "1") in ("1", "true", "yes") else False),
+                                use_query_expansion=False,
+                                return_meta=True,
+                                llm_call=None,
+                            )
+                            if isinstance(qa_out, (tuple, list)):
+                                ans = qa_out[0]
+                                updated_history = qa_out[1] if len(qa_out) >= 2 else None
+                                retrieved = qa_out[2] if len(qa_out) >= 3 else []
+                                prompt_used = qa_out[3] if len(qa_out) >= 4 else None
+                                provenance = qa_out[4] if len(qa_out) >= 5 else None
+                            else:
+                                ans = str(qa_out)
+                                updated_history = None
+                                retrieved = []
+                                prompt_used = None
+                                provenance = None
+
+                        display_answer = _strip_key_concepts_from_answer(ans or "")
+
+                        if updated_history:
+                            # Convert backend history into local structure and sanitize assistant text
+                            new_hist: List[Dict[str, Any]] = []
+                            for h in updated_history:
+                                role = h.get("role", "user")
+                                content_raw = h.get("content", "") or ""
+                                if role and role.lower().startswith("assistant"):
+                                    content = _strip_key_concepts_from_answer(content_raw)
+                                else:
+                                    content = content_raw
+                                new_hist.append({"role": role, "content": content})
+                            # attach meta to last assistant turn
+                            if new_hist and new_hist[-1].get("role") and new_hist[-1]["role"].lower().startswith("assistant"):
+                                new_hist[-1]["meta"] = {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}
+                            st.session_state[hist_key] = new_hist
+                        else:
+                            # Append locally (user + assistant); assistant content already sanitized
+                            st.session_state[hist_key].append({"role": "user", "content": user_msg})
+                            st.session_state[hist_key].append(
+                                {"role": "assistant", "content": display_answer, "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}}
+                            )
+
+                        # Provide immediate feedback
+                        st.success("Assistant replied — see chat above.")
+                    except Exception as e:
+                        st.error("Conversational RAG failed.")
+                        st.exception(e)
+
+        # --- Now render the chat history (after any update above) ---
+        st.markdown("----")
+        chat_history: List[Dict[str, Any]] = st.session_state[hist_key]
+        if not chat_history:
+            st.info("No messages yet. Start by asking a question below.")
+        else:
+            for turn in chat_history:
+                role = turn.get("role", "user")
+                content = turn.get("content", "")
+                # Always present sanitized assistant content at render time as well (safety)
+                if role and role.lower().startswith("assistant"):
+                    content = _strip_key_concepts_from_answer(content or "")
+                meta = turn.get("meta", {}) or {}
+                if role == "user":
+                    st.markdown(f"**You:**  \n{content}")
+                else:
+                    st.markdown(f"**Assistant:**  \n{content}")
+                    if meta:
+                        retrieved = meta.get("retrieved", []) or []
+                        prov = meta.get("provenance")
+                        prompt_used = meta.get("prompt")
+                        if retrieved:
+                            with st.expander("Retrieved chunks (turn)"):
+                                for c in retrieved:
+                                    try:
+                                        st.write(f"- id={c.get('id')} pos={c.get('pos')} score={c.get('score'):.4f}")
+                                    except Exception:
+                                        st.write(f"- {c}")
+                        if prov and prov.get("sentences"):
+                            with st.expander("Provenance (this turn)"):
+                                for s in prov.get("sentences", []):
+                                    st.write(f"- \"{s.get('sentence')}\" → chunk={s.get('chunk_id')} (score={s.get('score'):.3f})")
+                        if prompt_used:
+                            with st.expander("Prompt used (debug)"):
+                                st.code(str(prompt_used)[:4000])
 
     st.markdown("---")
     st.subheader("Study/Quiz")
@@ -456,7 +600,6 @@ if uploaded:
                     else:
                         quiz = generate_quiz_from_context(stem, text, n=int(n_q), llm_call=None)
                         st.success(f"Quiz generated: {len(quiz.get('questions', []))} items.")
-                    # display flashcards
                     for q in quiz.get("questions", []):
                         with st.expander(f"Q: {q.get('question')[:120]}"):
                             st.write("Answer:", q.get("answer"))

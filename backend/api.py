@@ -8,19 +8,24 @@ Endpoints:
  - POST /append_index  -> append new embeddings into an existing FAISS index
  - POST /generate_quiz -> generate a quiz from provided context (writes JSON file)
  - GET  /status        -> index status (exists, n_vectors, dim, created_at, index_mtime)
+ - POST /chat          -> conversational chat mode with per-session history + RAG
 """
 from __future__ import annotations
 import time
 import logging
 import os
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
 
 from backend.logging_config import configure_logging
 
-from backend.rag_query import rag_answer_from_embeddings, rag_generate_summary_from_embeddings
+from backend.rag_query import (
+    rag_answer_from_embeddings,
+    rag_generate_summary_from_embeddings,
+    rag_chat_answer,
+)
 from backend.vectorstore.faiss_store import (
     build_faiss_index,
     append_to_index,
@@ -98,6 +103,21 @@ class GenerateQuizRequest(BaseModel):
     n: Optional[int] = 5
 
 
+class ChatRequest(BaseModel):
+    """
+    Request body for conversational chat mode.
+    history: optional list of {"role": "user" | "assistant", "content": "<text>"} entries.
+    """
+    question: str
+    embeddings_path: str
+    history: Optional[List[Dict[str, str]]] = None
+    top_k: Optional[int] = 3
+    use_faiss: Optional[bool] = False
+    faiss_index_path: Optional[str] = None
+    use_safe: Optional[bool] = None
+    use_query_expansion: Optional[bool] = False
+
+
 # Helpers
 def _default_index_path_for_embeddings(embeddings_path: str) -> str:
     # default: strip .json and append .index
@@ -155,6 +175,113 @@ def post_query(body: QueryRequest, _auth: Any = Depends(check_token)) -> Dict[st
     logger.info(
         "RAG query completed",
         extra={"latency_s": elapsed, "question_hash": hash(body.question)},
+    )
+    return resp
+
+
+@app.post("/chat")
+def post_chat(body: ChatRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
+    """
+    Conversational chat endpoint.
+
+    Accepts:
+      - question: the user's new message
+      - history: optional prior conversation (list of {"role": "user"/"assistant", "content": "..."})
+      - embeddings_path: path to embeddings JSON
+      - top_k / use_faiss / faiss_index_path etc.
+
+    Behavior:
+      - Calls backend.rag_query.rag_chat_answer(...) which is expected to
+        build a prompt using the conversation history + retrieved chunks
+        and return the assistant's reply and updated history plus metadata.
+    """
+    start = time.perf_counter()
+    try:
+        faiss_idx = body.faiss_index_path or (
+            _default_index_path_for_embeddings(body.embeddings_path) if body.use_faiss else None
+        )
+
+        # Call the RAG chat helper. Expected signature:
+        # rag_chat_answer(question, embeddings_path, history=None, top_k=3, use_faiss=False, faiss_index_path=None, use_safe=None, use_query_expansion=False, return_meta=True)
+        chat_out = rag_chat_answer(
+            body.question,
+            body.embeddings_path,
+            history=body.history,
+            top_k=body.top_k,
+            use_faiss=bool(body.use_faiss),
+            faiss_index_path=faiss_idx,
+            use_safe=body.use_safe,
+            use_query_expansion=bool(body.use_query_expansion),
+            return_meta=True,
+        )
+    except FileNotFoundError as e:
+        logger.warning("Chat failed (missing file): %s", e)
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Chat failed unexpectedly: %s", e)
+        raise HTTPException(status_code=500, detail=f"Chat failed: {e}")
+
+    elapsed = time.perf_counter() - start
+
+    # Expected return shapes (defensive handling):
+    # Preferred: (answer, updated_history, retrieved_chunks, prompt_used, provenance)
+    # Or: (answer, updated_history)
+    # Or: answer string
+    answer = None
+    updated_history = None
+    retrieved_chunks = None
+    prompt_used = None
+    provenance = None
+
+    try:
+        # If it's a tuple/list, unpack defensively
+        if isinstance(chat_out, (tuple, list)):
+            if len(chat_out) >= 1:
+                answer = chat_out[0]
+            if len(chat_out) >= 2:
+                updated_history = chat_out[1]
+            if len(chat_out) >= 3:
+                retrieved_chunks = chat_out[2]
+            if len(chat_out) >= 4:
+                prompt_used = chat_out[3]
+            if len(chat_out) >= 5:
+                provenance = chat_out[4]
+        else:
+            # single value (likely string)
+            answer = chat_out
+    except Exception as e:
+        logger.exception("Failed to parse rag_chat_answer output: %s", e)
+        raise HTTPException(status_code=500, detail=f"Unexpected chat response shape: {e}")
+
+    # If rag helper didn't return history, build one locally (append user+assistant)
+    try:
+        if updated_history is None:
+            # Start from provided history or empty, append latest turn
+            base_hist = list(body.history or [])
+            # ensure roles are set correctly
+            base_hist.append({"role": "user", "content": body.question})
+            base_hist.append({"role": "assistant", "content": answer})
+            updated_history = base_hist
+    except Exception:
+        # fallback minimal history
+        updated_history = [{"role": "user", "content": body.question}, {"role": "assistant", "content": answer}]
+
+    resp = {
+        "answer": answer,
+        "history": updated_history,
+        "retrieved": retrieved_chunks,
+        "prompt": prompt_used,
+        "provenance": provenance,
+        "latency_s": elapsed,
+    }
+
+    logger.info(
+        "Chat completed",
+        extra={
+            "latency_s": elapsed,
+            "question_hash": hash(body.question),
+            "history_len": len(updated_history) if updated_history else 0,
+        },
     )
     return resp
 

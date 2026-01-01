@@ -1,21 +1,4 @@
-"""
-RAG wrapper supporting:
- - deterministic (safe) query embeddings
- - provider-backed query embeddings (when USE_SAFE_EMBEDDINGS=0)
- - FAISS search with graceful fallback to NumPy linear search
- - lightweight query expansion (toggleable)
- - small in-process LRU caching keyed to question + embeddings mtime
- - optional metadata return: retrieved chunks (with score/id/pos/vec),
-   prompt_used, and provenance mapping sentences->chunk ids
-
-This file exposes two high-level operations to support the UI design:
-  1) rag_answer_from_embeddings(...)  -- Q&A mode (fast, uses top_k chunks only)
-  2) rag_generate_summary_from_embeddings(...) -- Summary mode (document-level)
-
-Notes:
- - The Q&A path will **not** produce a document-level summary.
- - The Summary path retrieves all chunks (or top_k if provided) and produces a summary only.
-"""
+# backend/rag_query.py
 from __future__ import annotations
 import os
 import json
@@ -28,11 +11,12 @@ from typing import Tuple, List, Optional, Callable, Any, Dict
 import numpy as np
 from dotenv import load_dotenv
 
-from backend.summarize_file import summarize_with_gemini
+# Use the generator helper and summarizer
+from backend.summarize_file import summarize_with_gemini, generate_with_gemini
 from backend.create_embeddings import load_embeddings  # returns ids, texts, vecs
 from backend.embeddings_provider import get_embedding_provider, deterministic_vector
 
-# faiss helpers
+# faiss helpers (optional)
 try:
     from backend.vectorstore.faiss_store import load_faiss_index, search_faiss
     _faiss_available = True
@@ -163,8 +147,7 @@ def _embed_texts_for_provenance(texts: List[str], use_safe: bool, dim: Optional[
     arr = arr / norms
     return [arr[i] for i in range(arr.shape[0])]
 
-# Utility to strip a trailing "Key Concepts" block from model answers in QA mode.
-# We preserve the main answer and optionally capture the key concepts text (not used in UI by default).
+# Utility to strip a trailing "Key Concepts" block from model answers in QA/chat mode.
 _KEY_CONCEPTS_PATTERNS = [
     r"\n+\d+\s*Key Concepts\s*:\s*",   # "5 Key Concepts:"
     r"\n+Key Concepts\s*:\s*",
@@ -180,11 +163,8 @@ def _separate_key_concepts_block(answer: str) -> Tuple[str, Optional[str]]:
     """
     if not isinstance(answer, str):
         return str(answer), None
-    # search for any of the patterns (case-insensitive by lowercasing search)
-    # simpler approach: find first occurrence of a line that starts with "Key Concepts" (case-insensitive)
     m = re.search(r"\n+(?:\d+\s*)?Key\s+Concepts?\b", answer, flags=re.IGNORECASE)
     if not m:
-        # also try "Key concepts / highlights" variations
         m2 = re.search(r"\n+Key\s+concepts\b", answer, flags=re.IGNORECASE)
         if m2:
             idx = m2.start()
@@ -330,7 +310,7 @@ def rag_answer_from_embeddings(
 
     # LLM call
     if llm_call is None:
-        answer = summarize_with_gemini(prompt)
+        answer = generate_with_gemini(prompt)
     else:
         answer = llm_call(prompt)
         if isinstance(answer, dict):
@@ -339,16 +319,11 @@ def rag_answer_from_embeddings(
     if not isinstance(answer, str):
         answer = str(answer)
 
-    # Strip trailing "Key Concepts" block if present (so the Q&A UI stays concise)
+    # Strip trailing "Key Concepts" block if present
     try:
         answer_main, key_block = _separate_key_concepts_block(answer)
-        # For Q&A mode we deliberately return the concise answer (without appended key concepts block).
-        # If return_meta is True we still produce provenance; key_block isn't returned separately by the API,
-        # but could be attached to provenance if desired.
         answer = answer_main
         if key_block:
-            # attach to provenance for debugging/inspection if return_meta requested
-            # provenance will be populated later; temporarily stash it in a local var
             extra_key_block = key_block
         else:
             extra_key_block = None
@@ -388,7 +363,6 @@ def rag_answer_from_embeddings(
     except Exception as e:
         logger.debug("Provenance mapping failed: %s", e)
 
-    # Attach any extracted key_block for inspection
     if extra_key_block:
         provenance["extracted_key_block"] = extra_key_block
 
@@ -399,6 +373,211 @@ def rag_answer_from_embeddings(
 
     # else return rich tuple
     return answer, retrieved_chunks, prompt, provenance
+
+# ----------------------
+# Chat (conversational)
+# ----------------------
+def rag_chat_answer(
+    question: str,
+    embeddings_path: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    top_k: int = 3,
+    use_faiss: bool = False,
+    faiss_index_path: Optional[str] = None,
+    use_safe: Optional[bool] = None,
+    use_query_expansion: bool = False,
+    return_meta: bool = True,
+    llm_call: Optional[Callable[[str], str]] = None,
+    embed_call: Optional[Callable[[List[str], Optional[int]], List[List[float]]]] = None,
+) -> Tuple[Any, Any, Any, Any, Any]:
+    """
+    Conversational RAG helper.
+
+    Returns (answer_str, updated_history, retrieved_chunks, prompt_used, provenance)
+    - updated_history is the history list with the new user + assistant turns appended (list of {"role","content"})
+    - retrieved_chunks is as in Q&A
+    - prompt_used is the prompt sent to the LLM
+    - provenance maps sentences -> chunk ids
+    """
+    if history is None:
+        history = []
+
+    # Build a conversational context string from history (keep last N turns to avoid huge prompts)
+    MAX_TURNS = int(os.getenv("CHAT_MAX_TURNS", "6"))
+    trimmed = history[-MAX_TURNS:] if len(history) > MAX_TURNS else history[:]
+    convo_parts = []
+    for h in trimmed:
+        role = h.get("role", "user").lower()
+        content = h.get("content", "") or ""
+        if role.startswith("assistant"):
+            convo_parts.append(f"Assistant: {content}")
+        else:
+            convo_parts.append(f"User: {content}")
+    convo_text = "\n".join(convo_parts)
+
+    # Build an effective query for retrieval: combine last user message and maybe preceding assistant content
+    retrieval_query = question
+    if convo_text:
+        # include a short summary of recent turns in the retrieval query to bias retrieval
+        retrieval_query = (convo_text + "\n\nLatest question: " + question)[:4000]
+
+    # --- Retrieval (same approach as rag_answer_from_embeddings, but local here) ---
+    # infer dim if possible
+    dim = None
+    try:
+        if os.path.exists(embeddings_path):
+            with open(embeddings_path, "r", encoding="utf-8") as f:
+                rows = json.load(f)
+            if rows and isinstance(rows, list) and "embedding" in rows[0]:
+                dim = len(rows[0]["embedding"])
+    except Exception:
+        logger.debug("Could not infer dimension from embeddings file; letting provider decide")
+
+    # optionally expand query
+    if use_query_expansion:
+        expansions = _simple_query_expand(retrieval_query, use_safe=(use_safe if use_safe is not None else (os.getenv("USE_SAFE_EMBEDDINGS","1").lower() in ("1","true","yes"))), llm_call=llm_call)
+        if expansions:
+            retrieval_query = retrieval_query + " " + " ".join(expansions)
+
+    qvec = _embed_query(retrieval_query, use_safe=use_safe, dim=dim, embed_call=embed_call)
+
+    # Attempt FAISS
+    retrieved_chunks: List[Dict[str, Any]] = []
+    used_faiss = False
+    if use_faiss and _faiss_available:
+        try:
+            idx_path = faiss_index_path or (os.path.splitext(embeddings_path)[0] + ".index")
+            index, metas = load_faiss_index(idx_path)
+            results = search_faiss(index, metas, qvec, k=top_k)
+            if results:
+                for score, meta, pos in results:
+                    retrieved_chunks.append({
+                        "score": float(score),
+                        "id": meta.get("id") or pos,
+                        "text": meta.get("text") or "",
+                        "pos": int(pos),
+                        "vec": None
+                    })
+                used_faiss = True
+            else:
+                logger.info("FAISS returned no results; will fallback to numpy")
+        except Exception as e:
+            logger.warning("FAISS search failed; falling back to numpy. Error: %s", e)
+
+    # Fallback to numpy
+    if not used_faiss:
+        if not os.path.exists(embeddings_path):
+            raise FileNotFoundError(f"Embeddings file not found: {embeddings_path}")
+        ids, texts, vecs = load_embeddings(embeddings_path)
+        if len(ids) == 0:
+            raise RuntimeError("Embeddings file contained no rows")
+        idxs, sims = _top_k_similar_numpy(qvec, vecs, k=top_k)
+        for i, sim in zip(idxs, sims):
+            retrieved_chunks.append({
+                "score": float(sim),
+                "id": ids[i] if i < len(ids) else i,
+                "text": texts[i] if i < len(texts) else "",
+                "pos": int(i),
+                "vec": vecs[i].tolist() if hasattr(vecs[i], "tolist") else list(vecs[i])
+            })
+    else:
+        # populate vec if we used FAISS
+        try:
+            ids, texts, vecs = load_embeddings(embeddings_path)
+            for ch in retrieved_chunks:
+                pos = int(ch.get("pos"))
+                if 0 <= pos < len(vecs):
+                    ch["vec"] = np.array(vecs[pos], dtype=np.float32).tolist()
+                else:
+                    ch["vec"] = None
+        except Exception:
+            logger.debug("Could not load embeddings file to populate vectors for provenance")
+
+    # Build prompt: include trimmed conversation, retrieved chunks, and new question.
+    context_parts = []
+    for ch in retrieved_chunks:
+        context_parts.append(f"[chunk:pos={ch.get('pos')} id={ch.get('id')} score={ch.get('score'):.4f}]\n{ch.get('text')}")
+    prompt_context = "\n\n".join(context_parts)
+
+    # Compose multi-part conversational prompt
+    prompt_lines = []
+    prompt_lines.append("You are an assistant answering questions about the document. Use ONLY the provided context when answering and cite sources by chunk id like [chunk:id].")
+    if convo_text:
+        prompt_lines.append("\nConversation history (most recent first):\n" + convo_text)
+    if prompt_context:
+        prompt_lines.append("\nContext (retrieved chunks):\n" + prompt_context)
+    prompt_lines.append(f"\nCurrent question:\n{question}\n\nAnswer succinctly (do not append a separate 'Key Concepts' list).")
+    prompt = "\n\n".join(prompt_lines)
+
+    # LLM call
+    if llm_call is None:
+        answer = generate_with_gemini(prompt)
+    else:
+        answer = llm_call(prompt)
+        if isinstance(answer, dict):
+            answer = answer.get("answer") or json.dumps(answer)
+
+    if not isinstance(answer, str):
+        answer = str(answer)
+
+    # Remove trailing key-concepts block if model still produced it
+    try:
+        answer_main, key_block = _separate_key_concepts_block(answer)
+        answer = answer_main
+        if key_block:
+            extra_key_block = key_block
+        else:
+            extra_key_block = None
+    except Exception:
+        extra_key_block = None
+
+    # Build updated_history: append user turn + assistant turn
+    updated_history = [h.copy() for h in history]  # shallow copy
+    updated_history.append({"role": "user", "content": question})
+    updated_history.append({"role": "assistant", "content": answer})
+
+    # Provenance mapping (same approach as rag_answer_from_embeddings)
+    provenance = {"sentences": [], "by_chunk": {}}
+    try:
+        sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', answer) if s.strip()][:8]
+        if sents:
+            dim = None
+            try:
+                if os.path.exists(embeddings_path):
+                    with open(embeddings_path, "r", encoding="utf-8") as f:
+                        rows = json.load(f)
+                    if rows and isinstance(rows, list) and "embedding" in rows[0]:
+                        dim = len(rows[0]["embedding"])
+            except Exception:
+                pass
+            sent_vecs = _embed_texts_for_provenance(sents, use_safe=(use_safe if use_safe is not None else (os.getenv("USE_SAFE_EMBEDDINGS","1").lower() in ("1","true","yes"))), dim=dim, embed_call=embed_call)
+            for si, s in enumerate(sents):
+                best_score = -1.0
+                best_chunk_id = None
+                best_pos = None
+                for ch in retrieved_chunks:
+                    if ch.get("vec") is None:
+                        continue
+                    cvec = np.array(ch.get("vec"), dtype=np.float32)
+                    sc = float(np.dot(sent_vecs[si], cvec) / (np.linalg.norm(cvec) + 1e-12))
+                    if sc > best_score:
+                        best_score = sc
+                        best_chunk_id = ch.get("id")
+                        best_pos = ch.get("pos")
+                provenance["sentences"].append({"sentence": s, "chunk_id": best_chunk_id, "pos": best_pos, "score": float(best_score)})
+                provenance["by_chunk"].setdefault(best_chunk_id, []).append(si)
+    except Exception as e:
+        logger.debug("Provenance mapping failed in chat: %s", e)
+
+    if extra_key_block:
+        provenance["extracted_key_block"] = extra_key_block
+
+    # Return according to return_meta
+    if not return_meta:
+        # Return minimal: answer and updated_history
+        return answer, updated_history
+
+    return answer, updated_history, retrieved_chunks, prompt, provenance
 
 # ----------------------
 # Summary (document-level)
@@ -452,9 +631,9 @@ def rag_generate_summary_from_embeddings(
 
     prompt = f"{instruct}\n\nContext:\n{prompt_context}\n\nSummary:"
 
-    # LLM call
+    # LLM call (summary helper intentionally uses the summarizer that asks for key concepts)
     if llm_call is None:
-        summary = summarize_with_gemini(prompt)
+        summary = summarize_with_gemini(prompt_context if False else prompt)
     else:
         summary = llm_call(prompt)
         if isinstance(summary, dict):
