@@ -183,6 +183,57 @@ def _clean_summary_text(summary: str) -> str:
 
 
 # ----------------------------
+# Chat-history trimming helper
+# ----------------------------
+# CHANGE: added a helper to silently trim chat history to a max number of turns (pairs)
+MAX_CHAT_TURNS = 6  # maximum number of user+assistant pairs to retain (silent)
+
+def _trim_history_to_max_turns(history: List[Dict[str, Any]], max_turns: int = MAX_CHAT_TURNS) -> List[Dict[str, Any]]:
+    """
+    Trim the provided history to the last `max_turns` user+assistant pairs.
+    This function is robust to imperfect alternation: it groups messages into pairs where possible,
+    then returns the last max_turns pairs flattened back into a list of messages in original order.
+    """
+    if not history:
+        return history
+
+    pairs: List[List[Dict[str, Any]]] = []
+    i = 0
+    n = len(history)
+    while i < n:
+        role = (history[i].get("role") or "").lower()
+        if role.startswith("user"):
+            user_msg = history[i]
+            # look ahead for next assistant
+            if i + 1 < n and (history[i + 1].get("role") or "").lower().startswith("assistant"):
+                assistant_msg = history[i + 1]
+                pairs.append([user_msg, assistant_msg])
+                i += 2
+            else:
+                # incomplete pair (user only)
+                pairs.append([user_msg])
+                i += 1
+        elif role.startswith("assistant"):
+            # assistant without preceding user
+            pairs.append([history[i]])
+            i += 1
+        else:
+            # unknown role - keep as single
+            pairs.append([history[i]])
+            i += 1
+
+    # keep only the last max_turns pairs
+    if len(pairs) <= max_turns:
+        # nothing to trim
+        flattened = [m for p in pairs for m in p]
+        return flattened
+
+    kept_pairs = pairs[-max_turns:]
+    flattened = [m for p in kept_pairs for m in p]
+    return flattened
+
+
+# ----------------------------
 # Upload + controls
 # ----------------------------
 uploaded = st.file_uploader("Upload a lecture PDF", type=["pdf"])
@@ -443,7 +494,9 @@ if uploaded:
 
         # Chat controls (keep above the form)
         chat_k = st.number_input("Top-k chunks to retrieve for each turn", min_value=1, max_value=10, value=3, step=1, key="chat_k")
-        if st.button("Clear chat history"):
+        # CHANGE: renamed button label to "Clear chat" per UX request
+        if st.button("Clear chat"):
+            # Reset only this document's chat history (does not affect other tabs)
             st.session_state[hist_key] = []
             st.success("Chat history cleared for this document.")
 
@@ -524,13 +577,16 @@ if uploaded:
                             # attach meta to last assistant turn
                             if new_hist and new_hist[-1].get("role") and new_hist[-1]["role"].lower().startswith("assistant"):
                                 new_hist[-1]["meta"] = {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}
-                            st.session_state[hist_key] = new_hist
+                            # CHANGE: enforce silent max history trimming immediately after updating history
+                            st.session_state[hist_key] = _trim_history_to_max_turns(new_hist, max_turns=MAX_CHAT_TURNS)
                         else:
                             # Append locally (user + assistant); assistant content already sanitized
                             st.session_state[hist_key].append({"role": "user", "content": user_msg})
                             st.session_state[hist_key].append(
                                 {"role": "assistant", "content": display_answer, "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}}
                             )
+                            # CHANGE: enforce silent max history trimming immediately after appending new messages
+                            st.session_state[hist_key] = _trim_history_to_max_turns(st.session_state[hist_key], max_turns=MAX_CHAT_TURNS)
 
                         # Provide immediate feedback
                         st.success("Assistant replied — see chat above.")
