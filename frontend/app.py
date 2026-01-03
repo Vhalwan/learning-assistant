@@ -1,51 +1,48 @@
+# frontend/app.py
 import os
 import sys
 import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pdfplumber
 import numpy as np
 from dotenv import load_dotenv
 import requests
+import json
+import html as html_mod
+import uuid
 
 load_dotenv()
-
 
 # Backend helpers
 from backend.summarize_file import summarize_with_gemini
 from backend.create_embeddings import (
-    create_embeddings_for_text,
-    load_embeddings,
-    EMBED_DIM,
+    create_embeddings_for_text, load_embeddings, EMBED_DIM,
 )
 from backend.embeddings_provider import deterministic_vector, get_embedding_provider
 from backend.rag_query import (
-    rag_answer_from_embeddings,
-    rag_generate_summary_from_embeddings,
-    rag_chat_answer,
+    rag_answer_from_embeddings, rag_generate_summary_from_embeddings, rag_chat_answer,
 )
-
 # generate quiz + SRS
-from backend.generate_quiz import generate_quiz_from_context
+from backend.generate_quiz import generate_quiz_from_context, generate_mcq_from_context
 from backend.study_srs import SRSManager
+
 
 # faiss builder
 try:
     from backend.vectorstore.faiss_store import build_faiss_index
-
     _faiss_builder_available = True
 except Exception:
     _faiss_builder_available = False
 
 st.set_page_config(page_title="Learning Assistant", layout="centered")
 st.title("Learning Assistant — Gemini Demo")
-
 st.markdown(
     """
 Upload a lecture PDF. Controls:
@@ -65,7 +62,6 @@ Three primary modes:
 # API mode toggle + token UI
 # ----------------------------
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
-
 if "use_api_mode" not in st.session_state:
     st.session_state.use_api_mode = False
 
@@ -79,9 +75,7 @@ with col_api:
     st.session_state.use_api_mode = st.checkbox("Use API mode", value=st.session_state.use_api_mode)
 with col_token:
     st.session_state.api_token = st.text_input(
-        "API Token (override)",
-        value=st.session_state.api_token,
-        type="password",
+        "API Token (override)", value=st.session_state.api_token, type="password",
         help="Reads default from environment; typing here overrides for this session",
     )
 
@@ -159,10 +153,7 @@ def call_chat_api(
 
 # presentation helpers
 def _strip_key_concepts_from_answer(answer: str) -> str:
-    """
-    Remove any trailing 'Key Concepts' style block from an LLM answer for the Q&A / Chat UI.
-    Keeps the main answer concise.
-    """
+    """ Remove any trailing 'Key Concepts' style block from an LLM answer for the Q&A / Chat UI. Keeps the main answer concise. """
     if not isinstance(answer, str):
         return str(answer)
     m = re.search(r"\n+(?:\d+\s*)?Key\s+Concepts?\b", answer, flags=re.IGNORECASE)
@@ -188,15 +179,11 @@ def _clean_summary_text(summary: str) -> str:
 # CHANGE: added a helper to silently trim chat history to a max number of turns (pairs)
 MAX_CHAT_TURNS = 6  # maximum number of user+assistant pairs to retain (silent)
 
+
 def _trim_history_to_max_turns(history: List[Dict[str, Any]], max_turns: int = MAX_CHAT_TURNS) -> List[Dict[str, Any]]:
-    """
-    Trim the provided history to the last `max_turns` user+assistant pairs.
-    This function is robust to imperfect alternation: it groups messages into pairs where possible,
-    then returns the last max_turns pairs flattened back into a list of messages in original order.
-    """
+    """ Trim the provided history to the last max_turns user+assistant pairs. This function is robust to imperfect alternation: it groups messages into pairs where possible, then returns the last max_turns pairs flattened back into a list of messages in original order. """
     if not history:
         return history
-
     pairs: List[List[Dict[str, Any]]] = []
     i = 0
     n = len(history)
@@ -221,13 +208,11 @@ def _trim_history_to_max_turns(history: List[Dict[str, Any]], max_turns: int = M
             # unknown role - keep as single
             pairs.append([history[i]])
             i += 1
-
     # keep only the last max_turns pairs
     if len(pairs) <= max_turns:
         # nothing to trim
         flattened = [m for p in pairs for m in p]
         return flattened
-
     kept_pairs = pairs[-max_turns:]
     flattened = [m for p in kept_pairs for m in p]
     return flattened
@@ -238,7 +223,6 @@ def _trim_history_to_max_turns(history: List[Dict[str, Any]], max_turns: int = M
 # ----------------------------
 uploaded = st.file_uploader("Upload a lecture PDF", type=["pdf"])
 if uploaded:
-
     # Save uploaded file
     tmp_pdf = Path("data/raw") / uploaded.name
     tmp_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -261,15 +245,16 @@ if uploaded:
     col1, col2, col3 = st.columns(3)
     with col1:
         use_safe_toggle = st.checkbox(
-            "Use SAFE embeddings (deterministic)",
+            "Use SAFE embeddings (filter sensitive or risky outputs)",
             value=os.getenv("USE_SAFE_EMBEDDINGS", "1").lower() in ("1", "true", "yes"),
         )
     with col2:
-        recreate_btn = st.button("(Re)create embeddings")
+        recreate_btn = st.button("Recreate embeddings")
     with col3:
         build_index_btn = st.button("Build FAISS index")
+    use_faiss_search = st.checkbox("Use FAISS for retrieval (faster retrieval for large documents)",
+                                   value=False)
 
-    use_faiss_search = st.checkbox("Use FAISS for retrieval (if available)", value=False)
     os.environ["USE_SAFE_EMBEDDINGS"] = "1" if use_safe_toggle else "0"
 
     # Create embeddings when missing or when they are requested
@@ -277,7 +262,7 @@ if uploaded:
         try:
             with st.spinner("Creating embeddings..."):
                 rows = create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
-            st.success(f"Embeddings created: {embeddings_path} ({len(rows)} chunks)")
+                st.success(f"Embeddings created: {embeddings_path} ({len(rows)} chunks)")
         except Exception as e:
             st.error("Failed to create embeddings.")
             st.exception(e)
@@ -302,7 +287,7 @@ if uploaded:
             try:
                 with st.spinner("Building FAISS index..."):
                     build_faiss_index(str(embeddings_path), str(index_path))
-                st.success(f"FAISS index built: {index_path}")
+                    st.success(f"FAISS index built: {index_path}")
             except Exception as e:
                 st.error("FAISS index build failed.")
                 st.exception(e)
@@ -315,10 +300,8 @@ if uploaded:
     # -------------------
     with tab1:
         st.subheader("Ask a question (Retrieval-Augmented)")
-
         question = st.text_input("Your question (based on uploaded lecture)", key="qa_question")
         k = st.number_input("Top-k chunks to retrieve", min_value=1, max_value=10, value=3, step=1, key="qa_k")
-
         if st.button("Ask (RAG)"):
             if len(ids) == 0:
                 st.error("Embeddings not loaded. Create embeddings first.")
@@ -347,20 +330,13 @@ if uploaded:
                             latency = resp.get("latency_s", None)
                         else:
                             ans, retrieved_chunks, prompt_used, provenance = rag_answer_from_embeddings(
-                                question,
-                                str(embeddings_path),
-                                top_k=int(k),
-                                use_faiss=bool(use_faiss_search),
+                                question, str(embeddings_path), top_k=int(k), use_faiss=bool(use_faiss_search),
                                 faiss_index_path=candidate_index_path,
                                 use_safe=(True if os.environ.get("USE_SAFE_EMBEDDINGS", "1") in ("1", "true", "yes") else False),
-                                use_query_expansion=False,
-                                return_meta=True,
-                                llm_call=None,
+                                use_query_expansion=False, return_meta=True, llm_call=None,
                             )
                             latency = None
-
                         display_answer = _strip_key_concepts_from_answer(ans or "")
-
                         st.subheader("Top retrieved chunks (expand to read)")
                         if not retrieved_chunks:
                             st.info("No chunks retrieved.")
@@ -371,20 +347,16 @@ if uploaded:
                                 pos = chunk.get("pos")
                                 with st.expander(f"{i}. chunk (id={cid} pos={pos} score={score:.4f})"):
                                     st.write(chunk.get("text", "")[:2000] + ("..." if len(chunk.get("text", "")) > 2000 else ""))
-
                         st.subheader("Answer")
                         st.write(display_answer or "")
-
                         if latency is not None:
                             st.caption(f"Latency: {latency:.3f}s")
-
                         st.subheader("Provenance (sentence -> chunk)")
                         if provenance and provenance.get("sentences"):
                             for s in provenance.get("sentences", []):
-                                st.write(f"- \"{s['sentence']}\"  → chunk_id={s.get('chunk_id')} (score={s.get('score'):.3f})")
+                                st.write(f"- \"{s['sentence']}\" → chunk_id={s.get('chunk_id')} (score={s.get('score'):.3f})")
                         else:
                             st.info("No provenance available.")
-
                         with st.expander("Prompt used (debug)"):
                             if prompt_used:
                                 st.code(prompt_used[:4000])
@@ -410,7 +382,6 @@ if uploaded:
     # -----------------------
     with tab2:
         st.subheader("Generate document-level summary (explicit)")
-
         summary_type = st.selectbox("Summary detail level", ["brief", "detailed"], index=0)
         summary_top_k = st.number_input("Limit to first N chunks (leave blank / 0 to use all)", min_value=0, max_value=10000, value=0, step=1)
         if st.button("Generate Summary"):
@@ -439,22 +410,18 @@ if uploaded:
                                 summary_type=summary_type,
                                 top_k=(int(summary_top_k) if summary_top_k > 0 else None),
                                 use_safe=(True if os.environ.get("USE_SAFE_EMBEDDINGS", "1") in ("1", "true", "yes") else False),
-                                return_meta=False,
-                                llm_call=None,
+                                return_meta=False, llm_call=None,
                             )
                             summary = out.get("summary", "")
                             key_concepts = out.get("key_concepts", [])
                         summary_display = _clean_summary_text(summary)
-
                         st.subheader("Summary")
                         st.write(summary_display or "")
-
                         st.subheader("Key concepts / highlights")
                         if key_concepts:
                             st.write(f"{len(key_concepts)} items — " + ", ".join(key_concepts))
                         else:
                             st.info("No key concepts extracted.")
-
                         with st.expander("Show used chunks (preview)"):
                             if not used_chunks:
                                 st.info("No chunks available.")
@@ -494,6 +461,7 @@ if uploaded:
 
         # Chat controls (keep above the form)
         chat_k = st.number_input("Top-k chunks to retrieve for each turn", min_value=1, max_value=10, value=3, step=1, key="chat_k")
+
         # CHANGE: renamed button label to "Clear chat" per UX request
         if st.button("Clear chat"):
             # Reset only this document's chat history (does not affect other tabs)
@@ -514,7 +482,6 @@ if uploaded:
             else:
                 candidate_index_path = str(index_path) if index_path.exists() else None
                 payload_history = [{"role": h.get("role"), "content": h.get("content")} for h in st.session_state[hist_key]]
-
                 with st.spinner("Running conversational RAG..."):
                     try:
                         if st.session_state.use_api_mode:
@@ -537,16 +504,10 @@ if uploaded:
                             provenance = resp.get("provenance")
                         else:
                             qa_out = rag_chat_answer(
-                                user_msg,
-                                str(embeddings_path),
-                                history=payload_history,
-                                top_k=int(chat_k),
-                                use_faiss=bool(use_faiss_search),
-                                faiss_index_path=candidate_index_path,
+                                user_msg, str(embeddings_path), history=payload_history, top_k=int(chat_k),
+                                use_faiss=bool(use_faiss_search), faiss_index_path=candidate_index_path,
                                 use_safe=(True if os.environ.get("USE_SAFE_EMBEDDINGS", "1") in ("1", "true", "yes") else False),
-                                use_query_expansion=False,
-                                return_meta=True,
-                                llm_call=None,
+                                use_query_expansion=False, return_meta=True, llm_call=None,
                             )
                             if isinstance(qa_out, (tuple, list)):
                                 ans = qa_out[0]
@@ -563,6 +524,7 @@ if uploaded:
 
                         display_answer = _strip_key_concepts_from_answer(ans or "")
 
+                        # --------- Replace existing "if updated_history: ... else: ..." block with this (no timestamps) ---------
                         if updated_history:
                             # Convert backend history into local structure and sanitize assistant text
                             new_hist: List[Dict[str, Any]] = []
@@ -574,22 +536,24 @@ if uploaded:
                                 else:
                                     content = content_raw
                                 new_hist.append({"role": role, "content": content})
-                            # attach meta to last assistant turn
+                            # attach meta to last assistant turn if present
                             if new_hist and new_hist[-1].get("role") and new_hist[-1]["role"].lower().startswith("assistant"):
                                 new_hist[-1]["meta"] = {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}
-                            # CHANGE: enforce silent max history trimming immediately after updating history
+                            # enforce silent max history trimming immediately after updating history
                             st.session_state[hist_key] = _trim_history_to_max_turns(new_hist, max_turns=MAX_CHAT_TURNS)
                         else:
-                            # Append locally (user + assistant); assistant content already sanitized
+                            # Append locally (user + assistant); no timestamp stored
                             st.session_state[hist_key].append({"role": "user", "content": user_msg})
                             st.session_state[hist_key].append(
                                 {"role": "assistant", "content": display_answer, "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}}
                             )
-                            # CHANGE: enforce silent max history trimming immediately after appending new messages
+                            # enforce silent max history trimming immediately after appending new messages
                             st.session_state[hist_key] = _trim_history_to_max_turns(st.session_state[hist_key], max_turns=MAX_CHAT_TURNS)
+                        # ----------------------------------------------------------------------------------------
 
                         # Provide immediate feedback
                         st.success("Assistant replied — see chat above.")
+
                     except Exception as e:
                         st.error("Conversational RAG failed.")
                         st.exception(e)
@@ -600,70 +564,128 @@ if uploaded:
         if not chat_history:
             st.info("No messages yet. Start by asking a question below.")
         else:
-            for turn in chat_history:
+            for idx, turn in enumerate(chat_history):
                 role = turn.get("role", "user")
                 content = turn.get("content", "")
                 # Always present sanitized assistant content at render time as well (safety)
                 if role and role.lower().startswith("assistant"):
                     content = _strip_key_concepts_from_answer(content or "")
                 meta = turn.get("meta", {}) or {}
+
+                # Render user messages (no timestamp)
                 if role == "user":
-                    st.markdown(f"**You:**  \n{content}")
+                    st.markdown(f"**You:**\n\n{content}", unsafe_allow_html=True)
                 else:
-                    st.markdown(f"**Assistant:**  \n{content}")
-                    if meta:
-                        retrieved = meta.get("retrieved", []) or []
-                        prov = meta.get("provenance")
-                        prompt_used = meta.get("prompt")
-                        if retrieved:
-                            with st.expander("Retrieved chunks (turn)"):
-                                for c in retrieved:
-                                    try:
-                                        st.write(f"- id={c.get('id')} pos={c.get('pos')} score={c.get('score'):.4f}")
-                                    except Exception:
-                                        st.write(f"- {c}")
-                        if prov and prov.get("sentences"):
-                            with st.expander("Provenance (this turn)"):
-                                for s in prov.get("sentences", []):
-                                    st.write(f"- \"{s.get('sentence')}\" → chunk={s.get('chunk_id')} (score={s.get('score'):.3f})")
-                        if prompt_used:
-                            with st.expander("Prompt used (debug)"):
-                                st.code(str(prompt_used)[:4000])
+                    # Render assistant messages as a small HTML "bubble" with a copy-to-clipboard button.
+                    # Use unique IDs to avoid collisions during re-runs.
+                    uid = str(uuid.uuid4()).replace("-", "")[:12]
+                    escaped_content_html = html_mod.escape(content).replace("\n", "<br>")
+                    js_text = json.dumps(content)  # safely quoted JS string literal
+                    # compute approximate height for the component
+                    lines = max(1, content.count("\n") + 1)
+                    height_px = min(650, max(110, 22 * lines + 80))
+
+                    assistant_html = f"""
+<div style="border-radius:10px;padding:10px;margin:8px 0;max-width:90%;background:#f7fafc;border:1px solid #e6eef5;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+    <strong>Assistant</strong>
+  </div>
+  <div style="white-space:pre-wrap;font-family:inherit;font-size:14px;line-height:1.4;">{escaped_content_html}</div>
+  <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+    <button id="copy_{uid}" style="border:none;padding:6px 10px;border-radius:8px;cursor:pointer;background:#eef2f7;font-size:13px;">
+      Copy
+    </button>
+  </div>
+</div>
+
+<script>
+const btn = document.getElementById("copy_{uid}");
+if (btn) {{
+    btn.addEventListener("click", function() {{
+        navigator.clipboard.writeText({js_text}).then(function() {{
+            const old = btn.innerText;
+            btn.innerText = 'Copied';
+            setTimeout(() => {{ btn.innerText = old; }}, 1200);
+        }});
+    }});
+}}
+</script>
+"""
+                    components.html(assistant_html, height=height_px, scrolling=True)
+
+                # show metadata expanders after the message render
+                if meta:
+                    retrieved = meta.get("retrieved", []) or []
+                    prov = meta.get("provenance")
+                    prompt_used = meta.get("prompt")
+                    if retrieved:
+                        with st.expander("Retrieved chunks (turn)"):
+                            for c in retrieved:
+                                try:
+                                    st.write(f"- id={c.get('id')} pos={c.get('pos')} score={c.get('score'):.4f}")
+                                except Exception:
+                                    st.write(f"- {c}")
+                    if prov and prov.get("sentences"):
+                        with st.expander("Provenance (this turn)"):
+                            for s in prov.get("sentences", []):
+                                st.write(f"- \"{s.get('sentence')}\" → chunk={s.get('chunk_id')} (score={s.get('score'):.3f})")
+                    if prompt_used:
+                        with st.expander("Prompt used (debug)"):
+                            st.code(str(prompt_used)[:4000])
 
     st.markdown("---")
-    st.subheader("Study/Quiz")
+    st.subheader("Study / Quiz (MCQ v1)")
+
+    # session_state key for storing generated quiz for this document
+    quiz_state_key = f"quiz_items_{stem}"
+    # number input (keeps same behavior)
     n_q = st.number_input("Number of quiz items", min_value=1, max_value=20, value=5)
-    if st.button("Generate Quiz from lecture"):
+
+    # Generate button - give it a stable key per document to avoid collisions
+    gen_key = f"gen_quiz_{stem}"
+    if st.button("Generate Quiz from lecture", key=gen_key):
         if not text:
             st.warning("No document text extracted.")
         else:
             with st.spinner("Generating quiz..."):
                 try:
+                    # produce quiz_items either via API or local generator
                     if st.session_state.use_api_mode:
                         api_base = os.getenv("API_BASE", API_DEFAULT)
                         token = st.session_state.api_token or ""
                         url = f"{api_base.rstrip('/')}/generate_quiz"
-                        payload = {"stem": stem, "context_text": text, "n": int(n_q)}
+                        payload = {"stem": stem, "context_text": text, "n": int(n_q), "type": "mcq"}
                         headers = {}
                         if token:
                             headers["Authorization"] = f"Bearer {token}"
                         resp = requests.post(url, json=payload, headers=headers, timeout=60)
                         resp.raise_for_status()
                         out = resp.json()
-                        quiz = out.get("quiz", {})
-                        out_path = out.get("out_path")
-                        st.success(f"Quiz generated: {len(quiz.get('questions', []))} items. (wrote: {out_path})")
+                        quiz_items = out.get("quiz", []) or []
+                        # ensure ids are stable/prefixed
+                        for itm in quiz_items:
+                            if "id" in itm and not str(itm["id"]).startswith(f"{stem}_"):
+                                itm["id"] = f"{stem}_{itm['id']}"
+                        latency = out.get("latency_s")
+                        if latency:
+                            st.success(f"Quiz generated: {len(quiz_items)} items. (latency: {latency:.3f}s)")
+                        else:
+                            st.success(f"Quiz generated: {len(quiz_items)} items.")
                     else:
-                        quiz = generate_quiz_from_context(stem, text, n=int(n_q), llm_call=None)
-                        st.success(f"Quiz generated: {len(quiz.get('questions', []))} items.")
-                    for q in quiz.get("questions", []):
-                        with st.expander(f"Q: {q.get('question')[:120]}"):
-                            st.write("Answer:", q.get("answer"))
-                            st.write("ID:", q.get("id"))
-                            if st.button(f"Start SRS for {q.get('id')}", key=f"srs_{q.get('id')}"):
-                                mgr = SRSManager()
-                                mgr.ensure_card(q.get("id"))
-                                st.info(f"Registered card {q.get('id')} in SRS.")
+                        quiz_items = generate_mcq_from_context(text, n=int(n_q))
+                        # prefix IDs to match expected pattern and ensure uniqueness
+                        for idx, itm in enumerate(quiz_items, start=1):
+                            if "id" in itm:
+                                # prefer existing id but ensure prefix
+                                if not str(itm["id"]).startswith(f"{stem}_"):
+                                    itm["id"] = f"{stem}_{itm['id']}"
+                            else:
+                                itm["id"] = f"{stem}_q{idx}"
+                        st.success(f"Quiz generated: {len(quiz_items)} items (local).")
+
+                    # store generated quiz in session_state so it persists across reruns
+                    st.session_state[quiz_state_key] = quiz_items
+
                 except requests.HTTPError as he:
                     try:
                         detail = he.response.json().get("detail", str(he))
@@ -674,6 +696,59 @@ if uploaded:
                 except Exception as e:
                     st.error("Quiz generation failed.")
                     st.exception(e)
+
+    # load quiz items from session_state (if any)
+    quiz_items = st.session_state.get(quiz_state_key, [])
+
+    # Display MCQs with choices A-D and stable widget keys
+    if not quiz_items:
+        st.info("No quiz items generated yet. Click 'Generate Quiz from lecture' to create items.")
+    else:
+        for q in quiz_items:
+            qid = q.get("id", str(uuid.uuid4()))
+            q_text = q.get("question", "")
+            choices = q.get("choices", {}) or {}
+            answer_letter = q.get("answer", None)
+
+            # Unique keys for reveal checkbox and SRS button per question
+            reveal_key = f"{quiz_state_key}_reveal_{qid}"
+            srs_key = f"{quiz_state_key}_srs_{qid}"
+            # ensure a dedicated collapsed expander per question
+            exp_key = f"{quiz_state_key}_expander_{qid}"
+            if exp_key not in st.session_state:
+                st.session_state[exp_key] = False
+
+            with st.expander(f"Q ({qid}): {q_text[:140]}", expanded=st.session_state[exp_key]):
+                st.write(q_text)
+                # show choices
+                for label in ["A", "B", "C", "D"]:
+                    opt_text = choices.get(label, "")
+                    st.markdown(f"**{label}.** {opt_text}")
+
+                # reveal answer toggle (stable key)
+                if st.checkbox("Show correct answer", key=reveal_key):
+                    if answer_letter and choices.get(answer_letter):
+                        st.success(f"Answer: {answer_letter}. {choices.get(answer_letter)}")
+                    elif answer_letter:
+                        st.success(f"Answer: {answer_letter}")
+                    else:
+                        st.info("No answer recorded for this question.")
+                    # keep expander open after showing answer
+                    st.session_state[exp_key] = True
+
+
+                # SRS registration
+                if st.button(f"Start SRS for {qid}", key=srs_key):
+                    try:
+                        mgr = SRSManager()
+                        mgr.ensure_card(qid)
+                        # persist a flag so user sees confirmation on rerun
+                        st.session_state[f"{srs_key}_done"] = True
+                        st.info(f"Registered card {qid} in SRS.")
+                    except Exception as e:
+                        st.error("Failed to register SRS card.")
+                        st.exception(e)
+
 
     st.markdown("---")
     st.caption("Tip: For reproducible tests set USE_SAFE_EMBEDDINGS=1 and build FAISS index to compare results with NumPy search.")

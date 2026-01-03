@@ -101,6 +101,7 @@ class GenerateQuizRequest(BaseModel):
     stem: str
     context_text: str
     n: Optional[int] = 5
+    type: Optional[str] = "mcq"
 
 
 class ChatRequest(BaseModel):
@@ -368,17 +369,36 @@ def post_append_index(body: AppendIndexRequest, _auth: Any = Depends(check_token
 @app.post("/generate_quiz")
 def post_generate_quiz(body: GenerateQuizRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
     """
-    Generate a quiz from context_text. Writes JSON file to data/processed/<stem>_quiz.json.
+    Generate a quiz from context_text.
+
+    - Accepts: stem, context_text, n, type (default "mcq")
+    - For type == "mcq" calls generate_mcq_from_context and returns the quiz list + latency.
     """
     start = time.perf_counter()
     try:
-        quiz = generate_quiz_from_context(body.stem, body.context_text, n=body.n)
+        if (body.type or "mcq").lower() != "mcq":
+            raise HTTPException(status_code=400, detail=f"Unsupported quiz type: {body.type}")
+
+        # generate MCQs (returns list of {id, question, choices, answer})
+        from backend.generate_quiz import generate_mcq_from_context  # local import to avoid circular module issues
+        quiz_list = generate_mcq_from_context(body.context_text, n=body.n or 5)
+
+        # prefix IDs with stem to match expected format (e.g., 'lecture3_q1')
+        prefixed = []
+        for item in quiz_list:
+            item_id = item.get("id") or f"q{len(prefixed)+1}"
+            # ensure no double-underscore if stem already contains suffix
+            item["id"] = f"{body.stem}_{item_id}"
+            prefixed.append(item)
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Quiz generation failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Quiz generation failed: {e}")
+
     elapsed = time.perf_counter() - start
-    out_path = f"data/processed/{body.stem}_quiz.json"
-    resp = {"quiz": quiz, "out_path": out_path, "latency_s": elapsed}
+    resp = {"quiz": prefixed, "latency_s": elapsed}
     logger.info("Quiz generated", extra={"stem": body.stem, "n": body.n, "time_s": elapsed})
     return resp
 
