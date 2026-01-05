@@ -1,21 +1,25 @@
 # backend/generate_quiz.py
 """
-Compatibility + improved MCQ generator.
+generate_quiz.py — MCQ v2 (strict, high-quality)
 
-Exports:
-- generate_quiz_from_context(stem, context_text, n=5, llm_call=None, retries=2) -> dict
-  (legacy/compat function, does not write files; if llm_call is None it returns deterministic placeholders)
+Purpose:
+- Produce fewer but cleaner MCQs from lecture text.
+- Strictly filter candidate sentences and key phrases.
+- Only generate a question when a meaningful correct answer can be produced.
+- Produce grammatical, context-aware distractors (no one-word junk).
+- Prevent repeated keys in a single generated set.
+- Keep the exact output schema required by the frontend:
+  {
+    "id": "...",
+    "question": "...",
+    "choices": { "A": "...", "B": "...", "C": "...", "D": "..." },
+    "answer": "C"
+  }
 
-- generate_mcq_from_context(context_text, n=5) -> List[Dict]
-  (improved offline MCQ generator used by frontend; returns list of MCQs,
-   each MCQ exactly follows the required schema:
-   {
-     "id": "q1",
-     "question": "...",
-     "choices": {"A": "...", "B": "...", "C": "...", "D": "..."},
-     "answer": "B"
-   }
-)
+Notes:
+- This is a single-file drop-in replacement for backend/generate_quiz.py.
+- No external libraries required.
+- Includes a small `__main__` demo to sanity-check generation locally.
 """
 
 import json
@@ -25,7 +29,7 @@ import re
 from typing import List, Dict, Callable, Optional
 
 # ---------------------------
-# Legacy compatibility: generate_quiz_from_context
+# Legacy-compatible function
 # ---------------------------
 MAX_RETRIES = 2
 BACKOFF_BASE = 0.5
@@ -35,13 +39,9 @@ def generate_quiz_from_context(stem: str, context_text: str, n: int = 5,
                                llm_call: Optional[Callable[[str], str]] = None,
                                retries: int = MAX_RETRIES) -> Dict:
     """
-    Backwards-compatible quiz generator kept for local / legacy usage.
-    NOTE: This function does NOT write files to disk.
-
-    Returns a dict: {"stem": <stem>, "questions": [ {id, question, answer, difficulty}, ... ] }
-
-    - If llm_call is None: returns deterministic placeholders (safe for local runs).
-    - If llm_call provided: calls it with a JSON-producing prompt and normalizes the result.
+    Backwards-compatible API expected by older code.
+    If llm_call is None -> deterministic placeholders.
+    If llm_call provided -> calls LLM and normalizes JSON.
     """
     if llm_call is None:
         quiz = {"stem": stem, "questions": []}
@@ -95,15 +95,12 @@ def generate_quiz_from_context(stem: str, context_text: str, n: int = 5,
                 raise RuntimeError(f"LLM quiz generation failed after {retries} retries: {e}")
             sleep = BACKOFF_BASE * (2 ** (attempt - 1))
             time.sleep(sleep)
-    # If exhausted
     raise RuntimeError(f"LLM quiz generation failed: {last_exc}")
 
 
 # ---------------------------
-# Improved offline MCQ generator
+# MCQ v2 internals
 # ---------------------------
-
-# small lexicons / heuristics
 _STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "these", "those", "from", "which", "what",
     "when", "where", "were", "have", "has", "had", "are", "is", "was", "been", "but", "not",
@@ -115,9 +112,12 @@ _PRONOUNS = {"you", "your", "yours", "it", "its", "they", "them", "their", "he",
 _BAD_STARTS = {"when", "for", "if", "because", "while", "could", "would", "should", "may", "might",
                "does", "do", "did", "is", "are", "was", "were", "how", "why", "what"}
 
-_KEY_BLACKLIST_TOKENS = {"shorter", "short", "recent", "recently", "very", "need", "needs", "book",
-                         "chapter", "article", "articles", "section", "sections", "pages", "version",
-                         "versions", "introduction", "summary", "overview", "conclusion"}
+# blacklist of tokens (strict)
+_KEY_BLACKLIST_TOKENS = {
+    "shorter", "short", "recent", "recently", "very", "need", "needs", "book",
+    "chapter", "article", "articles", "section", "sections", "pages", "version",
+    "versions", "introduction", "summary", "overview", "conclusion", "concept", "description", "full"
+}
 
 _STEMS_KEY = [
     "Which statement best defines {key}?",
@@ -130,13 +130,21 @@ _STEMS_SNIPPET = [
     "Which option best explains the sentence: \"{snippet}\"?"
 ]
 
-_ALTERNATIVE_ACTION_VERBS = [
-    "protect", "anonymize", "evaluate", "collect", "govern", "normalize",
-    "aggregate", "transform", "validate", "encrypt", "measure", "filter"
+_DISTRACTOR_TEMPLATES = [
+    "{concept} is an unrelated concept mentioned elsewhere in the lecture.",
+    "{concept} refers to a different topic discussed in the text.",
+    "{concept} is an example rather than a definition.",
+    "{concept} describes a separate process not asked here."
+]
+
+_GENERIC_FILLERS = [
+    "A process for validating data quality.",
+    "A technique to anonymize or protect user information.",
+    "An organizational role responsible for data collection."
 ]
 
 
-def _shorten(s: str, max_len: int = 200) -> str:
+def _shorten_statement(s: str, max_len: int = 180) -> str:
     s = (s or "").strip()
     if len(s) <= max_len:
         return s
@@ -147,7 +155,7 @@ def _shorten(s: str, max_len: int = 200) -> str:
     return cut[:max_len-3].rstrip() + "..."
 
 
-def _token_overlap(a: str, b: str) -> float:
+def _token_overlap_fraction(a: str, b: str) -> float:
     ta = set(re.findall(r"\w+", (a or "").lower()))
     tb = set(re.findall(r"\w+", (b or "").lower()))
     if not ta or not tb:
@@ -183,47 +191,78 @@ def _words_from_text(text: str) -> List[str]:
     return out
 
 
+# ---------------------------
+# STEP 1: Strict key extraction
+# ---------------------------
 def _extract_key_phrase(sentence: str) -> Optional[str]:
-    s = (sentence or "").strip()
-    if not s:
+    """
+    STRICT rules:
+      - Reject very short sentences (< 8 words).
+      - Prefer determiner-led noun phrases or subject-before-copula.
+      - Prefer capitalized multi-word terms.
+      - FALLBACK: only accept capitalized 1-2 word phrases.
+      - Before returning candidate, require at least 2 words (len >= 2).
+      - Candidate tokens should be noun-like (not gerunds/verbs/adjectives only).
+    """
+    if not sentence or not sentence.strip():
         return None
-    # determiner-based phrase
+    if len(sentence.split()) < 8:
+        return None
+
+    s = sentence.strip()
+
+    def _candidate_is_noun_like(cand: str) -> bool:
+        toks = [t for t in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", cand)]
+        if len(toks) < 2:
+            return False
+        # require at least one token that is length >=4 and not in stopwords or blacklist
+        good = [t for t in toks if len(t) >= 4 and t.lower() not in _STOPWORDS and t.lower() not in _KEY_BLACKLIST_TOKENS]
+        if not good:
+            return False
+        # avoid tokens that look like verbs (ending in 'ing', 'ed') for all tokens
+        if all(t.lower().endswith(("ing", "ed")) for t in toks):
+            return False
+        return True
+
+    # 1) determiner-led noun phrase: "the X Y", "a middleware layer"
     det_re = re.compile(r'\b(?:the|a|an)\s+([A-Za-z][A-Za-z\'-]{2,}(?:\s+[A-Za-z][A-Za-z\'-]{2,}){0,2})', flags=re.IGNORECASE)
     for m in det_re.finditer(s):
         cand = m.group(1).strip()
-        if not _is_fragment_like(cand) and cand.lower() not in _KEY_BLACKLIST_TOKENS:
+        if cand and not _is_fragment_like(cand) and cand.lower() not in _KEY_BLACKLIST_TOKENS and _candidate_is_noun_like(cand):
             return cand
-    # subject before copula
-    cop_re = re.compile(r'([A-Za-z][A-Za-z\'-]{2,}(?:\s+[A-Za-z][A-Za-z\'-]{2,}){0,2})\s+(?:is|are|was|were|provides|offers|refers to|refers|involves|helps|aims to|serves as|acts as)\b', flags=re.IGNORECASE)
+
+    # 2) subject before copula "X is ..." / "X provides ..."
+    cop_re = re.compile(
+        r'([A-Za-z][A-Za-z\'-]{2,}(?:\s+[A-Za-z][A-Za-z\'-]{2,}){0,2})\s+'
+        r'(?:is|are|was|were|provides|offers|refers to|refers|involves|helps|aims to|serves as|acts as)\b',
+        flags=re.IGNORECASE
+    )
     m = cop_re.search(s)
     if m:
         cand = m.group(1).strip()
-        if not _is_fragment_like(cand) and cand.lower() not in _KEY_BLACKLIST_TOKENS:
+        if cand and not _is_fragment_like(cand) and cand.lower() not in _KEY_BLACKLIST_TOKENS and _candidate_is_noun_like(cand):
             return cand
-    # capitalized multiword
+
+    # 3) capitalized multi-word phrases (proper nouns / named concepts)
     cap_re = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b')
     for m in cap_re.finditer(s):
         cand = m.group(1).strip()
-        if not _is_fragment_like(cand) and len(cand.split()) <= 3 and cand.lower() not in _KEY_BLACKLIST_TOKENS:
+        if cand and not _is_fragment_like(cand) and len(cand.split()) >= 2 and cand.lower() not in _KEY_BLACKLIST_TOKENS and _candidate_is_noun_like(cand):
             return cand
-    # first non-stopword token or two-word sequence
-    tokens = re.findall(r"[A-Za-z][A-Za-z'-]{2,}", s)
-    if not tokens:
-        return None
-    for i in range(len(tokens)):
-        t = tokens[i]
-        if t.lower() in _STOPWORDS or t.lower() in _PRONOUNS or t.lower() in _KEY_BLACKLIST_TOKENS:
-            continue
-        if i + 1 < len(tokens) and tokens[i+1].lower() not in _STOPWORDS:
-            cand = f"{t} {tokens[i+1]}"
-            if not _is_fragment_like(cand) and cand.lower() not in _KEY_BLACKLIST_TOKENS:
-                return cand
-        if not _is_fragment_like(t) and t.lower() not in _KEY_BLACKLIST_TOKENS:
+
+    # 4) fallback: accept only capitalized 1-2 word phrases
+    fallback_tokens = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b", s)
+    for t in fallback_tokens:
+        if t and not _is_fragment_like(t) and len(t.split()) >= 2 and t.lower() not in _KEY_BLACKLIST_TOKENS and _candidate_is_noun_like(t):
             return t
+
     return None
 
 
-def _clause_for_key(sentence: str, key: Optional[str]) -> str:
+# ---------------------------
+# STEP 2: Rephrase correct answer BUT return None if not meaningful
+# ---------------------------
+def _clause_containing_key(sentence: str, key: Optional[str]) -> str:
     if not key:
         return sentence or ""
     parts = re.split(r'[;:,\-\—]|\s+which\s+|\s+that\s+', sentence or "", flags=re.IGNORECASE)
@@ -233,37 +272,50 @@ def _clause_for_key(sentence: str, key: Optional[str]) -> str:
     return sentence or ""
 
 
-def _rephrase_correct_answer(sentence: str, key: Optional[str]) -> str:
-    clause = _clause_for_key(sentence, key)
+def _rephrase_correct_answer(sentence: str, key: Optional[str]) -> Optional[str]:
+    """
+    Produce a concise correct answer when predicate/object are clear.
+    Return None if we cannot produce a meaningful answer (this causes the generator to skip).
+    Requirements:
+      - candidate must contain predicate and object with at least ~6 tokens total.
+      - object must include at least one noun-like token (length >=4, not stopword/blacklist).
+    """
+    if not key:
+        return None
+    clause = _clause_containing_key(sentence, key)
     clause = (clause or "").strip().rstrip('.')
-    # handle "summary of X"
-    m_summary = re.search(r'\bsummary\s+(?:of|about)\s+(.+)', clause, flags=re.IGNORECASE)
-    if m_summary:
-        tail = m_summary.group(1).strip().rstrip('.')
-        return _shorten(f"A concise overview of {tail}.", max_len=200)
-    # copula/predicate
+
+    # try copula/predicate approach
     m = re.search(r'\b(is|are|was|were|refers to|refers|means|provides|offers|helps|enables|aims to|involves|serves as|acts as|is used to|is a|is an)\b', clause, flags=re.IGNORECASE)
-    if m and key:
+    if m:
         pred = clause[m.end():].strip(',;: ')
         verb = m.group(0).lower()
         if pred:
             pred_clean = re.sub(r'^\b(to|for|the|a|an)\b', '', pred, flags=re.IGNORECASE).strip()
+            if not pred_clean:
+                return None
             candidate = f"{key} {verb} {pred_clean}"
             candidate = re.sub(r'\s+', ' ', candidate).strip()
-            return _shorten(candidate + ".", max_len=200)
-        else:
-            return _shorten(f"{key} {verb}.", max_len=140)
-    # for 'for/to' constructs
-    m2 = re.search(r'\b(for|to)\b\s+(.+)$', clause, flags=re.IGNORECASE)
-    if m2 and key:
-        tail = m2.group(2).strip(' .;:')
-        return _shorten(f"{key} is used to {tail}.", max_len=200)
-    if key:
-        return _shorten(f"{key} (a concept or practice described in the text).", max_len=200)
-    return _shorten(clause.split('.')[0] + ".", max_len=200)
+            toks = candidate.split()
+            # require >= 6 tokens to avoid one-word/object outputs
+            if len(toks) >= 6:
+                # ensure object contains at least one noun-like token
+                obj_tokens = [t for t in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", pred_clean)]
+                noun_like = any(len(t) >= 4 and t.lower() not in _STOPWORDS and t.lower() not in _KEY_BLACKLIST_TOKENS and not t.lower().endswith(("ing", "ed")) for t in obj_tokens)
+                if noun_like:
+                    return _shorten_statement(candidate + ".", max_len=180)
+    # else: refuse to guess — return None per STEP 2
+    return None
 
 
-def _collect_related_concepts(context_text: str, sentence: str, key: Optional[str], limit: int = 8) -> List[str]:
+# ---------------------------
+# STEP 3: Distractor generation (avoid broken templates and single-token inserts)
+# ---------------------------
+def _collect_related_concepts(context_text: str, sentence: str, key: Optional[str], max_candidates: int = 8) -> List[str]:
+    """
+    Collect nearby multi-word concepts or strong tokens. Only return candidates that
+    are multi-word (>=2 tokens) OR single tokens that are long and clearly noun-like.
+    """
     sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', (context_text or "")) if s.strip()]
     if not sents:
         return []
@@ -279,18 +331,20 @@ def _collect_related_concepts(context_text: str, sentence: str, key: Optional[st
         s = sents[j]
         for m in re.finditer(r'\b(?:the|a|an)\s+([A-Za-z][A-Za-z\'-]{2,}(?:\s+[A-Za-z][A-Za-z\'-]{2,}){0,2})', s, flags=re.IGNORECASE):
             ph = m.group(1).strip()
-            if ph and (not key or ph.lower() != key.lower()) and not _is_fragment_like(ph):
+            if ph and ph.lower() != (key or "").lower() and not _is_fragment_like(ph):
                 candidates.append(ph)
         for t in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", s):
             if t.lower() in _STOPWORDS or (key and t.lower() == key.lower()):
                 continue
             if not _is_fragment_like(t):
                 candidates.append(t)
+    # global words
     for w in _words_from_text(context_text):
         if key and w.lower() == key.lower():
             continue
         if not _is_fragment_like(w):
             candidates.append(w)
+
     out = []
     seen = set()
     for c in candidates:
@@ -298,82 +352,84 @@ def _collect_related_concepts(context_text: str, sentence: str, key: Optional[st
         low = cl.lower()
         if low in seen:
             continue
+        toks = cl.split()
+        # accept if multiword >=2 OR single long noun-like token
+        if len(toks) >= 2:
+            pass
+        else:
+            t = toks[0]
+            if len(t) < 4 or t.lower() in _KEY_BLACKLIST_TOKENS:
+                continue
         if len(cl.split()) > 4:
             continue
         seen.add(low)
         out.append(cl)
-        if len(out) >= limit:
+        if len(out) >= max_candidates:
             break
     return out
 
 
-def _generate_distractors_from_predicate(key: str, obj_short: Optional[str]) -> List[str]:
-    distracts = []
-    obj_text = obj_short or "data"
-    verbs = random.sample(_ALTERNATIVE_ACTION_VERBS, k=min(len(_ALTERNATIVE_ACTION_VERBS), 6))
-    for alt in verbs:
-        cand = f"{key} is used to {alt} {obj_text}."
-        distracts.append(_shorten(cand, max_len=180))
-        if len(distracts) >= 3:
-            break
-    return distracts[:3]
-
-
-def _generate_plausible_distractors(correct: str, key: Optional[str], related: List[str], sentence: str) -> List[str]:
+def _generate_plausible_distractors(correct: str, related: List[str], key: Optional[str]) -> List[str]:
+    """
+    Create up to 3 distractors from multi-word related concepts first, then safe generic fillers.
+    Avoid inserting single token junk and avoid templates that produce broken grammar.
+    """
     distractors: List[str] = []
     used = set()
-    pred_match = re.search(r'\b(is used to|is used for|helps|is used|is a|is an|refers to|involves|provides|measures|used to)\b\s*(.*)', correct, flags=re.IGNORECASE)
-    if pred_match and key:
-        obj = pred_match.group(2).strip().rstrip('.')
-        obj_short = " ".join(obj.split()[:6]) if obj else None
-        dlist = _generate_distractors_from_predicate(key, obj_short)
-        for d in dlist:
-            if _token_overlap(d, correct) < 0.8 and d.lower() not in used:
-                distractors.append(d)
-                used.add(d.lower())
-            if len(distractors) >= 3:
-                break
-    for r in related:
+
+    # Use related phrases (prefer multi-word)
+    related_sorted = sorted(related, key=lambda x: (-len(x.split()), x))  # prefer multiword
+    for r in related_sorted:
         if len(distractors) >= 3:
             break
-        if not r or (key and r.lower() == key.lower()):
+        if not r:
             continue
-        if " " in r:
-            cand = f"{r} is a concept mentioned in the text."
-        else:
-            cand = f"{r} is used to manage related aspects."
-        cand = _shorten(cand if cand.endswith('.') else cand + '.', max_len=180)
-        if _token_overlap(cand, correct) > 0.8:
+        # ensure we don't insert single meaningless tokens
+        if len(r.split()) < 2 and len(r) < 6:
+            continue
+        if _token_overlap_fraction(r, correct) > 0.6:
+            continue
+        t = random.choice(_DISTRACTOR_TEMPLATES)
+        cand = t.replace("{concept}", r).strip()
+        if not cand.endswith("."):
+            cand = cand + "."
+        if _token_overlap_fraction(cand, correct) > 0.75:
             continue
         if cand.lower() in used:
             continue
-        distractors.append(cand)
+        distractors.append(_shorten_statement(cand, max_len=160))
         used.add(cand.lower())
-    generics = [
-        "A process for validating data quality.",
-        "A technique to anonymize or protect user information.",
-        "An organizational role responsible for data collection.",
-        "A protocol designed to enhance interoperability."
-    ]
-    gi = 0
-    while len(distractors) < 3 and gi < len(generics):
-        g = generics[gi]
-        gi += 1
-        if _token_overlap(g, correct) > 0.8:
+
+    # fallback generics
+    for g in _GENERIC_FILLERS:
+        if len(distractors) >= 3:
+            break
+        if _token_overlap_fraction(g, correct) > 0.75:
             continue
         if g.lower() in used:
             continue
         distractors.append(g)
         used.add(g.lower())
+
+    # last-resort filler
     while len(distractors) < 3:
         distractors.append("This statement is not supported by the lecture text.")
     return distractors[:3]
 
 
+# ---------------------------
+# Snippet-based fallback (used rarely; still strict)
+# ---------------------------
 def _snippet_based_question_and_choices(sentence: str, context_text: str):
-    correct = _shorten(sentence.strip().rstrip('.'), max_len=200)
+    """
+    Build a snippet-centered Q + correct + distractors.
+    This is used only when key-based extraction isn't appropriate; still must satisfy strict filters.
+    """
+    correct = _shorten_statement(sentence.strip().rstrip('.'), max_len=180)
     if not correct.endswith('.'):
         correct = correct + '.'
+
+    # gather other candidate sentences as distractors (shorten them)
     sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', (context_text or "")) if s.strip()]
     distractor_snips = []
     for s in sents:
@@ -381,133 +437,112 @@ def _snippet_based_question_and_choices(sentence: str, context_text: str):
             continue
         if len(distractor_snips) >= 3:
             break
-        if len(s.split()) < 6:
+        if len(s.split()) < 8:
             continue
-        sn = _shorten(s.strip().rstrip('.'), max_len=160)
-        if sn and sn.lower() != correct.lower() and _token_overlap(sn, correct) < 0.7:
+        sn = _shorten_statement(s.strip().rstrip('.'), max_len=160)
+        if sn and sn.lower() != correct.lower() and _token_overlap_fraction(sn, correct) < 0.7:
             if not sn.endswith('.'):
                 sn = sn + '.'
             distractor_snips.append(sn)
-    if len(distractor_snips) < 3:
-        related_words = _words_from_text(context_text)
-        for w in related_words:
-            if len(distractor_snips) >= 3:
-                break
-            cand = f"{w} is used to manage related aspects."
-            if _token_overlap(cand, correct) < 0.75:
-                distractor_snips.append(_shorten(cand, max_len=160))
-    generics = [
-        "A process for validating data quality.",
-        "A technique to anonymize or protect user information.",
-        "An organizational role responsible for data collection."
-    ]
+    # if not enough sentence-distractors, use safe generics
     gi = 0
-    while len(distractor_snips) < 3 and gi < len(generics):
-        cand = generics[gi]
+    while len(distractor_snips) < 3 and gi < len(_GENERIC_FILLERS):
+        cand = _GENERIC_FILLERS[gi]
         gi += 1
-        if _token_overlap(cand, correct) < 0.8:
+        if _token_overlap_fraction(cand, correct) < 0.8:
             distractor_snips.append(cand)
     while len(distractor_snips) < 3:
         distractor_snips.append("This statement is not supported by the lecture text.")
-    snippet_short = _shorten(sentence.strip().rstrip('.'), max_len=120)
+    snippet_short = _shorten_statement(sentence.strip().rstrip('.'), max_len=120)
     stem = random.choice(_STEMS_SNIPPET).format(snippet=snippet_short)
     return stem, correct, distractor_snips[:3]
 
 
+# ---------------------------
+# Main MCQ generator (strict)
+# ---------------------------
 def generate_mcq_from_context(context_text: str, n: int = 5) -> List[Dict]:
+    """
+    Generate up to n high-quality MCQs. It's acceptable to return fewer than n if strict rules block poor candidates.
+    """
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', (context_text or "")) if s.strip()]
-    good_sentences = []
+    candidates = []
     for s in sentences:
-        if len(s) < 20:
-            continue
-        first_word = re.match(r'^\s*([A-Za-z\'-]+)', s)
-        if first_word and first_word.group(1).lower() in _BAD_STARTS and len(s.split()) < 8:
+        if len(s.split()) < 8:
             continue
         if _is_fragment_like(s.split('.')[0]):
             continue
-        good_sentences.append(s)
-    if not good_sentences:
-        good_sentences = sentences if sentences else [context_text.strip()]
+        candidates.append(s)
+    if not candidates:
+        return []
 
     global_words = _words_from_text(context_text)
-    if len(global_words) < 10:
+    if len(global_words) < 8:
         tokens = re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", (context_text or ""))
         for t in tokens:
             if t.lower() not in _STOPWORDS and t not in global_words:
                 global_words.append(t)
-            if len(global_words) >= 20:
+            if len(global_words) >= 12:
                 break
 
-    out: List[Dict] = []
-    used_sentences = set()
+    out_questions: List[Dict] = []
+    used_keys = set()
     attempts = 0
-    max_attempts = max(40, n * 10)
+    max_attempts = max(80, n * 12)
     created = 0
 
     while created < n and attempts < max_attempts:
         attempts += 1
-        sent = random.choice(good_sentences)
-        if sent in used_sentences and random.random() < 0.7:
+        sent = random.choice(candidates)
+
+        # avoid repeats of the same source sentence
+        if any(q.get("question_source_sentence") == sent for q in out_questions) and random.random() < 0.7:
             continue
-        used_sentences.add(sent)
 
         key = _extract_key_phrase(sent)
-        good_key = False
-        if key:
-            k_low = key.strip().lower()
-            if (not _is_fragment_like(key)
-                    and len(key.strip()) >= 3
-                    and all(bad not in k_low for bad in _KEY_BLACKLIST_TOKENS)):
-                good_key = True
+        if not key:
+            # strict: skip sentences without a strong key
+            continue
 
-        if good_key:
-            correct = _rephrase_correct_answer(sent, key)
-            if correct.strip().lower().startswith("information about") and key:
-                clause = _clause_for_key(sent, key)
-                vo = re.search(r'\b(?:helps|provides|allows|enables|is used to|is used for|measures|collects|validates|anonymizes|protects)\b\s*(.*)', clause, flags=re.IGNORECASE)
-                if vo:
-                    tail = vo.group(1).strip().rstrip('.')
-                    if tail:
-                        correct = f"{key} is used to {tail}."
-                else:
-                    nounm = re.search(r'\b([A-Za-z][A-Za-z\'-]{2,})\b', clause)
-                    if nounm:
-                        correct = f"{key} is a concept related to {nounm.group(1)}."
-                    else:
-                        correct = f"{key} (a concept described in the text)."
-            related = _collect_related_concepts(context_text, sent, key, limit=12)
-            if not related:
-                related = [w for w in global_words if not key or w.lower() != key.lower()][:8]
-            distractors = _generate_plausible_distractors(correct, key, related, sent)
-            choices_list = [correct] + distractors[:3]
-            stem = random.choice(_STEMS_KEY).format(key=key)
-        else:
-            stem, correct, distractors = _snippet_based_question_and_choices(sent, context_text)
-            choices_list = [correct] + distractors[:3]
+        # avoid duplicate keys
+        if key.lower() in used_keys:
+            continue
 
+        # build correct answer; must be meaningful and >= 6 tokens
+        correct = _rephrase_correct_answer(sent, key)
+        if not correct or len(correct.split()) < 6:
+            # skip weak correct answers (STEP 3)
+            continue
+
+        related = _collect_related_concepts(context_text, sent, key, max_candidates=12)
+        if not related:
+            related = [w for w in global_words if not key or w.lower() != key.lower()][:8]
+
+        distractors = _generate_plausible_distractors(correct, related, key)
+
+        # assemble choices
+        choices_list = [correct] + distractors[:3]
+
+        # uniqueness and small qualifiers
         normalized = []
         seen = set()
         for ch in choices_list:
-            ch_clean = (ch or "").strip()
-            k = re.sub(r'\s+', ' ', ch_clean.lower())
-            if k in seen:
-                alt = ch_clean.rstrip('.')
-                alt = alt + " (alternative)."
-                if re.sub(r'\s+', ' ', alt.strip().lower()) in seen:
-                    alt = ch_clean + f" (variant)."
+            chs = (ch or "").strip()
+            kn = re.sub(r'\s+', ' ', chs.lower())
+            if kn in seen:
+                alt = chs.rstrip('.') + " (alternative)."
+                if re.sub(r'\s+', ' ', alt.lower()) in seen:
+                    alt = chs + " (variant)."
                 normalized.append(alt)
-                seen.add(re.sub(r'\s+', ' ', alt.strip().lower()))
+                seen.add(re.sub(r'\s+', ' ', alt.lower()))
             else:
-                normalized.append(ch_clean)
-                seen.add(k)
+                normalized.append(chs)
+                seen.add(kn)
         choices_list = normalized[:4]
+
+        # fill to 4 if needed with safe generics
         if len(choices_list) < 4:
-            fillers = [
-                "A process for validating data quality.",
-                "A technique to anonymize or protect user information.",
-                "A measure used to evaluate performance."
-            ]
-            for f in fillers:
+            for f in _GENERIC_FILLERS:
                 if len(choices_list) >= 4:
                     break
                 fk = re.sub(r'\s+', ' ', f.strip().lower())
@@ -515,6 +550,7 @@ def generate_mcq_from_context(context_text: str, n: int = 5) -> List[Dict]:
                     choices_list.append(f)
                     seen.add(fk)
 
+        # sanity checks
         bad = False
         for ch in choices_list:
             if not ch or len(ch.strip()) < 6:
@@ -528,40 +564,71 @@ def generate_mcq_from_context(context_text: str, n: int = 5) -> List[Dict]:
 
         random.shuffle(choices_list)
         labels = ["A", "B", "C", "D"]
-        choices = {lab: txt for lab, txt in zip(labels, choices_list)}
+        choices_dict = {lab: txt for lab, txt in zip(labels, choices_list)}
 
+        # locate correct label
         correct_label = None
-        for k_label, txt in choices.items():
-            if txt.strip() == (correct or "").strip():
-                correct_label = k_label
+        for lab, txt in choices_dict.items():
+            if txt.strip() == correct.strip():
+                correct_label = lab
                 break
         if correct_label is None:
-            for k_label, txt in choices.items():
-                if (correct or "").strip().lower() in txt.strip().lower():
-                    correct_label = k_label
+            for lab, txt in choices_dict.items():
+                if correct.strip().lower() in txt.strip().lower():
+                    correct_label = lab
                     break
         if correct_label is None:
             slot = random.choice(labels)
-            choices[slot] = correct
+            choices_dict[slot] = correct
             correct_label = slot
 
+        # stem must be readable
+        stem = random.choice(_STEMS_KEY).format(key=key)
         if _is_fragment_like(stem):
             continue
 
-        out.append({
+        used_keys.add(key.lower())
+
+        out_questions.append({
             "id": f"q{created+1}",
             "question": stem,
-            "choices": choices,
-            "answer": correct_label
+            "choices": choices_dict,
+            "answer": correct_label,
+            "question_source_sentence": sent  # internal trace (will be stripped below)
         })
         created += 1
 
-    if not out:
-        for i in range(min(n, 3)):
-            out.append({
-                "id": f"q{i+1}",
-                "question": f"Placeholder question {i+1}",
-                "choices": {"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"},
-                "answer": "A"
-            })
-    return out
+    # strip internals and return
+    cleaned = []
+    for q in out_questions:
+        cleaned.append({
+            "id": q["id"],
+            "question": q["question"],
+            "choices": q["choices"],
+            "answer": q["answer"]
+        })
+
+    return cleaned
+
+
+# ---------------------------
+# Local sanity/demo runner
+# ---------------------------
+if __name__ == "__main__":
+    # small demo: paste a short example text here to test
+    demo_text = (
+        "Information infrastructure is the set of systems and standards that enable data collection "
+        "and sharing across urban departments. A middle-out approach seeks to connect institutional "
+        "processes with local needs. Spatial data sets are more readily available and some cities have institutionalized data flows. "
+        "The introduction chapter summarizes the concepts in the book. Built Heritage refers to the collection of historic structures."
+    )
+    print("Running generate_mcq_from_context demo (request 5 items)...\n")
+    qs = generate_mcq_from_context(demo_text, n=5)
+    print(f"Generated {len(qs)} questions:\n")
+    for q in qs:
+        print(f"ID: {q['id']}")
+        print(q['question'])
+        for L, txt in q['choices'].items():
+            print(f"  {L}. {txt}")
+        print("Answer:", q['answer'])
+        print("-" * 60)
