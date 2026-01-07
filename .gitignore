@@ -31,3 +31,14 @@ build/
 *.meta.json
 data/processed/*.index
 data/processed/*.meta.json
+
+# Backend test files
+backend/test_*.py
+
+# Raw uploaded data
+data/raw/*.pdf
+
+# Misc untracked folders/files
+end
+python
+uvicorn
