@@ -15,6 +15,9 @@ import time
 import logging
 import os
 from typing import Optional, Any, Dict, List
+from dotenv import load_dotenv
+load_dotenv()
+from backend.llm_client import get_llm_call
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
@@ -366,41 +369,56 @@ def post_append_index(body: AppendIndexRequest, _auth: Any = Depends(check_token
     return resp
 
 
-@app.post("/generate_quiz")
-def post_generate_quiz(body: GenerateQuizRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
+@app.post("/generate_quiz_live")
+def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(check_token)) -> Dict[str, Any]:
     """
-    Generate a quiz from context_text.
-
-    - Accepts: stem, context_text, n, type (default "mcq")
-    - For type == "mcq" calls generate_mcq_from_context and returns the quiz list + latency.
+    Live quiz generation using the configured LLM (requires GEMINI_API_KEY in env or .env).
+    Returns:
+      - quiz: list of {id, question, choices, answer, [explanation]}
+      - raw_llm: list of raw LLM responses (one per chunk / attempt) for debugging
+      - latency_s: total time
     """
     start = time.perf_counter()
     try:
         if (body.type or "mcq").lower() != "mcq":
             raise HTTPException(status_code=400, detail=f"Unsupported quiz type: {body.type}")
 
-        # generate MCQs (returns list of {id, question, choices, answer})
-        from backend.generate_quiz import generate_mcq_from_context  # local import to avoid circular module issues
-        quiz_list = generate_mcq_from_context(body.context_text, n=body.n or 5)
+        # lazy import to avoid circulars
+        from backend.generate_quiz import generate_mcq_from_context
 
-        # prefix IDs with stem to match expected format (e.g., 'lecture3_q1')
+        # get a working llm_call (or None)
+        llm_call = get_llm_call()
+        if llm_call is None:
+            raise HTTPException(status_code=503, detail="LLM not initialized. Check GEMINI_API_KEY / google-genai installation.")
+
+        # capture raw LLM responses for debugging / audit
+        raw_outputs: List[str] = []
+        def capturing_llm(prompt: str) -> str:
+            out = llm_call(prompt)
+            try:
+                raw_outputs.append(out if isinstance(out, str) else str(out))
+            except Exception:
+                raw_outputs.append("<unable to stringify raw output>")
+            return out
+
+        # generate MCQs (will call the capturing_llm above)
+        quiz_list = generate_mcq_from_context(body.context_text, n=body.n or 5, llm_call=capturing_llm)
+
+        # prefix IDs with stem
         prefixed = []
         for item in quiz_list:
             item_id = item.get("id") or f"q{len(prefixed)+1}"
-            # ensure no double-underscore if stem already contains suffix
             item["id"] = f"{body.stem}_{item_id}"
             prefixed.append(item)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Quiz generation failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Quiz generation failed: {e}")
+        logger.exception("Live quiz generation failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Live quiz generation failed: {e}")
 
     elapsed = time.perf_counter() - start
-    resp = {"quiz": prefixed, "latency_s": elapsed}
-    logger.info("Quiz generated", extra={"stem": body.stem, "n": body.n, "time_s": elapsed})
-    return resp
+    return {"quiz": prefixed, "raw_llm": raw_outputs, "latency_s": elapsed}
 
 
 @app.get("/status")

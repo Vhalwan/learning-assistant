@@ -1,5 +1,9 @@
 # frontend/app.py
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import sys
 import re
 from pathlib import Path
@@ -7,6 +11,7 @@ from typing import Dict, Any, Optional, List
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -17,6 +22,14 @@ import requests
 import json
 import html as html_mod
 import uuid
+# after your other imports
+from backend.llm_client import get_llm_call
+
+llm = get_llm_call()
+if llm is None:
+    st.warning("LLM not available — using placeholders")
+else:
+    st.info("LLM ready — will generate real MCQs")
 
 load_dotenv()
 
@@ -332,8 +345,8 @@ if uploaded:
                             ans, retrieved_chunks, prompt_used, provenance = rag_answer_from_embeddings(
                                 question, str(embeddings_path), top_k=int(k), use_faiss=bool(use_faiss_search),
                                 faiss_index_path=candidate_index_path,
-                                use_safe=(True if os.environ.get("USE_SAFE_EMBEDDINGS", "1") in ("1", "true", "yes") else False),
-                                use_query_expansion=False, return_meta=True, llm_call=None,
+                                use_safe=...,
+                                use_query_expansion=False, return_meta=True, llm_call=llm,  # <-- pass your callable
                             )
                             latency = None
                         display_answer = _strip_key_concepts_from_answer(ans or "")
@@ -672,7 +685,7 @@ if (btn) {{
                         else:
                             st.success(f"Quiz generated: {len(quiz_items)} items.")
                     else:
-                        quiz_items = generate_mcq_from_context(text, n=int(n_q))
+                        quiz_items = generate_mcq_from_context(text, n=int(n_q), llm_call=llm)
                         # prefix IDs to match expected pattern and ensure uniqueness
                         for idx, itm in enumerate(quiz_items, start=1):
                             if "id" in itm:
@@ -710,34 +723,89 @@ if (btn) {{
             choices = q.get("choices", {}) or {}
             answer_letter = q.get("answer", None)
 
-            # Unique keys for reveal checkbox and SRS button per question
-            reveal_key = f"{quiz_state_key}_reveal_{qid}"
+            # Unique keys for selection, submit, reveal checkbox and SRS button per question
+            selection_key = f"{quiz_state_key}_sel_{qid}"
+            submit_key = f"{quiz_state_key}_sub_{qid}"
             srs_key = f"{quiz_state_key}_srs_{qid}"
-            # ensure a dedicated collapsed expander per question
             exp_key = f"{quiz_state_key}_expander_{qid}"
+            # ensure a dedicated collapsed expander per question
             if exp_key not in st.session_state:
                 st.session_state[exp_key] = False
 
             with st.expander(f"Q ({qid}): {q_text[:140]}", expanded=st.session_state[exp_key]):
                 st.write(q_text)
-                # show choices
+
+                # Build readable radio options (A. text, B. text, ...)
+                radio_options = []
                 for label in ["A", "B", "C", "D"]:
                     opt_text = choices.get(label, "")
-                    st.markdown(f"**{label}.** {opt_text}")
+                    radio_options.append(f"{label}. {opt_text}")
 
-                # reveal answer toggle (stable key)
-                if st.checkbox("Show correct answer", key=reveal_key):
-                    if answer_letter and choices.get(answer_letter):
-                        st.success(f"Answer: {answer_letter}. {choices.get(answer_letter)}")
-                    elif answer_letter:
-                        st.success(f"Answer: {answer_letter}")
-                    else:
-                        st.info("No answer recorded for this question.")
-                    # keep expander open after showing answer
+                # Add a placeholder as the first option so nothing meaningful is auto-selected
+                placeholder = "— Select an answer —"
+                radio_options_with_placeholder = [placeholder] + radio_options
+
+                # Render the radio; disabled if already submitted
+                already_submitted = bool(st.session_state.get(submit_key))
+                selected_display = st.radio(
+                    "Choose an answer",
+                    radio_options_with_placeholder,
+                    index=0,
+                    key=selection_key,
+                    disabled=already_submitted,
+                )
+
+                # Derive chosen letter (None if placeholder selected)
+                chosen_letter = None
+                if selected_display and selected_display != placeholder:
+                    # split on first dot to get the letter (e.g. "A. Option text")
+                    chosen_letter = selected_display.split(".", 1)[0].strip()
+
+                # Check answer button (disabled until a real choice is picked or if already submitted)
+                check_key = f"{quiz_state_key}_check_{qid}"
+                check_disabled = (chosen_letter is None) or already_submitted
+                if st.button("Check answer", key=check_key, disabled=check_disabled):
+                    # compute correctness and store result in session_state so results persist across reruns
+                    is_correct = (chosen_letter == answer_letter) if (chosen_letter and answer_letter) else False
+                    st.session_state[submit_key] = {
+                        "chosen": chosen_letter,
+                        "is_correct": is_correct,
+                    }
+                    # open expander so user sees the feedback clearly
                     st.session_state[exp_key] = True
 
+                # If submitted, show feedback
+                submitted = st.session_state.get(submit_key)
+                if submitted:
+                    chosen = submitted.get("chosen")
+                    is_correct = submitted.get("is_correct", False)
+                    # Explanation text comes from correct choice text when available
+                    explanation = ""
+                    if answer_letter and choices.get(answer_letter):
+                        explanation = choices.get(answer_letter)
+                    # positive feedback
+                    if is_correct:
+                        # Green success with checkmark + explanation
+                        if explanation:
+                            st.success(f"✅ Correct — {explanation}")
+                        else:
+                            st.success("✅ Correct")
+                    else:
+                        # Red error showing chosen (if any) and the correct answer text/letter
+                        if chosen:
+                            user_choice_text = choices.get(chosen, "")
+                            if answer_letter and choices.get(answer_letter):
+                                st.error(f"❌ Incorrect — you chose {chosen}. {user_choice_text}\n\nCorrect: {answer_letter}. {choices.get(answer_letter)}")
+                            else:
+                                st.error(f"❌ Incorrect — you chose {chosen}. {user_choice_text}\n\nCorrect answer: {answer_letter or '(not provided)'}")
+                        else:
+                            # No chosen (defensive)
+                            if answer_letter and choices.get(answer_letter):
+                                st.error(f"❌ Incorrect. Correct: {answer_letter}. {choices.get(answer_letter)}")
+                            else:
+                                st.error("❌ Incorrect.")
 
-                # SRS registration
+                # SRS registration (kept as before)
                 if st.button(f"Start SRS for {qid}", key=srs_key):
                     try:
                         mgr = SRSManager()

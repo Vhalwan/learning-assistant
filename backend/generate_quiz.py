@@ -1,158 +1,120 @@
 # backend/generate_quiz.py
 """
-generate_quiz.py — MCQ v2 (strict, high-quality)
-
-Purpose:
-- Produce fewer but cleaner MCQs from lecture text.
-- Strictly filter candidate sentences and key phrases.
-- Only generate a question when a meaningful correct answer can be produced.
-- Produce grammatical, context-aware distractors (no one-word junk).
-- Prevent repeated keys in a single generated set.
-- Keep the exact output schema required by the frontend:
-  {
-    "id": "...",
-    "question": "...",
-    "choices": { "A": "...", "B": "...", "C": "...", "D": "..." },
-    "answer": "C"
-  }
-
-Notes:
-- This is a single-file drop-in replacement for backend/generate_quiz.py.
-- No external libraries required.
-- Includes a small `__main__` demo to sanity-check generation locally.
+generate_quiz.py — Hybrid MCQ generator (strict extractor + LLM writer)
+This file expects an llm_call(prompt)->str callable to be passed in (or None to
+use deterministic placeholders).
 """
 
 import json
-import time
 import random
 import re
-from typing import List, Dict, Callable, Optional
+import time
+import logging
+from typing import Callable, Dict, List, Optional
 
-# ---------------------------
-# Legacy-compatible function
-# ---------------------------
+logger = logging.getLogger(__name__)
+
 MAX_RETRIES = 2
-BACKOFF_BASE = 0.5
+BACKOFF_BASE = 0.4
+
+_MIN_SENT_WORDS = 8
+_MIN_CHOICE_LEN = 8
+_MIN_QUESTION_LEN = 12
+
+_BAD_PHRASES = [
+    "unrelated concept", "is an unrelated concept", "not asked here",
+    "not asked in the lecture", "not supported by", "This statement is not supported"
+]
 
 
-def generate_quiz_from_context(stem: str, context_text: str, n: int = 5,
-                               llm_call: Optional[Callable[[str], str]] = None,
-                               retries: int = MAX_RETRIES) -> Dict:
+# ---------- robust JSON loader ----------
+def safe_json_load(s):
     """
-    Backwards-compatible API expected by older code.
-    If llm_call is None -> deterministic placeholders.
-    If llm_call provided -> calls LLM and normalizes JSON.
+    Robustly extract and parse the *first* JSON object/array in `s`.
+    Accepts dict/list input and returns parsed object.
+    Raises ValueError if no JSON can be parsed.
     """
-    if llm_call is None:
-        quiz = {"stem": stem, "questions": []}
-        for i in range(n):
-            quiz["questions"].append({
-                "id": f"{stem}_q{i+1}",
-                "question": f"Placeholder question {i+1} about {stem}",
-                "answer": f"Placeholder answer {i+1}",
-                "difficulty": "medium"
-            })
-        return quiz
+    if isinstance(s, (dict, list)):
+        return s
+    if not isinstance(s, str):
+        raise ValueError("llm_call returned unsupported type")
 
-    prompt = (
-        f"Create {n} short quiz items (question + answer) from the following context.\n\n"
-        "Return valid JSON with a top-level key 'questions' which is a list of objects "
-        "each having: id (string), question (string), answer (string), difficulty (easy|medium|hard).\n\n"
-        f"Context:\n{context_text}\n\nReturn JSON ONLY."
-    )
+    text = s.strip()
 
-    attempt = 0
-    last_exc = None
-    while attempt <= retries:
+    # strip code fences commonly added by LLMs
+    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"```\s*$", "", text)
+
+    # try direct parse
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # find first balanced { ... } or [ ... ] while respecting quoted strings and escapes
+    def find_balanced(t):
+        start_idx = None
+        opener = None
+        for i, ch in enumerate(t):
+            if ch in ("{", "["):
+                start_idx = i
+                opener = ch
+                break
+        if start_idx is None:
+            return None
+        closer = "}" if opener == "{" else "]"
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start_idx, len(t)):
+            ch = t[i]
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"' and not esc:
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    return t[start_idx:i+1]
+        return None
+
+    sub = find_balanced(text)
+    if sub:
         try:
-            resp = llm_call(prompt)
-            if isinstance(resp, dict):
-                parsed = resp
-            elif isinstance(resp, str):
-                parsed = json.loads(resp)
-            else:
-                raise ValueError("llm_call returned unsupported type")
-            questions = parsed.get("questions")
-            if not isinstance(questions, list):
-                raise ValueError("Response missing 'questions' list")
-            if len(questions) > n:
-                questions = questions[:n]
-            out_qs = []
-            for i, q in enumerate(questions):
-                if not isinstance(q, dict):
-                    continue
-                out_qs.append({
-                    "id": q.get("id") or f"{stem}_q{i+1}",
-                    "question": q.get("question") or q.get("prompt") or "",
-                    "answer": q.get("answer") or q.get("solution") or "",
-                    "difficulty": q.get("difficulty") or "medium"
-                })
-            return {"stem": stem, "questions": out_qs}
-        except Exception as e:
-            last_exc = e
-            attempt += 1
-            if attempt > retries:
-                raise RuntimeError(f"LLM quiz generation failed after {retries} retries: {e}")
-            sleep = BACKOFF_BASE * (2 ** (attempt - 1))
-            time.sleep(sleep)
-    raise RuntimeError(f"LLM quiz generation failed: {last_exc}")
+            return json.loads(sub)
+        except Exception:
+            # last-ditch: replace single quotes with double quotes and try (dangerous but sometimes helpful)
+            try:
+                alt = sub.replace("'", '"')
+                return json.loads(alt)
+            except Exception:
+                pass
+
+    raise ValueError("Could not parse JSON from LLM output")
 
 
-# ---------------------------
-# MCQ v2 internals
-# ---------------------------
-_STOPWORDS = {
-    "the", "and", "for", "with", "that", "this", "these", "those", "from", "which", "what",
-    "when", "where", "were", "have", "has", "had", "are", "is", "was", "been", "but", "not",
-    "their", "they", "them", "can", "could", "would", "should", "will", "shall", "about", "into",
-    "over", "under", "between", "within", "also", "such", "other", "than", "then", "there", "here",
-    "you", "your", "our", "its", "it's", "i", "we", "me", "a", "an", "of", "by", "to", "as", "on"
-}
-_PRONOUNS = {"you", "your", "yours", "it", "its", "they", "them", "their", "he", "she", "we", "i", "me", "us"}
-_BAD_STARTS = {"when", "for", "if", "because", "while", "could", "would", "should", "may", "might",
-               "does", "do", "did", "is", "are", "was", "were", "how", "why", "what"}
-
-# blacklist of tokens (strict)
-_KEY_BLACKLIST_TOKENS = {
-    "shorter", "short", "recent", "recently", "very", "need", "needs", "book",
-    "chapter", "article", "articles", "section", "sections", "pages", "version",
-    "versions", "introduction", "summary", "overview", "conclusion", "concept", "description", "full"
-}
-
-_STEMS_KEY = [
-    "Which statement best defines {key}?",
-    "What does {key} mean in this context?",
-    "According to the passage, what is the role of {key}?",
-    "Which option best describes the purpose of {key}?"
-]
-_STEMS_SNIPPET = [
-    "What is the main idea of the following sentence: \"{snippet}\"?",
-    "Which option best explains the sentence: \"{snippet}\"?"
-]
-
-_DISTRACTOR_TEMPLATES = [
-    "{concept} is an unrelated concept mentioned elsewhere in the lecture.",
-    "{concept} refers to a different topic discussed in the text.",
-    "{concept} is an example rather than a definition.",
-    "{concept} describes a separate process not asked here."
-]
-
-_GENERIC_FILLERS = [
-    "A process for validating data quality.",
-    "A technique to anonymize or protect user information.",
-    "An organizational role responsible for data collection."
-]
-
-
-def _shorten_statement(s: str, max_len: int = 180) -> str:
-    s = (s or "").strip()
+# ---------- small helpers ----------
+def _shorten(s: str, max_len=240) -> str:
+    if not s:
+        return s
+    s = s.strip()
     if len(s) <= max_len:
         return s
     cut = s[:max_len]
     last_p = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
-    if last_p > max_len - 60:
-        return cut[:last_p+1].strip()
-    return cut[:max_len-3].rstrip() + "..."
+    if last_p > max_len - 80:
+        return cut[:last_p + 1].strip()
+    return cut[:max_len - 3].rstrip() + "..."
 
 
 def _token_overlap_fraction(a: str, b: str) -> float:
@@ -164,471 +126,279 @@ def _token_overlap_fraction(a: str, b: str) -> float:
     return len(inter) / max(len(ta), len(tb))
 
 
-def _is_fragment_like(s: str) -> bool:
-    if not s or len(s.strip()) < 3:
+def _looks_like_filler(s: str) -> bool:
+    if not s:
         return True
-    first = re.match(r'^\s*([A-Za-z\'-]+)', s)
-    if first:
-        w = first.group(1).lower()
-        if w in _BAD_STARTS or w in _PRONOUNS:
-            if len(s.split()) < 6:
-                return True
+    ls = s.lower()
+    for p in _BAD_PHRASES:
+        if p in ls:
+            return True
+    if len(s.split()) < 2 and len(s) < 6:
+        return True
     return False
 
 
-def _words_from_text(text: str) -> List[str]:
-    found = re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", (text or ""))
-    out = []
-    seen = set()
-    for w in found:
-        lw = w.strip()
-        if lw.lower() in _STOPWORDS:
-            continue
-        if lw.lower() in seen:
-            continue
-        seen.add(lw.lower())
-        out.append(lw)
-    return out
-
-
-# ---------------------------
-# STEP 1: Strict key extraction
-# ---------------------------
-def _extract_key_phrase(sentence: str) -> Optional[str]:
-    """
-    STRICT rules:
-      - Reject very short sentences (< 8 words).
-      - Prefer determiner-led noun phrases or subject-before-copula.
-      - Prefer capitalized multi-word terms.
-      - FALLBACK: only accept capitalized 1-2 word phrases.
-      - Before returning candidate, require at least 2 words (len >= 2).
-      - Candidate tokens should be noun-like (not gerunds/verbs/adjectives only).
-    """
-    if not sentence or not sentence.strip():
-        return None
-    if len(sentence.split()) < 8:
-        return None
-
-    s = sentence.strip()
-
-    def _candidate_is_noun_like(cand: str) -> bool:
-        toks = [t for t in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", cand)]
-        if len(toks) < 2:
-            return False
-        # require at least one token that is length >=4 and not in stopwords or blacklist
-        good = [t for t in toks if len(t) >= 4 and t.lower() not in _STOPWORDS and t.lower() not in _KEY_BLACKLIST_TOKENS]
-        if not good:
-            return False
-        # avoid tokens that look like verbs (ending in 'ing', 'ed') for all tokens
-        if all(t.lower().endswith(("ing", "ed")) for t in toks):
-            return False
-        return True
-
-    # 1) determiner-led noun phrase: "the X Y", "a middleware layer"
-    det_re = re.compile(r'\b(?:the|a|an)\s+([A-Za-z][A-Za-z\'-]{2,}(?:\s+[A-Za-z][A-Za-z\'-]{2,}){0,2})', flags=re.IGNORECASE)
-    for m in det_re.finditer(s):
-        cand = m.group(1).strip()
-        if cand and not _is_fragment_like(cand) and cand.lower() not in _KEY_BLACKLIST_TOKENS and _candidate_is_noun_like(cand):
-            return cand
-
-    # 2) subject before copula "X is ..." / "X provides ..."
-    cop_re = re.compile(
-        r'([A-Za-z][A-Za-z\'-]{2,}(?:\s+[A-Za-z][A-Za-z\'-]{2,}){0,2})\s+'
-        r'(?:is|are|was|were|provides|offers|refers to|refers|involves|helps|aims to|serves as|acts as)\b',
-        flags=re.IGNORECASE
-    )
-    m = cop_re.search(s)
-    if m:
-        cand = m.group(1).strip()
-        if cand and not _is_fragment_like(cand) and cand.lower() not in _KEY_BLACKLIST_TOKENS and _candidate_is_noun_like(cand):
-            return cand
-
-    # 3) capitalized multi-word phrases (proper nouns / named concepts)
-    cap_re = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b')
-    for m in cap_re.finditer(s):
-        cand = m.group(1).strip()
-        if cand and not _is_fragment_like(cand) and len(cand.split()) >= 2 and cand.lower() not in _KEY_BLACKLIST_TOKENS and _candidate_is_noun_like(cand):
-            return cand
-
-    # 4) fallback: accept only capitalized 1-2 word phrases
-    fallback_tokens = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b", s)
-    for t in fallback_tokens:
-        if t and not _is_fragment_like(t) and len(t.split()) >= 2 and t.lower() not in _KEY_BLACKLIST_TOKENS and _candidate_is_noun_like(t):
-            return t
-
-    return None
-
-
-# ---------------------------
-# STEP 2: Rephrase correct answer BUT return None if not meaningful
-# ---------------------------
-def _clause_containing_key(sentence: str, key: Optional[str]) -> str:
-    if not key:
-        return sentence or ""
-    parts = re.split(r'[;:,\-\—]|\s+which\s+|\s+that\s+', sentence or "", flags=re.IGNORECASE)
-    for p in parts:
-        if re.search(re.escape(key), p, flags=re.IGNORECASE):
-            return p.strip()
-    return sentence or ""
-
-
-def _rephrase_correct_answer(sentence: str, key: Optional[str]) -> Optional[str]:
-    """
-    Produce a concise correct answer when predicate/object are clear.
-    Return None if we cannot produce a meaningful answer (this causes the generator to skip).
-    Requirements:
-      - candidate must contain predicate and object with at least ~6 tokens total.
-      - object must include at least one noun-like token (length >=4, not stopword/blacklist).
-    """
-    if not key:
-        return None
-    clause = _clause_containing_key(sentence, key)
-    clause = (clause or "").strip().rstrip('.')
-
-    # try copula/predicate approach
-    m = re.search(r'\b(is|are|was|were|refers to|refers|means|provides|offers|helps|enables|aims to|involves|serves as|acts as|is used to|is a|is an)\b', clause, flags=re.IGNORECASE)
-    if m:
-        pred = clause[m.end():].strip(',;: ')
-        verb = m.group(0).lower()
-        if pred:
-            pred_clean = re.sub(r'^\b(to|for|the|a|an)\b', '', pred, flags=re.IGNORECASE).strip()
-            if not pred_clean:
-                return None
-            candidate = f"{key} {verb} {pred_clean}"
-            candidate = re.sub(r'\s+', ' ', candidate).strip()
-            toks = candidate.split()
-            # require >= 6 tokens to avoid one-word/object outputs
-            if len(toks) >= 6:
-                # ensure object contains at least one noun-like token
-                obj_tokens = [t for t in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", pred_clean)]
-                noun_like = any(len(t) >= 4 and t.lower() not in _STOPWORDS and t.lower() not in _KEY_BLACKLIST_TOKENS and not t.lower().endswith(("ing", "ed")) for t in obj_tokens)
-                if noun_like:
-                    return _shorten_statement(candidate + ".", max_len=180)
-    # else: refuse to guess — return None per STEP 2
-    return None
-
-
-# ---------------------------
-# STEP 3: Distractor generation (avoid broken templates and single-token inserts)
-# ---------------------------
-def _collect_related_concepts(context_text: str, sentence: str, key: Optional[str], max_candidates: int = 8) -> List[str]:
-    """
-    Collect nearby multi-word concepts or strong tokens. Only return candidates that
-    are multi-word (>=2 tokens) OR single tokens that are long and clearly noun-like.
-    """
-    sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', (context_text or "")) if s.strip()]
-    if not sents:
+def _paragraph_chunks(text: str, approx_words: int = 80) -> List[str]:
+    if not text:
         return []
-    idx = None
-    for i, s in enumerate(sents):
-        if sentence and (sentence[:40] in s or s in sentence or sentence in s):
-            idx = i
-            break
-    if idx is None:
-        idx = 0
-    candidates = []
-    for j in range(max(0, idx-1), min(len(sents), idx+2)):
-        s = sents[j]
-        for m in re.finditer(r'\b(?:the|a|an)\s+([A-Za-z][A-Za-z\'-]{2,}(?:\s+[A-Za-z][A-Za-z\'-]{2,}){0,2})', s, flags=re.IGNORECASE):
-            ph = m.group(1).strip()
-            if ph and ph.lower() != (key or "").lower() and not _is_fragment_like(ph):
-                candidates.append(ph)
-        for t in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", s):
-            if t.lower() in _STOPWORDS or (key and t.lower() == key.lower()):
-                continue
-            if not _is_fragment_like(t):
-                candidates.append(t)
-    # global words
-    for w in _words_from_text(context_text):
-        if key and w.lower() == key.lower():
-            continue
-        if not _is_fragment_like(w):
-            candidates.append(w)
-
-    out = []
-    seen = set()
-    for c in candidates:
-        cl = c.strip()
-        low = cl.lower()
-        if low in seen:
-            continue
-        toks = cl.split()
-        # accept if multiword >=2 OR single long noun-like token
-        if len(toks) >= 2:
-            pass
-        else:
-            t = toks[0]
-            if len(t) < 4 or t.lower() in _KEY_BLACKLIST_TOKENS:
-                continue
-        if len(cl.split()) > 4:
-            continue
-        seen.add(low)
-        out.append(cl)
-        if len(out) >= max_candidates:
-            break
-    return out
-
-
-def _generate_plausible_distractors(correct: str, related: List[str], key: Optional[str]) -> List[str]:
-    """
-    Create up to 3 distractors from multi-word related concepts first, then safe generic fillers.
-    Avoid inserting single token junk and avoid templates that produce broken grammar.
-    """
-    distractors: List[str] = []
-    used = set()
-
-    # Use related phrases (prefer multi-word)
-    related_sorted = sorted(related, key=lambda x: (-len(x.split()), x))  # prefer multiword
-    for r in related_sorted:
-        if len(distractors) >= 3:
-            break
-        if not r:
-            continue
-        # ensure we don't insert single meaningless tokens
-        if len(r.split()) < 2 and len(r) < 6:
-            continue
-        if _token_overlap_fraction(r, correct) > 0.6:
-            continue
-        t = random.choice(_DISTRACTOR_TEMPLATES)
-        cand = t.replace("{concept}", r).strip()
-        if not cand.endswith("."):
-            cand = cand + "."
-        if _token_overlap_fraction(cand, correct) > 0.75:
-            continue
-        if cand.lower() in used:
-            continue
-        distractors.append(_shorten_statement(cand, max_len=160))
-        used.add(cand.lower())
-
-    # fallback generics
-    for g in _GENERIC_FILLERS:
-        if len(distractors) >= 3:
-            break
-        if _token_overlap_fraction(g, correct) > 0.75:
-            continue
-        if g.lower() in used:
-            continue
-        distractors.append(g)
-        used.add(g.lower())
-
-    # last-resort filler
-    while len(distractors) < 3:
-        distractors.append("This statement is not supported by the lecture text.")
-    return distractors[:3]
-
-
-# ---------------------------
-# Snippet-based fallback (used rarely; still strict)
-# ---------------------------
-def _snippet_based_question_and_choices(sentence: str, context_text: str):
-    """
-    Build a snippet-centered Q + correct + distractors.
-    This is used only when key-based extraction isn't appropriate; still must satisfy strict filters.
-    """
-    correct = _shorten_statement(sentence.strip().rstrip('.'), max_len=180)
-    if not correct.endswith('.'):
-        correct = correct + '.'
-
-    # gather other candidate sentences as distractors (shorten them)
-    sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', (context_text or "")) if s.strip()]
-    distractor_snips = []
+    sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    chunks = []
+    cur = []
+    cur_words = 0
     for s in sents:
-        if s.strip() == sentence.strip():
-            continue
-        if len(distractor_snips) >= 3:
-            break
-        if len(s.split()) < 8:
-            continue
-        sn = _shorten_statement(s.strip().rstrip('.'), max_len=160)
-        if sn and sn.lower() != correct.lower() and _token_overlap_fraction(sn, correct) < 0.7:
-            if not sn.endswith('.'):
-                sn = sn + '.'
-            distractor_snips.append(sn)
-    # if not enough sentence-distractors, use safe generics
-    gi = 0
-    while len(distractor_snips) < 3 and gi < len(_GENERIC_FILLERS):
-        cand = _GENERIC_FILLERS[gi]
-        gi += 1
-        if _token_overlap_fraction(cand, correct) < 0.8:
-            distractor_snips.append(cand)
-    while len(distractor_snips) < 3:
-        distractor_snips.append("This statement is not supported by the lecture text.")
-    snippet_short = _shorten_statement(sentence.strip().rstrip('.'), max_len=120)
-    stem = random.choice(_STEMS_SNIPPET).format(snippet=snippet_short)
-    return stem, correct, distractor_snips[:3]
+        w = len(s.split())
+        if cur and (cur_words + w > approx_words) and len(cur) > 0:
+            chunks.append(" ".join(cur))
+            cur = [s]
+            cur_words = w
+        else:
+            cur.append(s)
+            cur_words += w
+    if cur:
+        chunks.append(" ".join(cur))
+    chunks = [c for c in chunks if len(c.split()) >= _MIN_SENT_WORDS]
+    return chunks
 
 
-# ---------------------------
-# Main MCQ generator (strict)
-# ---------------------------
-def generate_mcq_from_context(context_text: str, n: int = 5) -> List[Dict]:
+_MCQ_PROMPT_TEMPLATE = """
+You are an expert quiz writer. Produce ONE high-quality multiple-choice question (MCQ) that tests
+a learner's understanding of the provided paragraph. Return JSON ONLY (no extra text).
+JSON must be an object with keys: id, question, choices (A-D), answer (A-D), explanation.
+
+Paragraph:
+\"\"\"{paragraph}\"\"\"
+"""
+
+
+def _validate_mcq_obj(obj: dict, paragraph: str) -> bool:
+    try:
+        if not isinstance(obj, dict):
+            return False
+        if "question" not in obj or "choices" not in obj or "answer" not in obj:
+            return False
+        q = str(obj["question"]).strip()
+        if len(q) < _MIN_QUESTION_LEN:
+            return False
+        choices = obj["choices"]
+        if not isinstance(choices, dict):
+            return False
+        keys = ["A", "B", "C", "D"]
+        if any(k not in choices for k in keys):
+            return False
+        seen_texts = set()
+        for k in keys:
+            ch = str(choices[k]).strip()
+            if len(ch) < _MIN_CHOICE_LEN:
+                return False
+            if _looks_like_filler(ch):
+                return False
+            low = re.sub(r'\s+', ' ', ch.lower())
+            if low in seen_texts:
+                return False
+            seen_texts.add(low)
+        ans = str(obj["answer"]).strip().upper()
+        if ans not in keys:
+            return False
+        correct_text = str(choices[ans])
+        overlap = _token_overlap_fraction(correct_text, paragraph)
+        if overlap < 0.05 and overlap <= 0.0:
+            return False
+        for k in keys:
+            if k == ans:
+                continue
+            if _token_overlap_fraction(str(choices[k]), correct_text) > 0.9:
+                return False
+        if "explanation" in obj:
+            ex = str(obj["explanation"]).strip()
+            if len(ex) > 500:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+# ---------- core generator ----------
+def generate_mcq_from_context(context_text: str, n: int = 5,
+                              llm_call: Optional[Callable[[str], str]] = None,
+                              chunk_word_target: int = 90) -> List[Dict]:
     """
-    Generate up to n high-quality MCQs. It's acceptable to return fewer than n if strict rules block poor candidates.
+    Generate up to n MCQs. If llm_call is None -> deterministic placeholders.
+    If llm_call provided -> use it for each chunk, validate JSON, and collect MCQs.
     """
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', (context_text or "")) if s.strip()]
-    candidates = []
-    for s in sentences:
-        if len(s.split()) < 8:
-            continue
-        if _is_fragment_like(s.split('.')[0]):
-            continue
-        candidates.append(s)
-    if not candidates:
+    if llm_call is None:
+        # deterministic placeholders for local dev/testing
+        chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target) or [
+            "Placeholder paragraph about " + ("the topic" if not context_text else context_text[:60])
+        ]
+        out = []
+        for i, ch in enumerate(chunks[:n]):
+            qid = f"q{i+1}"
+            q = "Placeholder: which statement best summarizes the paragraph?"
+            choices = {
+                "A": "A placeholder plausible choice about the paragraph.",
+                "B": "Another placeholder distractor that looks plausible.",
+                "C": "A third placeholder distractor that is plausible here.",
+                "D": "The correct placeholder answer is this one."
+            }
+            out.append({"id": qid, "question": q, "choices": choices, "answer": "D", "explanation": "Placeholder explanation."})
+        return [{"id": it["id"], "question": it["question"], "choices": it["choices"], "answer": it["answer"]} for it in out]
+
+    # Use LLM
+    chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target)
+    if not chunks:
         return []
 
-    global_words = _words_from_text(context_text)
-    if len(global_words) < 8:
-        tokens = re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", (context_text or ""))
-        for t in tokens:
-            if t.lower() not in _STOPWORDS and t not in global_words:
-                global_words.append(t)
-            if len(global_words) >= 12:
-                break
-
-    out_questions: List[Dict] = []
-    used_keys = set()
+    out_mcqs: List[Dict] = []
+    used_questions = set()
+    used_choice_texts = set()
     attempts = 0
-    max_attempts = max(80, n * 12)
-    created = 0
+    max_attempts = max(len(chunks) * (MAX_RETRIES + 1), n * 4)
 
-    while created < n and attempts < max_attempts:
-        attempts += 1
-        sent = random.choice(candidates)
+    for i_chunk, chunk in enumerate(chunks):
+        if len(out_mcqs) >= n:
+            break
+        prompt = _MCQ_PROMPT_TEMPLATE.format(paragraph=_shorten(chunk, max_len=2000))
+        attempt = 0
+        while attempt <= MAX_RETRIES:
+            attempt += 1
+            attempts += 1
+            try:
+                logger.info("Calling LLM for chunk %s (attempt %s)", i_chunk, attempt)
+                raw = llm_call(prompt)
+                if raw is None:
+                    raise RuntimeError("LLM returned None")
 
-        # avoid repeats of the same source sentence
-        if any(q.get("question_source_sentence") == sent for q in out_questions) and random.random() < 0.7:
-            continue
+                # log short preview for debugging (avoid huge logs)
+                preview = str(raw)[:1000]
+                logger.debug("LLM raw preview: %s", preview.replace("\n", " ")[:1000])
 
-        key = _extract_key_phrase(sent)
-        if not key:
-            # strict: skip sentences without a strong key
-            continue
+                # try to parse JSON
+                parsed = safe_json_load(raw)
 
-        # avoid duplicate keys
-        if key.lower() in used_keys:
-            continue
+                # normalize possible shapes
+                if isinstance(parsed, dict) and "question" in parsed and "choices" in parsed and "answer" in parsed:
+                    mcq_obj = parsed
+                else:
+                    if isinstance(parsed, dict) and "questions" in parsed and isinstance(parsed["questions"], list) and parsed["questions"]:
+                        mcq_obj = parsed["questions"][0]
+                    elif isinstance(parsed, list) and parsed:
+                        mcq_obj = parsed[0]
+                    else:
+                        raise ValueError("unexpected LLM JSON shape")
 
-        # build correct answer; must be meaningful and >= 6 tokens
-        correct = _rephrase_correct_answer(sent, key)
-        if not correct or len(correct.split()) < 6:
-            # skip weak correct answers (STEP 3)
-            continue
+                if not mcq_obj.get("id"):
+                    mcq_obj["id"] = f"q{len(out_mcqs) + 1}"
 
-        related = _collect_related_concepts(context_text, sent, key, max_candidates=12)
-        if not related:
-            related = [w for w in global_words if not key or w.lower() != key.lower()][:8]
+                if not _validate_mcq_obj(mcq_obj, chunk):
+                    logger.warning("LLM returned MCQ failed validation for chunk %s on attempt %s: %s", i_chunk, attempt, mcq_obj)
+                    if attempt <= MAX_RETRIES:
+                        time.sleep(BACKOFF_BASE * attempt)
+                        continue
+                    else:
+                        break
 
-        distractors = _generate_plausible_distractors(correct, related, key)
-
-        # assemble choices
-        choices_list = [correct] + distractors[:3]
-
-        # uniqueness and small qualifiers
-        normalized = []
-        seen = set()
-        for ch in choices_list:
-            chs = (ch or "").strip()
-            kn = re.sub(r'\s+', ' ', chs.lower())
-            if kn in seen:
-                alt = chs.rstrip('.') + " (alternative)."
-                if re.sub(r'\s+', ' ', alt.lower()) in seen:
-                    alt = chs + " (variant)."
-                normalized.append(alt)
-                seen.add(re.sub(r'\s+', ' ', alt.lower()))
-            else:
-                normalized.append(chs)
-                seen.add(kn)
-        choices_list = normalized[:4]
-
-        # fill to 4 if needed with safe generics
-        if len(choices_list) < 4:
-            for f in _GENERIC_FILLERS:
-                if len(choices_list) >= 4:
+                q_text = re.sub(r'\s+', ' ', mcq_obj["question"].strip().lower())
+                if q_text in used_questions:
+                    logger.info("Duplicate question detected; skipping.")
                     break
-                fk = re.sub(r'\s+', ' ', f.strip().lower())
-                if fk not in seen:
-                    choices_list.append(f)
-                    seen.add(fk)
 
-        # sanity checks
-        bad = False
-        for ch in choices_list:
-            if not ch or len(ch.strip()) < 6:
-                bad = True
-                break
-            if re.search(r'[^A-Za-z0-9\s,.\-()\'":;]', ch):
-                bad = True
-                break
-        if bad or len(choices_list) < 4:
-            continue
-
-        random.shuffle(choices_list)
-        labels = ["A", "B", "C", "D"]
-        choices_dict = {lab: txt for lab, txt in zip(labels, choices_list)}
-
-        # locate correct label
-        correct_label = None
-        for lab, txt in choices_dict.items():
-            if txt.strip() == correct.strip():
-                correct_label = lab
-                break
-        if correct_label is None:
-            for lab, txt in choices_dict.items():
-                if correct.strip().lower() in txt.strip().lower():
-                    correct_label = lab
+                choice_concat = " ".join([re.sub(r'\s+', ' ', str(v).strip().lower()) for v in mcq_obj["choices"].values()])
+                if choice_concat in used_choice_texts:
+                    logger.info("Duplicate choices across quiz; skipping.")
                     break
-        if correct_label is None:
-            slot = random.choice(labels)
-            choices_dict[slot] = correct
-            correct_label = slot
 
-        # stem must be readable
-        stem = random.choice(_STEMS_KEY).format(key=key)
-        if _is_fragment_like(stem):
-            continue
+                # trim
+                mcq_obj["question"] = _shorten(str(mcq_obj["question"]), max_len=240)
+                for k, v in mcq_obj["choices"].items():
+                    mcq_obj["choices"][k] = _shorten(str(v), max_len=180)
+                if "explanation" in mcq_obj:
+                    mcq_obj["explanation"] = _shorten(str(mcq_obj["explanation"]), max_len=240)
 
-        used_keys.add(key.lower())
+                out_mcqs.append({
+                    "id": mcq_obj["id"],
+                    "question": mcq_obj["question"],
+                    "choices": mcq_obj["choices"],
+                    "answer": mcq_obj["answer"],
+                    "explanation": mcq_obj.get("explanation", "")
+                })
+                used_questions.add(q_text)
+                used_choice_texts.add(choice_concat)
+                break
 
-        out_questions.append({
-            "id": f"q{created+1}",
-            "question": stem,
-            "choices": choices_dict,
-            "answer": correct_label,
-            "question_source_sentence": sent  # internal trace (will be stripped below)
-        })
-        created += 1
+            except ValueError as e:
+                logger.exception("Parsing/validation error on LLM output for chunk %s (attempt %s): %s", i_chunk, attempt, e)
+                if attempt > MAX_RETRIES:
+                    break
+                time.sleep(BACKOFF_BASE * (2 ** (attempt - 1)))
+                continue
+            except Exception as e:
+                logger.exception("LLM call error for chunk %s (attempt %s): %s", i_chunk, attempt, e)
+                if attempt > MAX_RETRIES:
+                    break
+                time.sleep(BACKOFF_BASE * (2 ** (attempt - 1)))
+                continue
 
-    # strip internals and return
+        if attempts >= max_attempts:
+            logger.warning("Reached max attempts (%s) while generating MCQs.", max_attempts)
+            break
+
+    # final normalize
     cleaned = []
-    for q in out_questions:
-        cleaned.append({
+    for q in out_mcqs[:n]:
+        base = {
             "id": q["id"],
             "question": q["question"],
             "choices": q["choices"],
             "answer": q["answer"]
-        })
-
+        }
+        if q.get("explanation"):
+            base["explanation"] = q["explanation"]
+        cleaned.append(base)
     return cleaned
 
 
-# ---------------------------
-# Local sanity/demo runner
-# ---------------------------
+# Backwards-compatible wrapper
+def generate_quiz_from_context(stem: str, context_text: str, n: int = 5,
+                               llm_call: Optional[Callable[[str], str]] = None,
+                               retries: int = MAX_RETRIES) -> Dict:
+    try:
+        mcqs = generate_mcq_from_context(context_text, n=n, llm_call=llm_call)
+    except TypeError:
+        mcqs = generate_mcq_from_context(context_text, n=n)
+
+    questions = []
+    for i, q in enumerate(mcqs):
+        qid = q.get("id") or f"{stem}_q{i+1}"
+        question_text = q.get("question", "")
+        answer_label = q.get("answer", "")
+        choices = q.get("choices", {}) or {}
+        answer_text = ""
+        if isinstance(choices, dict) and answer_label and answer_label in choices:
+            answer_text = choices.get(answer_label)
+        else:
+            answer_text = q.get("answer", "") or q.get("solution", "")
+        difficulty = q.get("difficulty", "medium")
+        questions.append({
+            "id": qid,
+            "question": question_text,
+            "answer": answer_text,
+            "difficulty": difficulty
+        })
+    return {"stem": stem, "questions": questions}
+
+
+# quick demo
 if __name__ == "__main__":
-    # small demo: paste a short example text here to test
-    demo_text = (
-        "Information infrastructure is the set of systems and standards that enable data collection "
-        "and sharing across urban departments. A middle-out approach seeks to connect institutional "
-        "processes with local needs. Spatial data sets are more readily available and some cities have institutionalized data flows. "
-        "The introduction chapter summarizes the concepts in the book. Built Heritage refers to the collection of historic structures."
-    )
-    print("Running generate_mcq_from_context demo (request 5 items)...\n")
-    qs = generate_mcq_from_context(demo_text, n=5)
-    print(f"Generated {len(qs)} questions:\n")
-    for q in qs:
-        print(f"ID: {q['id']}")
-        print(q['question'])
-        for L, txt in q['choices'].items():
-            print(f"  {L}. {txt}")
-        print("Answer:", q['answer'])
-        print("-" * 60)
+    def fake_llm(prompt: str) -> str:
+        demo = {
+            "id": "q1",
+            "question": "Demo question?",
+            "choices": {"A": "one", "B": "two", "C": "three", "D": "four"},
+            "answer": "A",
+            "explanation": "demo"
+        }
+        return json.dumps(demo)
+
+    s = ("Information infrastructure is the set of systems ... "
+         "The introduction chapter summarizes the concepts.")
+    print(generate_mcq_from_context(s, n=2, llm_call=fake_llm))
