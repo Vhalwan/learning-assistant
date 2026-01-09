@@ -22,7 +22,6 @@ import requests
 import json
 import html as html_mod
 import uuid
-# after your other imports
 from backend.llm_client import get_llm_call
 
 llm = get_llm_call()
@@ -172,7 +171,6 @@ def _strip_key_concepts_from_answer(answer: str) -> str:
     m = re.search(r"\n+(?:\d+\s*)?Key\s+Concepts?\b", answer, flags=re.IGNORECASE)
     if m:
         return answer[:m.start()].strip()
-    # also handle 'Key concepts / highlights' phrasing
     m2 = re.search(r"\n+Key\s+concepts\b", answer, flags=re.IGNORECASE)
     if m2:
         return answer[:m2.start()].strip()
@@ -189,8 +187,7 @@ def _clean_summary_text(summary: str) -> str:
 # ----------------------------
 # Chat-history trimming helper
 # ----------------------------
-# CHANGE: added a helper to silently trim chat history to a max number of turns (pairs)
-MAX_CHAT_TURNS = 6  # maximum number of user+assistant pairs to retain (silent)
+MAX_CHAT_TURNS = 6
 
 
 def _trim_history_to_max_turns(history: List[Dict[str, Any]], max_turns: int = MAX_CHAT_TURNS) -> List[Dict[str, Any]]:
@@ -218,7 +215,6 @@ def _trim_history_to_max_turns(history: List[Dict[str, Any]], max_turns: int = M
             pairs.append([history[i]])
             i += 1
         else:
-            # unknown role - keep as single
             pairs.append([history[i]])
             i += 1
     # keep only the last max_turns pairs
@@ -462,26 +458,23 @@ if uploaded:
                         st.exception(e)
 
     # -----------------------
-    # Tab: Chat (conversation)
+    # Tab: Chat
     # -----------------------
     with tab3:
         st.subheader("Chat with the lecture (conversational)")
 
-        # ensure a per-document chat history in session state
         hist_key = f"chat_history_{stem}"
         if hist_key not in st.session_state:
-            st.session_state[hist_key] = []  # list of {"role": "user"/"assistant", "content": "...", "meta": {...}}
+            st.session_state[hist_key] = []
 
-        # Chat controls (keep above the form)
+        # Chat controls
         chat_k = st.number_input("Top-k chunks to retrieve for each turn", min_value=1, max_value=10, value=3, step=1, key="chat_k")
 
-        # CHANGE: renamed button label to "Clear chat" per UX request
         if st.button("Clear chat"):
-            # Reset only this document's chat history (does not affect other tabs)
+            # Reset only this document's chat history
             st.session_state[hist_key] = []
             st.success("Chat history cleared for this document.")
 
-        # --- Input form comes first now ---
         with st.form(key=f"chat_form_{stem}"):
             user_msg = st.text_input("Message to assistant", key=f"chat_input_{stem}")
             send_pressed = st.form_submit_button("Send")
@@ -537,7 +530,6 @@ if uploaded:
 
                         display_answer = _strip_key_concepts_from_answer(ans or "")
 
-                        # --------- Replace existing "if updated_history: ... else: ..." block with this (no timestamps) ---------
                         if updated_history:
                             # Convert backend history into local structure and sanitize assistant text
                             new_hist: List[Dict[str, Any]] = []
@@ -555,14 +547,12 @@ if uploaded:
                             # enforce silent max history trimming immediately after updating history
                             st.session_state[hist_key] = _trim_history_to_max_turns(new_hist, max_turns=MAX_CHAT_TURNS)
                         else:
-                            # Append locally (user + assistant); no timestamp stored
                             st.session_state[hist_key].append({"role": "user", "content": user_msg})
                             st.session_state[hist_key].append(
                                 {"role": "assistant", "content": display_answer, "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}}
                             )
                             # enforce silent max history trimming immediately after appending new messages
                             st.session_state[hist_key] = _trim_history_to_max_turns(st.session_state[hist_key], max_turns=MAX_CHAT_TURNS)
-                        # ----------------------------------------------------------------------------------------
 
                         # Provide immediate feedback
                         st.success("Assistant replied — see chat above.")
@@ -571,7 +561,6 @@ if uploaded:
                         st.error("Conversational RAG failed.")
                         st.exception(e)
 
-        # --- Now render the chat history (after any update above) ---
         st.markdown("----")
         chat_history: List[Dict[str, Any]] = st.session_state[hist_key]
         if not chat_history:
@@ -580,12 +569,12 @@ if uploaded:
             for idx, turn in enumerate(chat_history):
                 role = turn.get("role", "user")
                 content = turn.get("content", "")
-                # Always present sanitized assistant content at render time as well (safety)
+                # Always present sanitized assistant content at render time as well
                 if role and role.lower().startswith("assistant"):
                     content = _strip_key_concepts_from_answer(content or "")
                 meta = turn.get("meta", {}) or {}
 
-                # Render user messages (no timestamp)
+                # Render user messages
                 if role == "user":
                     st.markdown(f"**You:**\n\n{content}", unsafe_allow_html=True)
                 else:
@@ -654,7 +643,7 @@ if (btn) {{
     # number input (keeps same behavior)
     n_q = st.number_input("Number of quiz items", min_value=1, max_value=20, value=5)
 
-    # Generate button - give it a stable key per document to avoid collisions
+    # Generate button give it a stable key per document to avoid collisions
     gen_key = f"gen_quiz_{stem}"
     if st.button("Generate Quiz from lecture", key=gen_key):
         if not text:
@@ -675,7 +664,6 @@ if (btn) {{
                         resp.raise_for_status()
                         out = resp.json()
                         quiz_items = out.get("quiz", []) or []
-                        # ensure ids are stable/prefixed
                         for itm in quiz_items:
                             if "id" in itm and not str(itm["id"]).startswith(f"{stem}_"):
                                 itm["id"] = f"{stem}_{itm['id']}"
@@ -710,8 +698,12 @@ if (btn) {{
                     st.error("Quiz generation failed.")
                     st.exception(e)
 
-    # load quiz items from session_state (if any)
+    # load quiz items from session_state
     quiz_items = st.session_state.get(quiz_state_key, [])
+
+    def _mark_selection_made(sel_key: str):
+        # set a flag to indicate the user actively selected an option
+        st.session_state[f"{sel_key}_made"] = True
 
     # Display MCQs with choices A-D and stable widget keys
     if not quiz_items:
@@ -722,6 +714,7 @@ if (btn) {{
             q_text = q.get("question", "")
             choices = q.get("choices", {}) or {}
             answer_letter = q.get("answer", None)
+            explanation_text = q.get("explanation", "") or ""
 
             # Unique keys for selection, submit, reveal checkbox and SRS button per question
             selection_key = f"{quiz_state_key}_sel_{qid}"
@@ -735,35 +728,62 @@ if (btn) {{
             with st.expander(f"Q ({qid}): {q_text[:140]}", expanded=st.session_state[exp_key]):
                 st.write(q_text)
 
-                # Build readable radio options (A. text, B. text, ...)
-                radio_options = []
+                # Build readable dropdown options (A. text, B. text, ...)
+                dropdown_options = []
                 for label in ["A", "B", "C", "D"]:
                     opt_text = choices.get(label, "")
-                    radio_options.append(f"{label}. {opt_text}")
+                    dropdown_options.append(f"{label}. {opt_text}")
 
                 # Add a placeholder as the first option so nothing meaningful is auto-selected
-                placeholder = "— Select an answer —"
-                radio_options_with_placeholder = [placeholder] + radio_options
+                placeholder = "Select an answer"
+                dropdown_with_placeholder = [placeholder] + dropdown_options
 
-                # Render the radio; disabled if already submitted
                 already_submitted = bool(st.session_state.get(submit_key))
-                selected_display = st.radio(
-                    "Choose an answer",
-                    radio_options_with_placeholder,
-                    index=0,
-                    key=selection_key,
-                    disabled=already_submitted,
-                )
 
-                # Derive chosen letter (None if placeholder selected)
+                # Render the selectbox. No real option is pre-selected visually because
+                # the placeholder is the first item. on_change marks active user interaction.
+                try:
+                    pre_index = 0
+                    if selection_key in st.session_state:
+                        cur = st.session_state.get(selection_key)
+                        if cur in dropdown_with_placeholder:
+                            pre_index = dropdown_with_placeholder.index(cur)
+                        else:
+                            pre_index = 0
+                    st.selectbox(
+                        "Choose an answer",
+                        dropdown_with_placeholder,
+                        index=pre_index,
+                        key=selection_key,
+                        disabled=already_submitted,
+                        on_change=_mark_selection_made,
+                        args=(selection_key,),
+                    )
+                except Exception:
+                    # fallback if index is invalid for any reason
+                    st.selectbox(
+                        "Choose an answer",
+                        dropdown_with_placeholder,
+                        key=selection_key,
+                        disabled=already_submitted,
+                        on_change=_mark_selection_made,
+                        args=(selection_key,),
+                    )
+
+                # Determine chosen letter
                 chosen_letter = None
-                if selected_display and selected_display != placeholder:
-                    # split on first dot to get the letter (e.g. "A. Option text")
-                    chosen_letter = selected_display.split(".", 1)[0].strip()
+                if already_submitted:
+                    submitted = st.session_state.get(submit_key, {})
+                    chosen_letter = submitted.get("chosen")
+                else:
+                    sel_display = st.session_state.get(selection_key)
+                    if sel_display and sel_display != placeholder:
+                        chosen_letter = sel_display.split(".", 1)[0].strip()
 
-                # Check answer button (disabled until a real choice is picked or if already submitted)
+                # Check answer button
                 check_key = f"{quiz_state_key}_check_{qid}"
                 check_disabled = (chosen_letter is None) or already_submitted
+
                 if st.button("Check answer", key=check_key, disabled=check_disabled):
                     # compute correctness and store result in session_state so results persist across reruns
                     is_correct = (chosen_letter == answer_letter) if (chosen_letter and answer_letter) else False
@@ -779,38 +799,36 @@ if (btn) {{
                 if submitted:
                     chosen = submitted.get("chosen")
                     is_correct = submitted.get("is_correct", False)
-                    # Explanation text comes from correct choice text when available
-                    explanation = ""
-                    if answer_letter and choices.get(answer_letter):
-                        explanation = choices.get(answer_letter)
-                    # positive feedback
+
+                    # Always show the explanation (from the quiz item)
                     if is_correct:
-                        # Green success with checkmark + explanation
-                        if explanation:
-                            st.success(f"✅ Correct — {explanation}")
+                        # Correct: show check + explanation
+                        if explanation_text:
+                            st.success(f"✅ Correct\n\n{explanation_text}")
                         else:
                             st.success("✅ Correct")
                     else:
-                        # Red error showing chosen (if any) and the correct answer text/letter
+                        # Incorrect: show error, the correct answer, and the explanation
+                        correct_display = "(not provided)"
+                        if answer_letter and choices.get(answer_letter):
+                            correct_display = f"{answer_letter}. {choices.get(answer_letter)}"
+                        user_choice_text = ""
                         if chosen:
                             user_choice_text = choices.get(chosen, "")
-                            if answer_letter and choices.get(answer_letter):
-                                st.error(f"❌ Incorrect — you chose {chosen}. {user_choice_text}\n\nCorrect: {answer_letter}. {choices.get(answer_letter)}")
-                            else:
-                                st.error(f"❌ Incorrect — you chose {chosen}. {user_choice_text}\n\nCorrect answer: {answer_letter or '(not provided)'}")
+                            st.error(f"❌ Incorrect — you chose {chosen}. {user_choice_text}\n\nCorrect: {correct_display}")
                         else:
-                            # No chosen (defensive)
-                            if answer_letter and choices.get(answer_letter):
-                                st.error(f"❌ Incorrect. Correct: {answer_letter}. {choices.get(answer_letter)}")
-                            else:
-                                st.error("❌ Incorrect.")
+                            st.error(f"❌ Incorrect.\n\nCorrect: {correct_display}")
 
-                # SRS registration (kept as before)
+                        if explanation_text:
+                            # show explanation after the error
+                            st.write("Explanation:")
+                            st.write(explanation_text)
+
+                # SRS registration
                 if st.button(f"Start SRS for {qid}", key=srs_key):
                     try:
                         mgr = SRSManager()
                         mgr.ensure_card(qid)
-                        # persist a flag so user sees confirmation on rerun
                         st.session_state[f"{srs_key}_done"] = True
                         st.info(f"Registered card {qid} in SRS.")
                     except Exception as e:
