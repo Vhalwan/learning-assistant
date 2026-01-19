@@ -17,14 +17,37 @@ class SRSManager:
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except Exception:
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                # Log error but return empty dict to allow recovery
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to load SRS data from {self.path}: {e}")
                 return {}
         return {}
 
     def _save(self):
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, indent=2)
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            # Use atomic write to prevent corruption
+            tmp_path = self.path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, ensure_ascii=False, indent=2)
+            # Atomic replace
+            if os.path.exists(self.path):
+                os.replace(tmp_path, self.path)
+            else:
+                os.rename(tmp_path, self.path)
+        except (IOError, OSError) as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to save SRS data to {self.path}: {e}")
+            # Try to clean up temp file
+            try:
+                if os.path.exists(self.path + ".tmp"):
+                    os.remove(self.path + ".tmp")
+            except Exception:
+                pass
+            raise
 
     def list_due_cards(self, as_of: Optional[datetime] = None) -> List[str]:
         """Return list of card_ids that are due as of `as_of` (UTC)."""

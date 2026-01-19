@@ -1,27 +1,27 @@
 # frontend/app.py
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
 import sys
 import re
+import json
+import html as html_mod
+import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables once at startup
+load_dotenv()
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-
 
 import streamlit as st
 import streamlit.components.v1 as components
 import pdfplumber
 import numpy as np
-from dotenv import load_dotenv
 import requests
-import json
-import html as html_mod
-import uuid
 from backend.llm_client import get_llm_call
 
 llm = get_llm_call()
@@ -29,8 +29,6 @@ if llm is None:
     st.warning("LLM not available — using placeholders")
 else:
     st.info("LLM ready — will generate real MCQs")
-
-load_dotenv()
 
 # Backend helpers
 from backend.summarize_file import summarize_with_gemini
@@ -43,7 +41,8 @@ from backend.rag_query import (
 )
 # generate quiz + SRS
 from backend.generate_quiz import generate_quiz_from_context, generate_mcq_from_context
-from backend.study_srs import SRSManager
+from backend.study_srs import SRSManager, INTERVALS
+from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all_quiz_items
 
 
 # faiss builder
@@ -54,7 +53,7 @@ except Exception:
     _faiss_builder_available = False
 
 st.set_page_config(page_title="Learning Assistant", layout="centered")
-st.title("Learning Assistant — Gemini Demo")
+st.title("Learning Assistant")
 st.markdown(
     """
 Upload a lecture PDF. Controls:
@@ -655,7 +654,7 @@ if (btn) {{
                     if st.session_state.use_api_mode:
                         api_base = os.getenv("API_BASE", API_DEFAULT)
                         token = st.session_state.api_token or ""
-                        url = f"{api_base.rstrip('/')}/generate_quiz"
+                        url = f"{api_base.rstrip('/')}/generate_quiz_live"
                         payload = {"stem": stem, "context_text": text, "n": int(n_q), "type": "mcq"}
                         headers = {}
                         if token:
@@ -686,6 +685,15 @@ if (btn) {{
 
                     # store generated quiz in session_state so it persists across reruns
                     st.session_state[quiz_state_key] = quiz_items
+                    
+                    # Also save to disk for SRS review across sessions
+                    try:
+                        save_quiz_items(stem, quiz_items)
+                        # Invalidate disk cache so new items are loaded
+                        if "srs_disk_quiz_items_cache" in st.session_state:
+                            del st.session_state["srs_disk_quiz_items_cache"]
+                    except Exception as e:
+                        st.warning(f"Quiz saved to session but failed to save to disk: {e}")
 
                 except requests.HTTPError as he:
                     try:
@@ -835,6 +843,325 @@ if (btn) {{
                         st.error("Failed to register SRS card.")
                         st.exception(e)
 
+
+    st.markdown("---")
+    
+    # -----------------------
+    # SRS Review Section
+    # -----------------------
+    st.subheader("📚 Spaced Repetition Review")
+    
+    # Explanation of what SRS is
+    with st.expander("ℹ️ What is Spaced Repetition?", expanded=False):
+        st.markdown("""
+        **Spaced Repetition** is a study technique that helps you remember information long-term by reviewing 
+        it at increasing intervals. The more you remember something correctly, the longer you wait before reviewing it again.
+        
+        **How it works:**
+        1. When you answer a quiz question correctly → review again in **1 day**
+        2. Get it right again → review in **3 days**
+        3. Keep getting it right → intervals increase to **7, 14, then 30 days**
+        4. If you get it wrong → interval resets to **1 day** to strengthen memory
+        
+        **To get started:**
+        1. Generate a quiz from your PDF above
+        2. Click **"Start SRS"** on questions you want to review later
+        3. Come back here to review cards when they're due!
+        """)
+    
+    try:
+        srs_mgr = SRSManager()
+        all_cards = list(srs_mgr._data.keys())
+        due_cards = srs_mgr.get_due_cards()
+        
+        if not all_cards:
+            st.info("📝 **No cards registered yet.**\n\nTo start using spaced repetition:\n1. Generate a quiz from your PDF above\n2. Click **'Start SRS'** on any question you want to review later\n3. Come back here to review when cards are due!")
+        else:
+            # Check if there are quiz items in current session that aren't registered
+            current_quiz = st.session_state.get(quiz_state_key, [])
+            if current_quiz:
+                registered_ids = set(all_cards)
+                unregistered = [q for q in current_quiz if q.get("id") not in registered_ids]
+                if unregistered:
+                    st.info(f"💡 **Tip:** You have {len(unregistered)} quiz question(s) generated above. "
+                           f"Click **'Start SRS'** on any question to add it to your spaced repetition review!")
+            
+            col_stats1, col_stats2, col_stats3 = st.columns(3)
+            with col_stats1:
+                st.metric("Total Cards", len(all_cards))
+            with col_stats2:
+                st.metric("Due Now", len(due_cards), delta=None if len(due_cards) == 0 else f"{len(due_cards)} to review")
+            with col_stats3:
+                reviewed_count = sum(1 for cid in all_cards if srs_mgr.get_card_meta(cid).get("review_count", 0) > 0)
+                st.metric("Reviewed", reviewed_count)
+            
+            if due_cards:
+                st.success(f"🎯 **You have {len(due_cards)} card(s) due for review!**")
+                st.markdown("---")
+                
+                # Find quiz items for due cards - check both session state and disk
+                # Use cached quiz items from session state to avoid redundant file I/O
+                cache_key = "srs_quiz_items_cache"
+                if cache_key not in st.session_state:
+                    st.session_state[cache_key] = {}
+                
+                all_quiz_items = st.session_state[cache_key].copy()
+                
+                # Check current document's quiz items from session (always up-to-date)
+                current_quiz = st.session_state.get(quiz_state_key, [])
+                for q in current_quiz:
+                    all_quiz_items[q.get("id")] = q
+                
+                # Load quiz items from disk only for cards we don't have cached
+                missing_card_ids = [cid for cid in due_cards if cid not in all_quiz_items]
+                if missing_card_ids:
+                    # Load all quiz items from disk (cached per session)
+                    disk_cache_key = "srs_disk_quiz_items_cache"
+                    if disk_cache_key not in st.session_state:
+                        disk_quiz_items = load_all_quiz_items()
+                        # Filter out placeholders
+                        filtered = {}
+                        for card_id, item in disk_quiz_items.items():
+                            question = item.get("question", "")
+                            if question and "placeholder" not in question.lower() and len(question) > 20:
+                                filtered[card_id] = item
+                        st.session_state[disk_cache_key] = filtered
+                    else:
+                        filtered = st.session_state[disk_cache_key]
+                    
+                    # Add missing items to cache
+                    for card_id in missing_card_ids:
+                        if card_id in filtered:
+                            all_quiz_items[card_id] = filtered[card_id]
+                            st.session_state[cache_key][card_id] = filtered[card_id]
+                        else:
+                            # Try loading by ID as fallback
+                            quiz_item = load_quiz_item_by_id(card_id)
+                            if quiz_item:
+                                all_quiz_items[card_id] = quiz_item
+                                st.session_state[cache_key][card_id] = quiz_item
+                
+                reviewed_this_session = st.session_state.get("srs_reviewed_this_session", set())
+                
+                for idx, card_id in enumerate(due_cards, 1):
+                    if card_id in reviewed_this_session:
+                        continue  # Skip already reviewed cards this session
+                    
+                    card_meta = srs_mgr.get_card_meta(card_id)
+                    quiz_item = all_quiz_items.get(card_id)
+                    
+                    # Extract document name from card_id (e.g., "lecture2_q1" -> "lecture2")
+                    doc_name = card_id.rsplit("_", 1)[0] if "_" in card_id else "Unknown"
+                    
+                    if not quiz_item:
+                        # Card exists but quiz item not loaded - show basic review
+                        st.markdown(f"### Card {idx}: {card_id}")
+                        
+                        # Check if this is a placeholder card
+                        is_placeholder = "placeholder" in card_id.lower() or (card_meta and card_meta.get("review_count", 0) == 0)
+                        
+                        # Try to infer document from card_id
+                        if doc_name != "Unknown":
+                            st.warning(f"📄 **Card from: {doc_name}**")
+                            if is_placeholder:
+                                st.info(f"💡 This appears to be a placeholder card from an old session. "
+                                       f"You can delete it and register new questions from the quiz section above.")
+                            else:
+                                st.info(f"💡 **Tip:** Upload the PDF '{doc_name}.pdf' and generate a quiz to see the full question. "
+                                       f"For now, you can review based on your memory of this topic.")
+                        else:
+                            st.info("💡 **Tip:** This card was registered from a previous session. "
+                                   "Upload the same PDF and generate a quiz to see the full question.")
+                        
+                        st.markdown("**Do you remember this topic?**")
+                        st.caption("Think about what you learned. Can you recall the key concepts?")
+                        
+                        # Add option to remove placeholder cards
+                        if is_placeholder:
+                            if st.button(f"🗑️ Remove this placeholder card", key=f"remove_{card_id}"):
+                                try:
+                                    del srs_mgr._data[card_id]
+                                    srs_mgr._save()
+                                    st.success("Card removed!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to remove card: {e}")
+                        
+                        col_correct, col_incorrect = st.columns(2)
+                        with col_correct:
+                            if st.button(f"✅ Yes, I remember this", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
+                                srs_mgr.mark_review(card_id, correct=True)
+                                reviewed_this_session.add(card_id)
+                                st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                st.success("✅ Great! Card scheduled for next review.")
+                                st.balloons()
+                                st.rerun()
+                        
+                        with col_incorrect:
+                            if st.button(f"❌ No, I need to review", key=f"srs_incorrect_{card_id}", use_container_width=True):
+                                srs_mgr.mark_review(card_id, correct=False)
+                                reviewed_this_session.add(card_id)
+                                st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                st.info("📚 No problem! This card will come up again soon to help strengthen your memory.")
+                                st.rerun()
+                        
+                        # Show card progress
+                        if card_meta:
+                            review_count = card_meta.get("review_count", 0)
+                            interval_idx = card_meta.get("interval_index", 0)
+                            st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days")
+                        
+                        st.markdown("---")
+                    else:
+                        # Full review with quiz question
+                        st.markdown(f"### Card {idx}: Review Question")
+                        
+                        q_text = quiz_item.get("question", "")
+                        choices = quiz_item.get("choices", {}) or {}
+                        answer_letter = quiz_item.get("answer", None)
+                        explanation = quiz_item.get("explanation", "")
+                        
+                        st.markdown("**📝 Question:**")
+                        st.write(q_text)
+                        
+                        # Show choices
+                        st.markdown("**🔤 Answer Choices:**")
+                        for label in ["A", "B", "C", "D"]:
+                            if label in choices:
+                                st.write(f"**{label}.** {choices[label]}")
+                        
+                        # Review interface - show answer after user clicks
+                        show_answer_key = f"srs_show_{card_id}"
+                        
+                        if show_answer_key not in st.session_state:
+                            st.session_state[show_answer_key] = False
+                        
+                        st.markdown("---")
+                        
+                        if not st.session_state[show_answer_key]:
+                            st.markdown("**💭 Think about your answer, then click below to reveal the correct answer:**")
+                            if st.button("🔍 Show Answer", key=f"show_{card_id}", type="primary", use_container_width=True):
+                                st.session_state[show_answer_key] = True
+                                st.rerun()
+                        else:
+                            st.markdown("**✅ Correct Answer:**")
+                            if answer_letter and choices.get(answer_letter):
+                                st.success(f"**{answer_letter}.** {choices[answer_letter]}")
+                            
+                            if explanation:
+                                st.markdown("**📖 Explanation:**")
+                                st.info(explanation)
+                            
+                            st.markdown("---")
+                            st.markdown("**🎯 Did you get it right?**")
+                            
+                            col_correct, col_incorrect = st.columns(2)
+                            
+                            with col_correct:
+                                if st.button(f"✅ Yes, I got it correct!", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
+                                    srs_mgr.mark_review(card_id, correct=True)
+                                    reviewed_this_session.add(card_id)
+                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                    st.session_state[show_answer_key] = False
+                                    st.success("🎉 Excellent! This card will be scheduled for review in a longer interval.")
+                                    st.balloons()
+                                    st.rerun()
+                            
+                            with col_incorrect:
+                                if st.button(f"❌ No, I got it wrong", key=f"srs_incorrect_{card_id}", use_container_width=True):
+                                    srs_mgr.mark_review(card_id, correct=False)
+                                    reviewed_this_session.add(card_id)
+                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                    st.session_state[show_answer_key] = False
+                                    st.info("📚 That's okay! This card will come up again soon to help you learn it better.")
+                                    st.rerun()
+                            
+                            # Show card stats
+                            if card_meta:
+                                review_count = card_meta.get("review_count", 0)
+                                interval_idx = card_meta.get("interval_index", 0)
+                                next_due = card_meta.get("next_due", "")
+                                if next_due:
+                                    try:
+                                        next_due_dt = datetime.fromisoformat(next_due)
+                                        days_until = (next_due_dt - datetime.utcnow()).days
+                                        st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days | Next review in: {days_until} days")
+                                    except Exception:
+                                        st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days")
+                        
+                        st.markdown("---")
+            else:
+                st.info("✅ **No cards due for review right now!** Great job staying on top of your studies. 🎉")
+            
+            # Show all cards (not just due ones)
+            st.markdown("---")
+            if st.checkbox("📋 Show all my SRS cards", help="View all cards you've registered, including those not due yet"):
+                if not all_cards:
+                    st.info("No cards registered yet.")
+                else:
+                    # Use cached quiz items (already loaded above)
+                    cache_key = "srs_quiz_items_cache"
+                    cached_items = st.session_state.get(cache_key, {})
+                    
+                    # Load missing items from disk cache
+                    disk_cache_key = "srs_disk_quiz_items_cache"
+                    if disk_cache_key not in st.session_state:
+                        disk_quiz_items = load_all_quiz_items()
+                        filtered = {cid: item for cid, item in disk_quiz_items.items() 
+                                   if item.get("question", "") and "placeholder" not in item.get("question", "").lower()}
+                        st.session_state[disk_cache_key] = filtered
+                    else:
+                        filtered = st.session_state[disk_cache_key]
+                    
+                    # Merge caches
+                    display_items = {**cached_items, **filtered}
+                    
+                    st.markdown("### All Your Study Cards")
+                    for card_id in all_cards:
+                        meta = srs_mgr.get_card_meta(card_id)
+                        quiz_item = display_items.get(card_id)
+                        
+                        # Try loading from disk if not in cache (should be rare)
+                        if not quiz_item:
+                            quiz_item = load_quiz_item_by_id(card_id)
+                        
+                        if quiz_item:
+                            question_preview = quiz_item.get("question", "")[:100] + "..." if len(quiz_item.get("question", "")) > 100 else quiz_item.get("question", "")
+                        else:
+                            # Extract document name from card_id
+                            doc_name = card_id.rsplit("_", 1)[0] if "_" in card_id else "Unknown"
+                            question_preview = f"Card from {doc_name} (question not available)"
+                        
+                        is_due = card_id in due_cards
+                        status_icon = "🎯" if is_due else "✅"
+                        status_text = "**Due now**" if is_due else "Not due"
+                        
+                        next_due = meta.get("next_due", "") if meta else ""
+                        review_count = meta.get("review_count", 0) if meta else 0
+                        interval_idx = meta.get("interval_index", 0) if meta else 0
+                        
+                        st.markdown(f"{status_icon} **{card_id}** - {status_text}")
+                        st.write(f"   {question_preview}")
+                        if meta:
+                            try:
+                                if next_due:
+                                    next_due_dt = datetime.fromisoformat(next_due)
+                                    days_until = (next_due_dt - datetime.utcnow()).days
+                                    if days_until <= 0:
+                                        due_text = "Due now"
+                                    else:
+                                        due_text = f"Due in {days_until} day(s)"
+                                else:
+                                    due_text = "N/A"
+                            except Exception:
+                                due_text = next_due[:10] if next_due else "N/A"
+                            
+                            st.caption(f"   📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} days | {due_text}")
+                        st.markdown("")
+    
+    except Exception as e:
+        st.error("Error loading SRS data.")
+        st.exception(e)
 
     st.markdown("---")
     st.caption("Tip: For reproducible tests set USE_SAFE_EMBEDDINGS=1 and build FAISS index to compare results with NumPy search.")

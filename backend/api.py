@@ -6,7 +6,7 @@ Endpoints:
  - POST /summarize     -> produce document-level summary from embeddings (Summary mode)
  - POST /build_index   -> build (or rebuild) a FAISS index from embeddings JSON
  - POST /append_index  -> append new embeddings into an existing FAISS index
- - POST /generate_quiz -> generate a quiz from provided context (writes JSON file)
+ - POST /generate_quiz_live -> generate a quiz from provided context (live LLM generation)
  - GET  /status        -> index status (exists, n_vectors, dim, created_at, index_mtime)
  - POST /chat          -> conversational chat mode with per-session history + RAG
 """
