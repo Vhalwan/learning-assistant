@@ -15,7 +15,7 @@ Future phases will add quiz generation and spaced-repetition support.
 - Retrieval-Augmented Q&A showing retrieved chunks for transparency
 - Works offline in SAFE mode (no API key required)
 - Fully testable with mocks
-- quiz generation and SRS spaced repetition
+- Quiz generation and SRS spaced repetition
 
 ---
 
