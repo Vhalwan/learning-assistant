@@ -6,6 +6,117 @@ import html as html_mod
 import requests
 from typing import Optional, List, Dict, Any
 import uuid
+# frontend/ui_helpers.py
+# ----------------------
+# Add these functions to this file (append at end or near other UI helper functions).
+
+from typing import List, Dict, Tuple
+import html as html_mod
+import time
+
+def _escape_html(s: str) -> str:
+    if s is None:
+        return ""
+    # keep basic newlines -> <br> for readability
+    return html_mod.escape(str(s)).replace("\n", "<br>")
+
+def build_chat_html(
+    chat_history: List[Dict[str, str]],
+    max_height: int = 520,
+    width: str = "100%",
+    container_id: str = None,
+) -> Tuple[str, int]:
+    """
+    Build an HTML string that contains the whole chat in a single scrollable container.
+    Returns (html_string, height_px). The generated HTML includes JS to auto-scroll to bottom.
+    """
+    # container id to avoid collisions
+    cid = container_id or f"chat_{int(time.time() * 1000)}"
+    # simple style: left = assistant, right = user
+    msg_blocks = []
+    for turn in chat_history or []:
+        role = (turn.get("role") or "user").lower()
+        content = turn.get("content", "") or ""
+        # If content seems already HTML, still escape for safety
+        escaped = _escape_html(content)
+        if role.startswith("assistant"):
+            block = f'''
+            <div class="msg bot">
+              <div class="bubble">{escaped}</div>
+            </div>
+            '''
+        else:
+            block = f'''
+            <div class="msg user">
+              <div class="bubble">{escaped}</div>
+            </div>
+            '''
+        msg_blocks.append(block)
+
+    # compute height (cap)
+    height = min(max(120 + 80 * max(0, len(chat_history) - 1), 200), max_height)
+
+    html = f"""
+    <style>
+      /* container */
+      #{cid}_wrap {{
+        width: {width};
+        height: {height}px;
+        border: 1px solid #eee;
+        border-radius: 8px;
+        padding: 12px;
+        overflow-y: auto;
+        background: #fafafa;
+      }}
+      /* message rows */
+      .msg {{
+        margin: 6px 0;
+        display: flex;
+        clear: both;
+      }}
+      .msg .bubble {{
+        max-width: 78%;
+        padding: 10px 12px;
+        border-radius: 12px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }}
+      .msg.user {{
+        justify-content: flex-end;
+      }}
+      .msg.user .bubble {{
+        background: #d1e7dd;
+        border-top-right-radius: 6px;
+      }}
+      .msg.bot {{
+        justify-content: flex-start;
+      }}
+      .msg.bot .bubble {{
+        background: #ffffff;
+        border: 1px solid #e6e6e6;
+        border-top-left-radius: 6px;
+      }}
+    </style>
+
+    <div id="{cid}_wrap">
+      {"".join(msg_blocks) if msg_blocks else '<div style="color:#666">No messages yet — start the conversation below.</div>'}
+    </div>
+
+    <script>
+      // auto-scroll to bottom after render
+      const container = document.getElementById("{cid}_wrap");
+      if (container) {{
+          container.scrollTop = container.scrollHeight;
+      }}
+      // expose a function to scroll later if needed
+      window["{cid}_scrollToBottom"] = function() {{
+          const c = document.getElementById("{cid}_wrap");
+          if(c) c.scrollTop = c.scrollHeight;
+      }};
+    </script>
+    """
+    return html, height
 
 # -----------------------
 # API wrappers (used by handlers or app)

@@ -354,130 +354,207 @@ if uploaded:
     with tab3:
         st.subheader("Chat with the lecture (conversational)")
 
+        # keys
         hist_key = f"chat_history_{stem}"
+        saved_chats_key = f"saved_chats_{stem}"
+        history_toggle_key = f"show_history_{stem}"
+
+        # initialize session state entries if missing
         if hist_key not in st.session_state:
             st.session_state[hist_key] = []
+        if saved_chats_key not in st.session_state:
+            st.session_state[saved_chats_key] = []
+        if history_toggle_key not in st.session_state:
+            st.session_state[history_toggle_key] = False
 
-        # Chat controls
-        chat_k = st.number_input("Top-k chunks to retrieve for each turn", min_value=1, max_value=10, value=3, step=1, key="chat_k")
+        # --------------------------
+        # Top controls: k, save, history buttons, clear
+        # --------------------------
+        chat_k = st.number_input(
+            "Top-k chunks to retrieve for each turn",
+            min_value=1,
+            max_value=10,
+            value=3,
+            step=1,
+            key=f"chat_k_{stem}",
+        )
 
-        if st.button("Clear chat"):
-            # Reset only this document's chat history
-            st.session_state[hist_key] = []
-            st.success("Chat history cleared for this document.")
+        save_title_key = f"save_title_{stem}"
+        st.text_input("Save conversation as (optional)", key=save_title_key, placeholder="Title (optional)")
 
-        with st.form(key=f"chat_form_{stem}"):
-            user_msg = st.text_input("Message to assistant", key=f"chat_input_{stem}")
-            send_pressed = st.form_submit_button("Send")
+        col_save, col_show, col_clear = st.columns([1, 1, 1])
 
-        # If the user submitted, process and update session_state before rendering the history
-        if send_pressed:
-            if len(ids) == 0:
-                st.error("Embeddings not loaded. Create embeddings first.")
-            elif not user_msg or not user_msg.strip():
-                st.warning("Please enter a message.")
-            else:
-                candidate_index_path = str(index_path) if index_path.exists() else None
-                payload_history = [{"role": h.get("role"), "content": h.get("content")} for h in st.session_state[hist_key]]
-                with st.spinner("Running conversational RAG..."):
-                    try:
-                        if st.session_state.use_api_mode:
-                            resp = perform_chat(
-                                question=user_msg,
-                                embeddings_path=str(embeddings_path),
-                                history=payload_history,
-                                top_k=int(chat_k),
-                                use_faiss=bool(use_faiss_search),
-                                faiss_index_path=candidate_index_path,
-                                use_api_mode=True,
-                                api_base=os.getenv("API_BASE", API_DEFAULT),
-                                token=st.session_state.api_token or "",
-                                llm_call=None,
-                            )
-                        else:
-                            resp = perform_chat(
-                                question=user_msg,
-                                embeddings_path=str(embeddings_path),
-                                history=payload_history,
-                                top_k=int(chat_k),
-                                use_faiss=bool(use_faiss_search),
-                                faiss_index_path=candidate_index_path,
-                                use_api_mode=False,
-                                llm_call=llm,
-                            )
-
-                        ans = resp.get("answer")
-                        updated_history = resp.get("history", None)
-                        retrieved = resp.get("retrieved", []) or []
-                        prompt_used = resp.get("prompt")
-                        provenance = resp.get("provenance")
-
-                        display_answer = strip_key_concepts_from_answer(ans or "")
-
-                        if updated_history:
-                            new_hist: List[Dict[str, Any]] = []
-                            for h in updated_history:
-                                role = h.get("role", "user")
-                                content_raw = h.get("content", "") or ""
-                                if role and role.lower().startswith("assistant"):
-                                    content = strip_key_concepts_from_answer(content_raw)
-                                else:
-                                    content = content_raw
-                                new_hist.append({"role": role, "content": content})
-                            if new_hist and new_hist[-1].get("role") and new_hist[-1]["role"].lower().startswith("assistant"):
-                                new_hist[-1]["meta"] = {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}
-                            st.session_state[hist_key] = trim_history_to_max_turns(new_hist, max_turns=6)
-                        else:
-                            st.session_state[hist_key].append({"role": "user", "content": user_msg})
-                            st.session_state[hist_key].append(
-                                {"role": "assistant", "content": display_answer, "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}}
-                            )
-                            st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=6)
-
-                        st.success("Assistant replied — see chat above.")
-
-                    except Exception as e:
-                        st.error("Conversational RAG failed.")
-                        st.exception(e)
-
-        st.markdown("----")
-        chat_history: List[Dict[str, Any]] = st.session_state[hist_key]
-        if not chat_history:
-            st.info("No messages yet. Start by asking a question below.")
-        else:
-            for idx, turn in enumerate(chat_history):
-                role = turn.get("role", "user")
-                content = turn.get("content", "")
-                if role and role.lower().startswith("assistant"):
-                    content = strip_key_concepts_from_answer(content or "")
-                meta = turn.get("meta", {}) or {}
-
-                if role == "user":
-                    st.markdown(f"**You:**\n\n{content}", unsafe_allow_html=True)
+        # Save current conversation
+        with col_save:
+            if st.button("Save current conversation", key=f"save_conv_{stem}"):
+                current = st.session_state.get(hist_key, []) or []
+                if not current:
+                    st.warning("Nothing to save — conversation is empty.")
                 else:
-                    # use helper to build assistant HTML
-                    rendered = render_assistant_html(content)
-                    components.html(rendered["html"], height=rendered["height"], scrolling=True)
+                    new_item = {
+                        "id": str(uuid.uuid4()),
+                        "title": st.session_state.get(save_title_key) or f"Chat {datetime.utcnow().isoformat(timespec='seconds')}",
+                        "history": current,
+                        "created": datetime.utcnow().isoformat(),
+                    }
+                    st.session_state[saved_chats_key].insert(0, new_item)
+                    st.success("Conversation saved.")
 
-                # show metadata expanders after the message render
-                if meta:
-                    retrieved = meta.get("retrieved", []) or []
-                    prov = meta.get("provenance")
-                    prompt_used = meta.get("prompt")
-                    if retrieved:
-                        with st.expander("Retrieved chunks (turn)"):
-                            for c in retrieved:
-                                try:
-                                    st.write(f"- id={c.get('id')} pos={c.get('pos')} score={c.get('score'):.4f}")
-                                except Exception:
-                                    st.write(f"- {c}")
-                    if prov and prov.get("sentences"):
-                        with st.expander("Provenance (this turn)"):
-                            for s in prov.get("sentences", []):
-                                st.write(f"- \"{s.get('sentence')}\" → chunk={s.get('chunk_id')} (score={s.get('score'):.3f})")
-                    if prompt_used:
-                        with st.expander("Prompt used (debug)"):
-                            st.code(str(prompt_used)[:4000])
+        # Show / Hide history buttons (stable)
+        with col_show:
+            if st.button("Show history", key=f"show_history_btn_{stem}"):
+                st.session_state[history_toggle_key] = True
+            if st.button("Hide history", key=f"hide_history_btn_{stem}"):
+                st.session_state[history_toggle_key] = False
+
+        # Clear chat
+        with col_clear:
+            if st.button("Clear chat", key=f"clear_chat_{stem}"):
+                st.session_state[hist_key] = []
+                st.success("Chat cleared.")
+
+        st.markdown("---")
+
+        # --------------------------
+        # History view (when toggled on): history-only UI, hides chat & input
+        # --------------------------
+        if st.session_state.get(history_toggle_key):
+            st.markdown("## Saved conversations (this document)")
+            saved = st.session_state.get(saved_chats_key, []) or []
+            if not saved:
+                st.info("No saved conversations for this document yet.")
+            else:
+                for idx, item in enumerate(saved):
+                    with st.expander(f"{item.get('title')} — saved {item.get('created')}", expanded=False):
+                        preview = item.get("history", []) or []
+                        if not preview:
+                            st.write("_(empty conversation)_")
+                        else:
+                            # Show preview in readable blocks
+                            for turn in preview:
+                                role = (turn.get("role") or "user").lower()
+                                content = turn.get("content", "") or ""
+                                if role.startswith("assistant"):
+                                    st.markdown(f"**Assistant:**  \n{content}")
+                                else:
+                                    st.markdown(f"**You:**  \n{content}")
+
+                        btns = st.columns([1, 1, 1])
+                        # Load (replace) and return to chat view
+                        if btns[0].button("Load (replace) -> open chat", key=f"load_saved_{stem}_{idx}"):
+                            st.session_state[hist_key] = item.get("history", []) or []
+                            st.session_state[history_toggle_key] = False
+                            st.success(f"Loaded: {item.get('title')} — switching to chat view.")
+                        # Append and return to chat view
+                        if btns[1].button("Append -> open chat", key=f"append_saved_{stem}_{idx}"):
+                            st.session_state[hist_key].extend(item.get("history", []) or [])
+                            st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
+                            st.session_state[history_toggle_key] = False
+                            st.success(f"Appended: {item.get('title')} — switching to chat view.")
+                        # Delete
+                        if btns[2].button("Delete", key=f"del_saved_{stem}_{idx}"):
+                            st.session_state[saved_chats_key].pop(idx)
+                            st.success("Deleted saved conversation.")
+
+            st.markdown("---")
+            st.info("History mode: select 'Load' or 'Append' to return to chat mode with that conversation loaded.")
+            # Skip rendering the main chat & input while in history mode
+        else:
+            # --------------------------
+            # Main chat view: render after form handling so updated history shows immediately
+            # --------------------------
+            chat_container = st.container()
+
+            # Input form (clear_on_submit=True so Streamlit clears the input automatically)
+            with st.form(key=f"chat_form_{stem}", clear_on_submit=True):
+                user_msg = st.text_input(
+                    "Message to assistant",
+                    key=f"chat_input_{stem}",
+                    placeholder="Type your message here..."
+                )
+                send_pressed = st.form_submit_button("Send")
+
+                if send_pressed:
+                    # Basic validation
+                    if len(ids) == 0:
+                        st.error("Embeddings not loaded. Create embeddings first.")
+                    elif not user_msg or not user_msg.strip():
+                        st.warning("Please enter a message.")
+                    else:
+                        payload_history = [{"role": h.get("role"), "content": h.get("content")} for h in st.session_state.get(hist_key, [])]
+                        candidate_index_path = str(index_path) if index_path.exists() else None
+                        with st.spinner("Running conversational RAG..."):
+                            try:
+                                if st.session_state.use_api_mode:
+                                    resp = perform_chat(
+                                        question=user_msg,
+                                        embeddings_path=str(embeddings_path),
+                                        history=payload_history,
+                                        top_k=int(chat_k),
+                                        use_faiss=bool(use_faiss_search),
+                                        faiss_index_path=candidate_index_path,
+                                        use_api_mode=True,
+                                        api_base=os.getenv("API_BASE", API_DEFAULT),
+                                        token=st.session_state.api_token or "",
+                                        llm_call=None,
+                                    )
+                                else:
+                                    resp = perform_chat(
+                                        question=user_msg,
+                                        embeddings_path=str(embeddings_path),
+                                        history=payload_history,
+                                        top_k=int(chat_k),
+                                        use_faiss=bool(use_faiss_search),
+                                        faiss_index_path=candidate_index_path,
+                                        use_api_mode=False,
+                                        llm_call=llm,
+                                    )
+
+                                ans = resp.get("answer")
+                                updated_history = resp.get("history", None)
+                                retrieved = resp.get("retrieved", []) or []
+                                prompt_used = resp.get("prompt")
+                                provenance = resp.get("provenance")
+                                display_answer = strip_key_concepts_from_answer(ans or "")
+
+                                # prefer backend-provided updated history; otherwise append user+assistant
+                                if updated_history:
+                                    new_hist: List[Dict[str, str]] = []
+                                    for h in updated_history:
+                                        role = h.get("role", "user")
+                                        content_raw = h.get("content", "") or ""
+                                        if role and role.lower().startswith("assistant"):
+                                            content = strip_key_concepts_from_answer(content_raw)
+                                        else:
+                                            content = content_raw
+                                        new_hist.append({"role": role, "content": content})
+                                    st.session_state[hist_key] = trim_history_to_max_turns(new_hist, max_turns=60)
+                                else:
+                                    st.session_state[hist_key].append({"role": "user", "content": user_msg})
+                                    st.session_state[hist_key].append({
+                                        "role": "assistant",
+                                        "content": display_answer,
+                                        "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}
+                                    })
+                                    st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
+
+                                st.success("Assistant replied — chat updated.")
+
+                            except Exception as e:
+                                st.error("Conversational RAG failed.")
+                                st.exception(e)
+
+            # Render the chat AFTER handling the form so latest reply is visible immediately
+            chat_history = st.session_state.get(hist_key, []) or []
+            from frontend.ui_helpers import build_chat_html
+            # use a taller max height so chat uses more vertical space
+            chat_html, chat_height = build_chat_html(chat_history, max_height=720)
+
+            with chat_container:
+                components.html(chat_html, height=chat_height, scrolling=True)
+
+    # End of Tab 3
+
 
     st.markdown("---")
     st.subheader("Study / Quiz (MCQ v1)")
