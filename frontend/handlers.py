@@ -2,7 +2,7 @@
 import os
 from typing import Optional, List, Dict, Any, Tuple
 import requests
-
+from backend.confusion_analysis import analyze_confusion
 # backend imports (same as the original app.py used)
 from backend.llm_client import get_llm_call
 from backend.summarize_file import summarize_with_gemini
@@ -14,7 +14,8 @@ from backend.rag_query import (
 from backend.generate_quiz import generate_quiz_from_context, generate_mcq_from_context
 from backend.study_srs import SRSManager, INTERVALS
 from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all_quiz_items
-
+from backend.confusion_store import record_quiz_result as _record_quiz_result, get_top_confusions as _get_top_confusions
+from backend.confusion_analysis import analyze_confusion, _shorten
 # faiss builder (optional)
 try:
     from backend.vectorstore.faiss_store import build_faiss_index
@@ -208,6 +209,151 @@ def perform_chat(
             }
         else:
             return {"answer": str(qa_out), "history": None, "retrieved": [], "prompt": None, "provenance": None}
+
+
+def perform_confusion_analysis(
+    history: Optional[List[Dict[str, str]]] = None,
+    quiz_submissions: Optional[List[Dict[str, Any]]] = None,
+    retrieved_chunks: Optional[List[Dict[str, Any]]] = None,
+    top_n: int = 5,
+    llm_call = None,
+) -> List[Dict[str, Any]]:
+    """
+    Calls lightweight analyzer and augments results with persisted wrong-counts.
+    Persisted entries increase signal_strength so they surface higher.
+    Filters out zero-strength 'clear' placeholders unless nothing else exists.
+    """
+    try:
+        results = analyze_confusion(history=history, quiz_submissions=quiz_submissions, retrieved_chunks=retrieved_chunks, top_n=top_n, llm_call=llm_call) or []
+    except Exception as e:
+        results = [{"concept": "Error analyzing confusion", "status": "shaky", "reason": str(e), "evidence": [], "signal_strength": 0}]
+
+    # augment with persisted stats
+    try:
+        persisted = load_persisted_confusions(limit=top_n)
+    except Exception:
+        persisted = []
+
+    # Merge persisted entries—skip persisted rows with wrong_count <= 0
+    for p in persisted:
+        wrong_count = int(p.get("wrong_count", 0))
+        if wrong_count <= 0:
+            # skip zero-count persisted entries (they don't indicate confusion)
+            continue
+
+        qid = p.get("qid") or ""
+        qtext = p.get("question") or ""
+        key = (qid or qtext)[:160]
+        # find existing by exact short match or shortened text
+        found = None
+        for r in results:
+            if r.get("concept") and (r.get("concept") == key or r.get("concept") == _shorten(qtext, 160)):
+                found = r
+                break
+        if found:
+            found["signal_strength"] = int(found.get("signal_strength", 0)) + wrong_count
+            found["reason"] = (found.get("reason","") + " | persisted mistakes: " + str(wrong_count)).strip()
+            found.setdefault("evidence", []).append({"type":"persisted","meta":p})
+        else:
+            results.append({
+                "concept": _shorten(qtext or qid, 160),
+                "status": "confused" if wrong_count > 1 else "shaky",
+                "reason": f"Persisted incorrect answers (count={wrong_count})",
+                "evidence": [{"type":"persisted","meta":p}],
+                "signal_strength": wrong_count,
+            })
+
+    # resort by signal_strength desc, then status rank
+    status_rank = {"confused": 0, "shaky": 1, "clear": 2}
+    try:
+        results_sorted = sorted(results, key=lambda r: (-int(r.get("signal_strength", 0)), status_rank.get(r.get("status", "shaky"), 1)))
+    except Exception:
+        results_sorted = results
+
+    # filter out the fallback "clear/0" placeholders unless they are the only things
+    filtered = [r for r in results_sorted if not (r.get("status") == "clear" and int(r.get("signal_strength", 0)) == 0)]
+    if not filtered:
+        # nothing meaningful found; fall back to results_sorted (so UI shows "no signals" message)
+        filtered = results_sorted
+
+    return filtered[:top_n]
+
+
+
+def record_quiz_result(qid: str, question: str, is_correct: bool) -> None:
+    """
+    Frontend-callable wrapper to persist a quiz result.
+    Non-blocking: logs but doesn't raise in the UI path.
+    """
+    try:
+        _record_quiz_result(qid=qid, question=question or "", is_correct=bool(is_correct))
+    except Exception as e:
+        # Keep UI stable; log to console
+        print(f"[confusion_store] failed to record quiz result: {e}")
+
+
+def load_persisted_confusions(limit: int = 10):
+    try:
+        return _get_top_confusions(limit)
+    except Exception as e:
+        print(f"[confusion_store] failed to load confusions: {e}")
+        return []
+
+
+def perform_confusion_analysis(
+    history: Optional[List[Dict[str, str]]] = None,
+    quiz_submissions: Optional[List[Dict[str, Any]]] = None,
+    retrieved_chunks: Optional[List[Dict[str, Any]]] = None,
+    top_n: int = 5,
+    llm_call = None,
+) -> List[Dict[str, Any]]:
+    """
+    Calls lightweight analyzer and augments results with persisted wrong-counts.
+    Persisted entries increase signal_strength so they surface higher.
+    """
+    try:
+        results = analyze_confusion(history=history, quiz_submissions=quiz_submissions, retrieved_chunks=retrieved_chunks, top_n=top_n, llm_call=llm_call) or []
+    except Exception as e:
+        results = [{"concept": "Error analyzing confusion", "status": "shaky", "reason": str(e), "evidence": [], "signal_strength": 0}]
+
+    # augment with persisted stats
+    try:
+        persisted = load_persisted_confusions(limit=top_n)
+    except Exception:
+        persisted = []
+
+    # Merge persisted entries—either bump existing entries or create new ones
+    for p in persisted:
+        qid = p.get("qid") or ""
+        qtext = p.get("question") or ""
+        key = (qid or qtext)[:160]
+        # find existing by exact short match or shortened text
+        found = None
+        for r in results:
+            if r.get("concept") and (r.get("concept") == key or r.get("concept") == _shorten(qtext, 160)):
+                found = r
+                break
+        if found:
+            found["signal_strength"] = int(found.get("signal_strength", 0)) + int(p.get("wrong_count", 0))
+            found["reason"] = (found.get("reason","") + " | persisted mistakes: " + str(p.get("wrong_count",0))).strip()
+            found.setdefault("evidence", []).append({"type":"persisted","meta":p})
+        else:
+            results.append({
+                "concept": _shorten(qtext or qid, 160),
+                "status": "confused" if int(p.get("wrong_count",0))>1 else "shaky",
+                "reason": f"Persisted incorrect answers (count={p.get('wrong_count',0)})",
+                "evidence": [{"type":"persisted","meta":p}],
+                "signal_strength": int(p.get("wrong_count",0)),
+            })
+
+    # resort by signal_strength desc (strongest first), then confused->shaky->clear
+    status_rank = {"confused": 0, "shaky": 1, "clear": 2}
+    try:
+        results_sorted = sorted(results, key=lambda r: (-int(r.get("signal_strength", 0)), status_rank.get(r.get("status", "shaky"), 1)))
+    except Exception:
+        results_sorted = results
+
+    return results_sorted[:top_n]
 
 
 def generate_quiz(

@@ -44,7 +44,10 @@ from frontend.handlers import (
     save_quiz_to_disk,
     load_all_quiz_items_wrapper,
     load_quiz_item_by_id_wrapper,
+    perform_confusion_analysis,
+    record_quiz_result,
 )
+
 
 # Backend helpers (unchanged)
 from backend.create_embeddings import EMBED_DIM, create_embeddings_for_text, load_embeddings
@@ -192,6 +195,121 @@ if uploaded:
 
     st.markdown("---")
     tab1, tab2, tab3 = st.tabs(["Ask a Question", "Generate Summary", "Chat"])
+    # ----------------------------
+    # Confusion / Prioritized weak-points (moved here, between Quiz and SRS)
+    # ----------------------------
+    st.markdown("## Confused? Quick prioritized list")
+    st.write("A compact list of the concepts you likely need to review (prioritized by how often you got them wrong).")
+
+    # reuse keys used in quiz area
+    quiz_state_key = f"quiz_items_{stem}"
+    hist_key = f"chat_history_{stem}"
+
+    # gather history and quiz submissions
+    history = st.session_state.get(hist_key, []) or []
+    quiz_items_session = st.session_state.get(quiz_state_key, []) or []
+
+    # build light quiz_submissions list: include only items user submitted (answered)
+    quiz_submissions = []
+    for q in quiz_items_session:
+        qid = q.get("id")
+        submit_key = f"{quiz_state_key}_sub_{qid}"
+        sub = st.session_state.get(submit_key)
+        if sub:
+            quiz_submissions.append({
+                "id": qid,
+                "question": q.get("question", "") or "",
+                "is_correct": bool(sub.get("is_correct", False))
+            })
+
+    # call analyzer (prioritized by strength)
+    try:
+        results = perform_confusion_analysis(history=history, quiz_submissions=quiz_submissions, retrieved_chunks=[], top_n=8, llm_call=llm)
+    except Exception as e:
+        st.error("Failed to compute prioritized confusions.")
+        st.exception(e)
+        results = []
+
+    # If lots of results, show top_preview_count and allow expand
+    top_preview_count = 5
+    if not results:
+        st.info("No confusion detected yet — try answering a quiz or asking questions in Chat.")
+    else:
+        total_results = len(results)
+        to_show = results[:top_preview_count]
+        st.markdown(f"Showing top {len(to_show)} of {total_results} flagged items.")
+        for idx, item in enumerate(to_show, start=1):
+            strength = int(item.get("signal_strength", 0))
+            status = item.get("status", "shaky")
+            icon = "❌" if status == "confused" else ("⚠️" if status == "shaky" else "✅")
+            st.markdown(f"**{icon} [{strength}] {item.get('concept','(no concept)')}**")
+            st.caption(item.get("reason", ""))
+
+            evidence = item.get("evidence", []) or []
+            if evidence:
+                with st.expander("Show evidence"):
+                    for e in evidence:
+                        typ = e.get("type")
+                        if typ == "quiz":
+                            st.write(f"- Quiz: id={e.get('id')} — {e.get('question','')[:300]}")
+                        elif typ == "chat":
+                            st.write(f"- Chat message: {e.get('message','')[:400]}")
+                        else:
+                            st.write(f"- {str(e)[:400]}")
+
+            # Explain simply flow — uses your existing perform_query RAG path
+            explain_btn_key = f"conf_explain_{stem}_{idx}"
+            if st.button("Explain simply", key=explain_btn_key):
+                try:
+                    candidate_index_path = str(index_path) if index_path.exists() else None
+                    # shorten or simplify concept string
+                    raw_concept = item.get('concept', '')
+                    simple_concept = re.sub(r"According to.*OS\?", "OS application isolation", raw_concept)
+                    explain_q = f"Explain this simply and give 1 short example: {simple_concept}"
+
+                    resp = perform_query(
+                        question=explain_q,
+                        embeddings_path=str(embeddings_path),
+                        top_k=3,
+                        use_faiss=bool(use_faiss_search),
+                        faiss_index_path=candidate_index_path,
+                        use_api_mode=st.session_state.use_api_mode,
+                        api_base=os.getenv("API_BASE", API_DEFAULT),
+                        token=st.session_state.api_token or "",
+                        llm_call=llm,
+                    )
+                    st.markdown("**Explanation**")
+                    st.write(resp.get("answer", "(no answer returned)"))
+                    if resp.get("retrieved"):
+                        with st.expander("Show retrieved chunks used for this explanation"):
+                            for rc in resp.get("retrieved", []):
+                                st.write(rc.get("text","")[:1000] + ("..." if len(rc.get("text",""))>1000 else ""))
+                except Exception as e:
+                    st.error("Failed to generate explanation.")
+                    st.exception(e)
+
+        # show "show more" for additional results
+        if total_results > top_preview_count:
+            more_key = f"show_more_conf_{stem}"
+            if st.button(f"Show all {total_results} flagged items", key=more_key):
+                for idx, item in enumerate(results[top_preview_count:], start=top_preview_count+1):
+                    strength = int(item.get("signal_strength", 0))
+                    status = item.get("status", "shaky")
+                    icon = "❌" if status == "confused" else ("⚠️" if status == "shaky" else "✅")
+                    st.markdown(f"**{icon} [{strength}] {item.get('concept','(no concept)')}**")
+                    st.caption(item.get("reason", ""))
+                    evid = item.get("evidence", []) or []
+                    if evid:
+                        with st.expander("Show evidence"):
+                            for e in evid:
+                                typ = e.get("type")
+                                if typ == "quiz":
+                                    st.write(f"- Quiz: id={e.get('id')} — {e.get('question','')[:300]}")
+                                elif typ == "chat":
+                                    st.write(f"- Chat message: {e.get('message','')[:400]}")
+                                else:
+                                    st.write(f"- {str(e)[:400]}")
+
 
     # -------------------
     # Tab: Ask a Question
@@ -695,6 +813,14 @@ if uploaded:
                         "chosen": chosen_letter,
                         "is_correct": is_correct,
                     }
+                    # --- persist the quiz result to confusion store so it survives restart ---
+                    try:
+                        # use question id and text if available
+                        record_quiz_result(qid=qid, question=q_text, is_correct=is_correct)
+                    except Exception as e:
+                        # don't crash the UI; just log
+                        print(f"[ui] failed to persist quiz result: {e}")
+
                     st.session_state[exp_key] = True
 
                 submitted = st.session_state.get(submit_key)
