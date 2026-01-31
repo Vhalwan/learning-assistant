@@ -22,6 +22,10 @@ import streamlit.components.v1 as components
 import pdfplumber
 import numpy as np
 import requests
+from frontend.sections.confused import render as render_confused
+from frontend.sections.quiz import render as render_quiz
+from frontend.sections.srs import render as render_srs
+from frontend.sections.chat import render as render_chat
 
 # ------------------------
 # New imports (refactored)
@@ -120,7 +124,16 @@ with col_token:
 
 
 # ----------------------------
-# Upload + controls
+# 1️⃣ Setup your lecture (UI-only guidance)
+# ----------------------------
+st.markdown("## 1️⃣ Setup your lecture")
+st.write(
+    "Upload a single lecture PDF and create embeddings for that lecture. "
+    "This is usually a one-time step per file — once embeddings are created you can use the Study tools below."
+)
+
+# ----------------------------
+# Upload + controls (unchanged logic)
 # ----------------------------
 uploaded = st.file_uploader("Upload a lecture PDF", type=["pdf"])
 if uploaded:
@@ -193,7 +206,16 @@ if uploaded:
                 st.error("FAISS index build failed.")
                 st.exception(e)
 
+    # ----------------------------
+    # 2️⃣ Study modes (UI-only guidance)
+    # ----------------------------
     st.markdown("---")
+    st.markdown("## 2️⃣ Study modes")
+    st.write(
+        "Use the tabs below to explore the lecture: ask targeted questions, generate summaries, or chat conversationally. "
+        "Below the tabs you'll find Quiz and Review tools to test and retain what you learn."
+    )
+
     tab1, tab2, tab3 = st.tabs(["Ask a Question", "Generate Summary", "Chat"])
 
     # -------------------
@@ -355,796 +377,48 @@ if uploaded:
     # Tab: Chat
     # -----------------------
     with tab3:
-        st.subheader("Chat with the lecture (conversational)")
+        render_chat(st=st, stem=stem, llm=llm)
 
-        # keys
-        hist_key = f"chat_history_{stem}"
-        saved_chats_key = f"saved_chats_{stem}"
-        history_toggle_key = f"show_history_{stem}"
-
-        # initialize session state entries if missing
-        if hist_key not in st.session_state:
-            st.session_state[hist_key] = []
-        if saved_chats_key not in st.session_state:
-            st.session_state[saved_chats_key] = []
-        if history_toggle_key not in st.session_state:
-            st.session_state[history_toggle_key] = False
-
-        # --------------------------
-        # Top controls: k, save, history buttons, clear
-        # --------------------------
-        chat_k = st.number_input(
-            "Top-k chunks to retrieve for each turn",
-            min_value=1,
-            max_value=10,
-            value=3,
-            step=1,
-            key=f"chat_k_{stem}",
-        )
-
-        save_title_key = f"save_title_{stem}"
-        st.text_input("Save conversation as (optional)", key=save_title_key, placeholder="Title (optional)")
-
-        col_save, col_show, col_clear = st.columns([1, 1, 1])
-
-        # Save current conversation
-        with col_save:
-            if st.button("Save current conversation", key=f"save_conv_{stem}"):
-                current = st.session_state.get(hist_key, []) or []
-                if not current:
-                    st.warning("Nothing to save — conversation is empty.")
-                else:
-                    new_item = {
-                        "id": str(uuid.uuid4()),
-                        "title": st.session_state.get(save_title_key) or f"Chat {datetime.utcnow().isoformat(timespec='seconds')}",
-                        "history": current,
-                        "created": datetime.utcnow().isoformat(),
-                    }
-                    st.session_state[saved_chats_key].insert(0, new_item)
-                    st.success("Conversation saved.")
-
-        # Show / Hide history buttons (stable)
-        with col_show:
-            if st.button("Show history", key=f"show_history_btn_{stem}"):
-                st.session_state[history_toggle_key] = True
-            if st.button("Hide history", key=f"hide_history_btn_{stem}"):
-                st.session_state[history_toggle_key] = False
-
-        # Clear chat
-        with col_clear:
-            if st.button("Clear chat", key=f"clear_chat_{stem}"):
-                st.session_state[hist_key] = []
-                st.success("Chat cleared.")
-
-        st.markdown("---")
-
-        # --------------------------
-        # History view (when toggled on): history-only UI, hides chat & input
-        # --------------------------
-        if st.session_state.get(history_toggle_key):
-            st.markdown("## Saved conversations (this document)")
-            saved = st.session_state.get(saved_chats_key, []) or []
-            if not saved:
-                st.info("No saved conversations for this document yet.")
-            else:
-                for idx, item in enumerate(saved):
-                    with st.expander(f"{item.get('title')} — saved {item.get('created')}", expanded=False):
-                        preview = item.get("history", []) or []
-                        if not preview:
-                            st.write("_(empty conversation)_")
-                        else:
-                            # Show preview in readable blocks
-                            for turn in preview:
-                                role = (turn.get("role") or "user").lower()
-                                content = turn.get("content", "") or ""
-                                if role.startswith("assistant"):
-                                    st.markdown(f"**Assistant:**  \n{content}")
-                                else:
-                                    st.markdown(f"**You:**  \n{content}")
-
-                        btns = st.columns([1, 1, 1])
-                        # Load (replace) and return to chat view
-                        if btns[0].button("Load (replace) -> open chat", key=f"load_saved_{stem}_{idx}"):
-                            st.session_state[hist_key] = item.get("history", []) or []
-                            st.session_state[history_toggle_key] = False
-                            st.success(f"Loaded: {item.get('title')} — switching to chat view.")
-                        # Append and return to chat view
-                        if btns[1].button("Append -> open chat", key=f"append_saved_{stem}_{idx}"):
-                            st.session_state[hist_key].extend(item.get("history", []) or [])
-                            st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
-                            st.session_state[history_toggle_key] = False
-                            st.success(f"Appended: {item.get('title')} — switching to chat view.")
-                        # Delete
-                        if btns[2].button("Delete", key=f"del_saved_{stem}_{idx}"):
-                            st.session_state[saved_chats_key].pop(idx)
-                            st.success("Deleted saved conversation.")
-
-            st.markdown("---")
-            st.info("History mode: select 'Load' or 'Append' to return to chat mode with that conversation loaded.")
-            # Skip rendering the main chat & input while in history mode
-        else:
-            # --------------------------
-            # Main chat view: render after form handling so updated history shows immediately
-            # --------------------------
-            chat_container = st.container()
-
-            # Input form (clear_on_submit=True so Streamlit clears the input automatically)
-            with st.form(key=f"chat_form_{stem}", clear_on_submit=True):
-                user_msg = st.text_input(
-                    "Message to assistant",
-                    key=f"chat_input_{stem}",
-                    placeholder="Type your message here..."
-                )
-                send_pressed = st.form_submit_button("Send")
-
-                if send_pressed:
-                    # Basic validation
-                    if len(ids) == 0:
-                        st.error("Embeddings not loaded. Create embeddings first.")
-                    elif not user_msg or not user_msg.strip():
-                        st.warning("Please enter a message.")
-                    else:
-                        payload_history = [{"role": h.get("role"), "content": h.get("content")} for h in st.session_state.get(hist_key, [])]
-                        candidate_index_path = str(index_path) if index_path.exists() else None
-                        with st.spinner("Running conversational RAG..."):
-                            try:
-                                if st.session_state.use_api_mode:
-                                    resp = perform_chat(
-                                        question=user_msg,
-                                        embeddings_path=str(embeddings_path),
-                                        history=payload_history,
-                                        top_k=int(chat_k),
-                                        use_faiss=bool(use_faiss_search),
-                                        faiss_index_path=candidate_index_path,
-                                        use_api_mode=True,
-                                        api_base=os.getenv("API_BASE", API_DEFAULT),
-                                        token=st.session_state.api_token or "",
-                                        llm_call=None,
-                                    )
-                                else:
-                                    resp = perform_chat(
-                                        question=user_msg,
-                                        embeddings_path=str(embeddings_path),
-                                        history=payload_history,
-                                        top_k=int(chat_k),
-                                        use_faiss=bool(use_faiss_search),
-                                        faiss_index_path=candidate_index_path,
-                                        use_api_mode=False,
-                                        llm_call=llm,
-                                    )
-
-                                ans = resp.get("answer")
-                                updated_history = resp.get("history", None)
-                                retrieved = resp.get("retrieved", []) or []
-                                prompt_used = resp.get("prompt")
-                                provenance = resp.get("provenance")
-                                display_answer = strip_key_concepts_from_answer(ans or "")
-
-                                # prefer backend-provided updated history; otherwise append user+assistant
-                                if updated_history:
-                                    new_hist: List[Dict[str, str]] = []
-                                    for h in updated_history:
-                                        role = h.get("role", "user")
-                                        content_raw = h.get("content", "") or ""
-                                        if role and role.lower().startswith("assistant"):
-                                            content = strip_key_concepts_from_answer(content_raw)
-                                        else:
-                                            content = content_raw
-                                        new_hist.append({"role": role, "content": content})
-                                    st.session_state[hist_key] = trim_history_to_max_turns(new_hist, max_turns=60)
-                                else:
-                                    st.session_state[hist_key].append({"role": "user", "content": user_msg})
-                                    st.session_state[hist_key].append({
-                                        "role": "assistant",
-                                        "content": display_answer,
-                                        "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}
-                                    })
-                                    st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
-
-                                st.success("Assistant replied — chat updated.")
-
-                            except Exception as e:
-                                st.error("Conversational RAG failed.")
-                                st.exception(e)
-
-            # Render the chat AFTER handling the form so latest reply is visible immediately
-            chat_history = st.session_state.get(hist_key, []) or []
-            from frontend.ui_helpers import build_chat_html
-            # use a taller max height so chat uses more vertical space
-            chat_html, chat_height = build_chat_html(chat_history, max_height=720)
-
-            with chat_container:
-                components.html(chat_html, height=chat_height, scrolling=True)
-
-    # End of Tab 3
 
 
     st.markdown("---")
-    st.subheader("Study / Quiz (MCQ v1)")
+    hist_key = f"chat_history_{stem}"
 
-    # session_state key for storing generated quiz for this document
-    quiz_state_key = f"quiz_items_{stem}"
-    n_q = st.number_input("Number of quiz items", min_value=1, max_value=20, value=5)
-    gen_key = f"gen_quiz_{stem}"
-    if st.button("Generate Quiz from lecture", key=gen_key):
-        if not text:
-            st.warning("No document text extracted.")
-        else:
-            with st.spinner("Generating quiz..."):
-                try:
-                    if st.session_state.use_api_mode:
-                        quiz_items, latency = generate_quiz(
-                            stem=stem,
-                            context_text=text,
-                            n=int(n_q),
-                            use_api_mode=True,
-                            api_base=os.getenv("API_BASE", API_DEFAULT),
-                            token=st.session_state.api_token or "",
-                            llm_call=None,
-                        )
-                        if latency:
-                            st.success(f"Quiz generated: {len(quiz_items)} items. (latency: {latency:.3f}s)")
-                        else:
-                            st.success(f"Quiz generated: {len(quiz_items)} items.")
-                    else:
-                        quiz_items, _ = generate_quiz(
-                            stem=stem,
-                            context_text=text,
-                            n=int(n_q),
-                            use_api_mode=False,
-                            llm_call=llm,
-                        )
-                        st.success(f"Quiz generated: {len(quiz_items)} items (local).")
-
-                    st.session_state[quiz_state_key] = quiz_items
-
-                    try:
-                        save_quiz_to_disk(stem, quiz_items)
-                        if "srs_disk_quiz_items_cache" in st.session_state:
-                            del st.session_state["srs_disk_quiz_items_cache"]
-                    except Exception as e:
-                        st.warning(f"Quiz saved to session but failed to save to disk: {e}")
-
-                except requests.HTTPError as he:
-                    try:
-                        detail = he.response.json().get("detail", str(he))
-                    except Exception:
-                        detail = str(he)
-                    st.error(f"API quiz generation failed: {detail}")
-                    st.exception(he)
-                except Exception as e:
-                    st.error("Quiz generation failed.")
-                    st.exception(e)
-
-    # load quiz items from session_state
-    quiz_items = st.session_state.get(quiz_state_key, [])
-
-    def _mark_selection_made(sel_key: str):
-        st.session_state[f"{sel_key}_made"] = True
-
-    # Display MCQs with choices A-D and stable widget keys
-    if not quiz_items:
-        st.info("No quiz items generated yet. Click 'Generate Quiz from lecture' to create items.")
-    else:
-        for q in quiz_items:
-            qid = q.get("id", str(uuid.uuid4()))
-            q_text = q.get("question", "")
-            choices = q.get("choices", {}) or {}
-            answer_letter = q.get("answer", None)
-            explanation_text = q.get("explanation", "") or ""
-
-            selection_key = f"{quiz_state_key}_sel_{qid}"
-            submit_key = f"{quiz_state_key}_sub_{qid}"
-            srs_key = f"{quiz_state_key}_srs_{qid}"
-            exp_key = f"{quiz_state_key}_expander_{qid}"
-            if exp_key not in st.session_state:
-                st.session_state[exp_key] = False
-
-            with st.expander(f"Q ({qid}): {q_text[:140]}", expanded=st.session_state[exp_key]):
-                st.write(q_text)
-
-                dropdown_options = []
-                for label in ["A", "B", "C", "D"]:
-                    opt_text = choices.get(label, "")
-                    dropdown_options.append(f"{label}. {opt_text}")
-
-                placeholder = "Select an answer"
-                dropdown_with_placeholder = [placeholder] + dropdown_options
-
-                already_submitted = bool(st.session_state.get(submit_key))
-
-                try:
-                    pre_index = 0
-                    if selection_key in st.session_state:
-                        cur = st.session_state.get(selection_key)
-                        if cur in dropdown_with_placeholder:
-                            pre_index = dropdown_with_placeholder.index(cur)
-                        else:
-                            pre_index = 0
-                    st.selectbox(
-                        "Choose an answer",
-                        dropdown_with_placeholder,
-                        index=pre_index,
-                        key=selection_key,
-                        disabled=already_submitted,
-                        on_change=_mark_selection_made,
-                        args=(selection_key,),
-                    )
-                except Exception:
-                    st.selectbox(
-                        "Choose an answer",
-                        dropdown_with_placeholder,
-                        key=selection_key,
-                        disabled=already_submitted,
-                        on_change=_mark_selection_made,
-                        args=(selection_key,),
-                    )
-
-                chosen_letter = None
-                if already_submitted:
-                    submitted = st.session_state.get(submit_key, {})
-                    chosen_letter = submitted.get("chosen")
-                else:
-                    sel_display = st.session_state.get(selection_key)
-                    if sel_display and sel_display != placeholder:
-                        chosen_letter = sel_display.split(".", 1)[0].strip()
-
-                check_key = f"{quiz_state_key}_check_{qid}"
-                check_disabled = (chosen_letter is None) or already_submitted
-
-                if st.button("Check answer", key=check_key, disabled=check_disabled):
-                    is_correct = (chosen_letter == answer_letter) if (chosen_letter and answer_letter) else False
-                    st.session_state[submit_key] = {
-                        "chosen": chosen_letter,
-                        "is_correct": is_correct,
-                    }
-                    # --- persist the quiz result to confusion store so it survives restart ---
-                    try:
-                        # use question id and text if available
-                        record_quiz_result(qid=qid, question=q_text, is_correct=is_correct)
-                    except Exception as e:
-                        # don't crash the UI; just log
-                        print(f"[ui] failed to persist quiz result: {e}")
-
-                    st.session_state[exp_key] = True
-
-                submitted = st.session_state.get(submit_key)
-                if submitted:
-                    chosen = submitted.get("chosen")
-                    is_correct = submitted.get("is_correct", False)
-
-                    if is_correct:
-                        if explanation_text:
-                            st.success(f"✅ Correct\n\n{explanation_text}")
-                        else:
-                            st.success("✅ Correct")
-                    else:
-                        correct_display = "(not provided)"
-                        if answer_letter and choices.get(answer_letter):
-                            correct_display = f"{answer_letter}. {choices.get(answer_letter)}"
-                        user_choice_text = ""
-                        if chosen:
-                            user_choice_text = choices.get(chosen, "")
-                            st.error(f"❌ Incorrect — you chose {chosen}. {user_choice_text}\n\nCorrect: {correct_display}")
-                        else:
-                            st.error(f"❌ Incorrect.\n\nCorrect: {correct_display}")
-
-                        if explanation_text:
-                            st.write("Explanation:")
-                            st.write(explanation_text)
-
-                if st.button(f"Start SRS for {qid}", key=srs_key):
-                    try:
-                        mgr = SRSManager()
-                        mgr.ensure_card(qid)
-                        st.session_state[f"{srs_key}_done"] = True
-                        st.info(f"Registered card {qid} in SRS.")
-                    except Exception as e:
-                        st.error("Failed to register SRS card.")
-                        st.exception(e)
     # ----------------------------
-    # Confused? Quick prioritized list (after Quiz, before SRS)
+    # Learning Loop: Quiz → Confused → SRS (UI-only grouping)
     # ----------------------------
-    st.markdown("## Confused? Quick prioritized list")
-    st.write("These are concepts you repeatedly missed in quizzes — review them before moving on.")
+    st.markdown("## 🔁 Learning Loop — Test → Fix → Review")
+    st.write(
+        "A simple study workflow: 1) take a short quiz to test yourself, "
+        "2) review the concepts you repeatedly missed, and 3) add important items to your spaced repetition (SRS) for long-term retention."
+    )
 
-    # gather session-local quiz context (not authoritative)
-    history = st.session_state.get(hist_key, []) or []
-    quiz_items_session = st.session_state.get(quiz_state_key, []) or []
+    # Step 1: Quiz (unchanged behavior — just a short intro)
+    st.markdown("### 1) Test yourself — Quiz")
+    st.write("Generate a quick set of multiple-choice questions from the lecture and check your understanding.")
+    render_quiz(st=st, stem=stem, text=text, llm=llm, hist_key=hist_key)
 
-    quiz_submissions = []
-    for q in quiz_items_session:
-        qid = q.get("id")
-        submit_key = f"{quiz_state_key}_sub_{qid}"
-        sub = st.session_state.get(submit_key)
-        if sub:
-            quiz_submissions.append({
-                "id": qid,
-                "question": q.get("question", "") or "",
-                "is_correct": bool(sub.get("is_correct", False))
-            })
+    # Small separator to visually separate steps (harmless; sections themselves include separators)
+    st.markdown("---")
 
-    # fetch persisted top confusions (handlers returns only real quiz-based confusions)
-    try:
-        top_limit = 5  # cap to 3-5 as requested (handlers also enforces)
-        results = perform_confusion_analysis(history=history, quiz_submissions=quiz_submissions, retrieved_chunks=[], top_n=top_limit, llm_call=llm) or []
-    except Exception as e:
-        st.error("Failed to compute prioritized confusions.")
-        st.exception(e)
-        results = []
-
-    # require positive signal_strength (wrong_count) — safety filter
-    real_confusions = [r for r in results if int(r.get("signal_strength", 0)) > 0]
-
-    # When empty, show one calm line only (no cards/icons)
-    if not real_confusions:
-        st.write("No repeated quiz mistakes yet 👍")
-    else:
-        preview_limit = min(len(real_confusions), 5)
-        for idx, item in enumerate(real_confusions[:preview_limit], start=1):
-            concept = item.get("concept", "(no concept)")
-            strength = int(item.get("signal_strength", 0))
-            st.markdown(f"**{idx}. {concept}** — missed {strength} time{'s' if strength != 1 else ''}.")
-            if item.get("reason"):
-                st.caption(item.get("reason"))
-
-            evidence = item.get("evidence", []) or []
-            if evidence:
-                with st.expander("Show evidence"):
-                    for e in evidence:
-                        if e.get("type") in ("quiz", "persisted"):
-                            meta = e.get("meta", {}) or {}
-                            qid = meta.get("qid") or e.get("qid") or "<no-id>"
-                            qtext = (meta.get("question") or e.get("question") or "")[:400]
-                            st.write(f"- Quiz: id={qid} — {qtext}")
-                        else:
-                            st.write(f"- {str(e)[:400]}")
-
-            # Explain simply (kept — student-first)
-            explain_btn_key = f"conf_explain_{stem}_{idx}"
-            if st.button("Explain simply", key=explain_btn_key):
-                try:
-                    candidate_index_path = str(index_path) if index_path.exists() else None
-                    raw_concept = item.get('concept', '')
-                    explain_q = f"Explain this simply and give 1 short example: {raw_concept}"
-                    resp = perform_query(
-                        question=explain_q,
-                        embeddings_path=str(embeddings_path),
-                        top_k=3,
-                        use_faiss=bool(use_faiss_search),
-                        faiss_index_path=candidate_index_path,
-                        use_api_mode=st.session_state.use_api_mode,
-                        api_base=os.getenv("API_BASE", API_DEFAULT),
-                        token=st.session_state.api_token or "",
-                        llm_call=llm,
-                    )
-                    st.markdown("**Explanation**")
-                    st.write(resp.get("answer", "(no answer returned)"))
-                    if resp.get("retrieved"):
-                        with st.expander("Show retrieved chunks used for this explanation"):
-                            for rc in resp.get("retrieved", []):
-                                st.write(rc.get("text","")[:1000] + ("..." if len(rc.get("text",""))>1000 else ""))
-                except Exception as e:
-                    st.error("Failed to generate explanation.")
-                    st.exception(e)
-
-            # ➕ Add to SRS (idempotent)
-            add_srs_key = f"conf_add_srs_{stem}_{idx}"
-            if st.button("➕ Add to SRS", key=add_srs_key):
-                try:
-                    mgr = SRSManager()
-                    # try to extract canonical quiz id from evidence metadata
-                    card_id = None
-                    for e in evidence:
-                        meta = e.get("meta", {}) or {}
-                        if meta.get("qid"):
-                            card_id = meta.get("qid")
-                            break
-                        if e.get("qid"):
-                            card_id = e.get("qid")
-                            break
-
-                    # fallback deterministic id derived from concept+stem
-                    if not card_id:
-                        # make a safe short token from the concept
-                        safe = re.sub(r"[^a-zA-Z0-9_]+", "_", concept).strip("_")[:40] or "conf"
-                        card_id = f"{stem}_{safe}"
-
-                    mgr.ensure_card(card_id)
-                    st.success(f"Added to SRS: {card_id}")
-                except Exception as e:
-                    st.error("Failed to add to SRS.")
-                    st.exception(e)
+    # Step 2: Confused (prioritized list of things you missed)
+    st.markdown("### 2) Review what confused you")
+    st.write("These are concepts you missed multiple times. Click 'Explain simply' for a short explanation or add items to SRS.")
+    render_confused(
+        st=st,
+        stem=stem,
+        embeddings_path=embeddings_path,
+        index_path=index_path,
+        use_faiss_search=use_faiss_search,
+        llm=llm,
+    )
 
     st.markdown("---")
-    
-    # -----------------------
-    # SRS Review Section
-    # -----------------------
-    st.subheader("📚 Spaced Repetition Review")
-    
-    with st.expander("ℹ️ What is Spaced Repetition?", expanded=False):
-        st.markdown("""
-        **Spaced Repetition** is a study technique that helps you remember information long-term by reviewing 
-        it at increasing intervals. The more you remember something correctly, the longer you wait before reviewing it again.
-        
-        **How it works:**
-        1. When you answer a quiz question correctly → review again in **1 day**
-        2. Get it right again → review in **3 days**
-        3. Keep getting it right → intervals increase to **7, 14, then 30 days**
-        4. If you get it wrong → interval resets to **1 day** to strengthen memory
-        
-        **To get started:**
-        1. Generate a quiz from your PDF above
-        2. Click **"Start SRS"** on questions you want to review later
-        3. Come back here to review cards when they're due!
-        """)
 
-    try:
-        srs_mgr = SRSManager()
-        all_cards = list(srs_mgr._data.keys())
-        due_cards = srs_mgr.get_due_cards()
-        
-        if not all_cards:
-            st.info("📝 **No cards registered yet.**\n\nTo start using spaced repetition:\n1. Generate a quiz from your PDF above\n2. Click **'Start SRS'** on any question you want to review later\n3. Come back here to review when cards are due!")
-        else:
-            current_quiz = st.session_state.get(quiz_state_key, [])
-            if current_quiz:
-                registered_ids = set(all_cards)
-                unregistered = [q for q in current_quiz if q.get("id") not in registered_ids]
-                if unregistered:
-                    st.info(f"💡 **Tip:** You have {len(unregistered)} quiz question(s) generated above. "
-                           f"Click **'Start SRS'** on any question to add it to your spaced repetition review!")
-            
-            col_stats1, col_stats2, col_stats3 = st.columns(3)
-            with col_stats1:
-                st.metric("Total Cards", len(all_cards))
-            with col_stats2:
-                st.metric("Due Now", len(due_cards), delta=None if len(due_cards) == 0 else f"{len(due_cards)} to review")
-            with col_stats3:
-                reviewed_count = sum(1 for cid in all_cards if srs_mgr.get_card_meta(cid).get("review_count", 0) > 0)
-                st.metric("Reviewed", reviewed_count)
-            
-            if due_cards:
-                st.success(f"🎯 **You have {len(due_cards)} card(s) due for review!**")
-                st.markdown("---")
-                
-                cache_key = "srs_quiz_items_cache"
-                if cache_key not in st.session_state:
-                    st.session_state[cache_key] = {}
-                
-                all_quiz_items = st.session_state[cache_key].copy()
-                
-                current_quiz = st.session_state.get(quiz_state_key, [])
-                for q in current_quiz:
-                    all_quiz_items[q.get("id")] = q
-                
-                missing_card_ids = [cid for cid in due_cards if cid not in all_quiz_items]
-                if missing_card_ids:
-                    disk_cache_key = "srs_disk_quiz_items_cache"
-                    if disk_cache_key not in st.session_state:
-                        disk_quiz_items = load_all_quiz_items_wrapper()
-                        filtered = {}
-                        for card_id, item in disk_quiz_items.items():
-                            question = item.get("question", "")
-                            if question and "placeholder" not in question.lower() and len(question) > 20:
-                                filtered[card_id] = item
-                        st.session_state[disk_cache_key] = filtered
-                    else:
-                        filtered = st.session_state[disk_cache_key]
-                    
-                    for card_id in missing_card_ids:
-                        if card_id in filtered:
-                            all_quiz_items[card_id] = filtered[card_id]
-                            st.session_state[cache_key][card_id] = filtered[card_id]
-                        else:
-                            quiz_item = load_quiz_item_by_id_wrapper(card_id)
-                            if quiz_item:
-                                all_quiz_items[card_id] = quiz_item
-                                st.session_state[cache_key][card_id] = quiz_item
-                
-                reviewed_this_session = st.session_state.get("srs_reviewed_this_session", set())
-                
-                for idx, card_id in enumerate(due_cards, 1):
-                    if card_id in reviewed_this_session:
-                        continue
-                    
-                    card_meta = srs_mgr.get_card_meta(card_id)
-                    quiz_item = all_quiz_items.get(card_id)
-                    doc_name = card_id.rsplit("_", 1)[0] if "_" in card_id else "Unknown"
-                    
-                    if not quiz_item:
-                        st.markdown(f"### Card {idx}: {card_id}")
-                        is_placeholder = "placeholder" in card_id.lower() or (card_meta and card_meta.get("review_count", 0) == 0)
-                        if doc_name != "Unknown":
-                            st.warning(f"📄 **Card from: {doc_name}**")
-                            if is_placeholder:
-                                st.info(f"💡 This appears to be a placeholder card from an old session. "
-                                       f"You can delete it and register new questions from the quiz section above.")
-                            else:
-                                st.info(f"💡 **Tip:** Upload the PDF '{doc_name}.pdf' and generate a quiz to see the full question. "
-                                       f"For now, you can review based on your memory of this topic.")
-                        else:
-                            st.info("💡 **Tip:** This card was registered from a previous session. "
-                                   "Upload the same PDF and generate a quiz to see the full question.")
-                        
-                        st.markdown("**Do you remember this topic?**")
-                        st.caption("Think about what you learned. Can you recall the key concepts?")
-                        
-                        if is_placeholder:
-                            if st.button(f"🗑️ Remove this placeholder card", key=f"remove_{card_id}"):
-                                try:
-                                    del srs_mgr._data[card_id]
-                                    srs_mgr._save()
-                                    st.success("Card removed!")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Failed to remove card: {e}")
-                        
-                        col_correct, col_incorrect = st.columns(2)
-                        with col_correct:
-                            if st.button(f"✅ Yes, I remember this", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
-                                srs_mgr.mark_review(card_id, correct=True)
-                                reviewed_this_session.add(card_id)
-                                st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                st.success("✅ Great! Card scheduled for next review.")
-                                st.balloons()
-                                st.rerun()
-                        
-                        with col_incorrect:
-                            if st.button(f"❌ No, I need to review", key=f"srs_incorrect_{card_id}", use_container_width=True):
-                                srs_mgr.mark_review(card_id, correct=False)
-                                reviewed_this_session.add(card_id)
-                                st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                st.info("📚 No problem! This card will come up again soon to help strengthen your memory.")
-                                st.rerun()
-                        
-                        if card_meta:
-                            review_count = card_meta.get("review_count", 0)
-                            interval_idx = card_meta.get("interval_index", 0)
-                            st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days")
-                        
-                        st.markdown("---")
-                    else:
-                        st.markdown(f"### Card {idx}: Review Question")
-                        
-                        q_text = quiz_item.get("question", "")
-                        choices = quiz_item.get("choices", {}) or {}
-                        answer_letter = quiz_item.get("answer", None)
-                        explanation = quiz_item.get("explanation", "")
-                        
-                        st.markdown("**📝 Question:**")
-                        st.write(q_text)
-                        
-                        st.markdown("**🔤 Answer Choices:**")
-                        for label in ["A", "B", "C", "D"]:
-                            if label in choices:
-                                st.write(f"**{label}.** {choices[label]}")
-                        
-                        show_answer_key = f"srs_show_{card_id}"
-                        
-                        if show_answer_key not in st.session_state:
-                            st.session_state[show_answer_key] = False
-                        
-                        st.markdown("---")
-                        
-                        if not st.session_state[show_answer_key]:
-                            st.markdown("**💭 Think about your answer, then click below to reveal the correct answer:**")
-                            if st.button("🔍 Show Answer", key=f"show_{card_id}", type="primary", use_container_width=True):
-                                st.session_state[show_answer_key] = True
-                                st.rerun()
-                        else:
-                            st.markdown("**✅ Correct Answer:**")
-                            if answer_letter and choices.get(answer_letter):
-                                st.success(f"**{answer_letter}.** {choices[answer_letter]}")
-                            
-                            if explanation:
-                                st.markdown("**📖 Explanation:**")
-                                st.info(explanation)
-                            
-                            st.markdown("---")
-                            st.markdown("**🎯 Did you get it right?**")
-                            
-                            col_correct, col_incorrect = st.columns(2)
-                            
-                            with col_correct:
-                                if st.button(f"✅ Yes, I got it correct!", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
-                                    srs_mgr.mark_review(card_id, correct=True)
-                                    reviewed_this_session.add(card_id)
-                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                    st.session_state[show_answer_key] = False
-                                    st.success("🎉 Excellent! This card will be scheduled for review in a longer interval.")
-                                    st.balloons()
-                                    st.rerun()
-                            
-                            with col_incorrect:
-                                if st.button(f"❌ No, I got it wrong", key=f"srs_incorrect_{card_id}", use_container_width=True):
-                                    srs_mgr.mark_review(card_id, correct=False)
-                                    reviewed_this_session.add(card_id)
-                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                    st.session_state[show_answer_key] = False
-                                    st.info("📚 That's okay! This card will come up again soon to help you learn it better.")
-                                    st.rerun()
-                            
-                            if card_meta:
-                                review_count = card_meta.get("review_count", 0)
-                                interval_idx = card_meta.get("interval_index", 0)
-                                next_due = card_meta.get("next_due", "")
-                                if next_due:
-                                    try:
-                                        next_due_dt = datetime.fromisoformat(next_due)
-                                        days_until = (next_due_dt - datetime.utcnow()).days
-                                        st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days | Next review in: {days_until} days")
-                                    except Exception:
-                                        st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days")
-                        
-                        st.markdown("---")
-            else:
-                st.info("✅ **No cards due for review right now!** Great job staying on top of your studies. 🎉")
-            
-            st.markdown("---")
-            if st.checkbox("📋 Show all my SRS cards", help="View all cards you've registered, including those not due yet"):
-                if not all_cards:
-                    st.info("No cards registered yet.")
-                else:
-                    cache_key = "srs_quiz_items_cache"
-                    cached_items = st.session_state.get(cache_key, {})
-                    
-                    disk_cache_key = "srs_disk_quiz_items_cache"
-                    if disk_cache_key not in st.session_state:
-                        disk_quiz_items = load_all_quiz_items_wrapper()
-                        filtered = {cid: item for cid, item in disk_quiz_items.items() 
-                                   if item.get("question", "") and "placeholder" not in item.get("question", "").lower()}
-                        st.session_state[disk_cache_key] = filtered
-                    else:
-                        filtered = st.session_state[disk_cache_key]
-                    
-                    display_items = {**cached_items, **filtered}
-                    
-                    st.markdown("### All Your Study Cards")
-                    for card_id in all_cards:
-                        meta = srs_mgr.get_card_meta(card_id)
-                        quiz_item = display_items.get(card_id)
-                        
-                        if not quiz_item:
-                            quiz_item = load_quiz_item_by_id_wrapper(card_id)
-                        
-                        if quiz_item:
-                            question_preview = quiz_item.get("question", "")[:100] + "..." if len(quiz_item.get("question", "")) > 100 else quiz_item.get("question", "")
-                        else:
-                            doc_name = card_id.rsplit("_", 1)[0] if "_" in card_id else "Unknown"
-                            question_preview = f"Card from {doc_name} (question not available)"
-                        
-                        is_due = card_id in due_cards
-                        status_icon = "🎯" if is_due else "✅"
-                        status_text = "**Due now**" if is_due else "Not due"
-                        
-                        next_due = meta.get("next_due", "") if meta else ""
-                        review_count = meta.get("review_count", 0) if meta else 0
-                        interval_idx = meta.get("interval_index", 0) if meta else 0
-                        
-                        st.markdown(f"{status_icon} **{card_id}** - {status_text}")
-                        st.write(f"   {question_preview}")
-                        if meta:
-                            try:
-                                if next_due:
-                                    next_due_dt = datetime.fromisoformat(next_due)
-                                    days_until = (next_due_dt - datetime.utcnow()).days
-                                    if days_until <= 0:
-                                        due_text = "Due now"
-                                    else:
-                                        due_text = f"Due in {days_until} day(s)"
-                                else:
-                                    due_text = "N/A"
-                            except Exception:
-                                due_text = next_due[:10] if next_due else "N/A"
-                            
-                            st.caption(f"   📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} days | {due_text}")
-                        st.markdown("")
-    
-    except Exception as e:
-        st.error("Error loading SRS data.")
-        st.exception(e)
+    # Step 3: Spaced Repetition (SRS)
+    st.markdown("### 3) Lock it in — Spaced Repetition (SRS)")
+    st.write("Add items you want to retain and review due cards here. This helps move knowledge into long-term memory.")
+    render_srs(st)
 
     st.markdown("---")
     st.caption("Tip: For reproducible tests set USE_SAFE_EMBEDDINGS=1 and build FAISS index to compare results with NumPy search.")
