@@ -59,7 +59,12 @@ from backend.vectorstore.faiss_store import build_faiss_index  # optional; handl
 from backend.generate_quiz import generate_mcq_from_context
 from backend.study_srs import SRSManager, INTERVALS
 from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all_quiz_items
-
+hide_deploy_bar = """
+    <style>
+    header[data-testid="stHeader"] {display: none;}  /* Hides the top Deploy bar */
+    </style>
+"""
+st.markdown(hide_deploy_bar, unsafe_allow_html=True)
 # initialize LLM (this mirrors existing behaviour)
 llm = init_llm()
 # We avoid calling st.* until after set_page_config — but keep same behavior messages
@@ -78,7 +83,132 @@ except Exception:
     _faiss_builder_available = False
 
 st.set_page_config(page_title="Learning Assistant", layout="centered")
-st.title("Learning Assistant")
+
+st.markdown(
+    """
+    <style>
+      :root {
+        --accent: #4f46e5;
+        --accent-soft: #eef2ff;
+        --card-bg: #f8fafc;
+        --card-border: #e2e8f0;
+        --success-bg: #ecfdf3;
+        --error-bg: #fef2f2;
+        --warning-bg: #fff7ed;
+      }
+      div.block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+      }
+      section[data-testid="stSidebar"] {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100%;
+        border-right: 1px solid #e5e7eb;
+        background: #fbfbfd;
+      }
+      section[data-testid="stSidebar"] > div {
+        padding-top: 1.5rem;
+      }
+      h1, h2, h3, h4 {
+        color: #111827;
+      }
+      h2 {
+        border-left: 4px solid var(--accent);
+        padding-left: 0.5rem;
+      }
+      div[data-testid="stMetric"] {
+        background: var(--accent-soft);
+        padding: 0.75rem;
+        border-radius: 12px;
+        border: 1px solid #e0e7ff;
+      }
+      div[data-testid="stAlert"] {
+        border-radius: 12px;
+      }
+      div[data-testid="stAlert"][data-baseweb="notification"] {
+        border-left: 4px solid var(--accent);
+      }
+      div[data-testid="stAlert"][data-alert-type="success"] {
+        background: var(--success-bg);
+      }
+      div[data-testid="stAlert"][data-alert-type="error"] {
+        background: var(--error-bg);
+      }
+      div[data-testid="stAlert"][data-alert-type="warning"] {
+        background: var(--warning-bg);
+      }
+      div[data-testid="stVerticalBlock"]:has(> div.la-card) {
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        padding: 1rem 1.1rem;
+        border-radius: 16px;
+        margin-bottom: 1.2rem;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+      }
+      div.la-card {
+        display: none;
+      }
+      div[data-testid="stVerticalBlock"]:has(> div.la-action-bar) {
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        padding: 0.7rem 0.9rem;
+        border-radius: 12px;
+        margin: 0.6rem 0;
+      }
+      div.la-action-bar {
+        display: none;
+      }
+      .app-header {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 1rem 1.25rem;
+        border-radius: 18px;
+        background: linear-gradient(135deg, var(--accent), #6d28d9);
+        color: #fff;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 10px 25px rgba(79, 70, 229, 0.25);
+      }
+      .app-logo {
+        width: 48px;
+        height: 48px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.2);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 1.1rem;
+        letter-spacing: 0.5px;
+      }
+      .app-title {
+        font-size: 1.6rem;
+        font-weight: 700;
+      }
+      .app-subtitle {
+        font-size: 0.95rem;
+        opacity: 0.9;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="app-header">
+      <div class="app-logo">LA</div>
+      <div>
+        <div class="app-title">Learning Assistant</div>
+        <div class="app-subtitle">Turn lectures into actionable study sessions</div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # show startup msgs
 for lvl, msg in _startup_msgs:
@@ -121,26 +251,37 @@ default_token = os.getenv("API_TOKEN", "") or ""
 if "api_token" not in st.session_state:
     st.session_state.api_token = default_token
 
-# present api controls in a compact row
-col_api, col_token = st.columns([1, 3])
-with col_api:
+with st.sidebar:
+    st.markdown("### 📄 Upload & Settings")
+    uploaded = st.file_uploader("Upload a lecture PDF", type=["pdf"])
+    st.markdown("#### API Settings")
     st.session_state.use_api_mode = st.checkbox("Use API mode", value=st.session_state.use_api_mode)
-with col_token:
     st.session_state.api_token = st.text_input(
         "API Token (override)", value=st.session_state.api_token, type="password",
         help="Reads default from environment; typing here overrides for this session",
     )
+    st.markdown("#### Navigation")
+    st.markdown(
+        """
+        - [Setup](#setup-your-lecture)
+        - [Study modes](#study-modes)
+        - [Quiz](#study-quiz-mcq-v1)
+        - [SRS](#spaced-repetition-review)
+        - [Confused?](#confused-quick-prioritized-list)
+        """,
+        unsafe_allow_html=True,
+    )
 
+st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
 st.markdown("## 1️⃣ Setup your lecture")
 st.write(
-    "Upload a single lecture PDF and create embeddings for that lecture. "
+    "Upload a single lecture PDF on the left side bar and create embeddings for that lecture. "
     "This is usually a one-time step per file — once embeddings are created you can use the Study tools below."
 )
 
 # ----------------------------
 # Upload + controls (unchanged logic)
 # ----------------------------
-uploaded = st.file_uploader("Upload a lecture PDF", type=["pdf"])
 if uploaded:
     # Save uploaded file
     tmp_pdf = Path("data/raw") / uploaded.name
@@ -217,6 +358,7 @@ if uploaded:
     # 2️⃣ Study modes (UI-only guidance)
     # ----------------------------
     st.markdown("---")
+    st.markdown('<a id="study-modes"></a>', unsafe_allow_html=True)
     st.markdown("## 2️⃣ Study modes")
     st.write(
         "Use the tabs below to explore the lecture: ask targeted questions, generate summaries, or chat conversationally. "
@@ -372,8 +514,10 @@ if uploaded:
                         summary_display = clean_summary_text(summary)
 
                         st.subheader("Summary")
-                        with st.expander("Show summary (toggle)", expanded=True):
-                            st.write(summary_display or "")
+                        if summary_display:
+                            st.write(summary_display)
+                        else:
+                            st.info("No summary returned.")
                         st.subheader("Key concepts / highlights")
                         if key_concepts:
                             st.write(f"{len(key_concepts)} items — " + ", ".join(key_concepts))
