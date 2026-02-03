@@ -62,10 +62,13 @@ from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all
 
 # initialize LLM (this mirrors existing behaviour)
 llm = init_llm()
+# We avoid calling st.* until after set_page_config — but keep same behavior messages
+# We'll store messages in a list and display after page config
+_startup_msgs = []
 if llm is None:
-    st.warning("LLM not available — using placeholders")
+    _startup_msgs.append(("warning", "LLM not available — using placeholders"))
 else:
-    st.info("LLM ready — will generate real MCQs")
+    _startup_msgs.append(("info", "LLM ready — will generate real MCQs"))
 
 # Check FAISS builder availability (handlers also has this; keep for early error messages)
 try:
@@ -76,28 +79,33 @@ except Exception:
 
 st.set_page_config(page_title="Learning Assistant", layout="centered")
 st.title("Learning Assistant")
-st.markdown(
-"""
-Upload a lecture PDF and study it interactively. Controls:
 
+# show startup msgs
+for lvl, msg in _startup_msgs:
+    if lvl == "warning":
+        st.warning(msg)
+    else:
+        st.info(msg)
+
+st.markdown(
+    """
+**Upload a lecture PDF and study it interactively.**  
+
+Controls:
 - Toggle SAFE vs REAL embeddings.
 - (Re)create embeddings file.
 - Build FAISS index (optional).
 - Toggle FAISS vs NumPy search.
 
 Primary study modes:
-
-1. **Ask a Question (RAG)** — targeted answers using retrieved chunks.
-2. **Generate Summary** — quick lecture overview.
+1. **Ask a Question (RAG)** — targeted answers using retrieved chunks.  
+2. **Generate Summary** — quick lecture overview.  
 3. **Chat** — conversational mode with history.
 
 Learning Enhancements:
-
 - **Quiz Generation (MCQs)** — self-test knowledge.
 - **Spaced Repetition (SRS)** — review cards efficiently.
 - **Transparent Retrieval** — see chunks used for answers.
-
-A simple, interactive tool for effective lecture study.
 """
 )
 
@@ -113,7 +121,8 @@ default_token = os.getenv("API_TOKEN", "") or ""
 if "api_token" not in st.session_state:
     st.session_state.api_token = default_token
 
-col_api, col_token = st.columns([1, 2])
+# present api controls in a compact row
+col_api, col_token = st.columns([1, 3])
 with col_api:
     st.session_state.use_api_mode = st.checkbox("Use API mode", value=st.session_state.use_api_mode)
 with col_token:
@@ -122,10 +131,6 @@ with col_token:
         help="Reads default from environment; typing here overrides for this session",
     )
 
-
-# ----------------------------
-# 1️⃣ Setup your lecture (UI-only guidance)
-# ----------------------------
 st.markdown("## 1️⃣ Setup your lecture")
 st.write(
     "Upload a single lecture PDF and create embeddings for that lecture. "
@@ -155,19 +160,21 @@ if uploaded:
     embeddings_path = Path(f"data/processed/{stem}_embeddings.json")
     index_path = Path(f"data/processed/{stem}_embeddings.index")
 
-    # UI controls
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        use_safe_toggle = st.checkbox(
-            "Use SAFE embeddings (filter sensitive or risky outputs)",
-            value=os.getenv("USE_SAFE_EMBEDDINGS", "1").lower() in ("1", "true", "yes"),
-        )
-    with col2:
-        recreate_btn = st.button("Recreate embeddings")
-    with col3:
-        build_index_btn = st.button("Build FAISS index")
-    use_faiss_search = st.checkbox("Use FAISS for retrieval (faster retrieval for large documents)",
-                                   value=False)
+    # Group embedding controls into a neat card-like area
+    with st.container():
+        st.markdown("#### Embeddings & Indexing")
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            use_safe_toggle = st.checkbox(
+                "Use SAFE embeddings (filter sensitive or risky outputs)",
+                value=os.getenv("USE_SAFE_EMBEDDINGS", "1").lower() in ("1", "true", "yes"),
+            )
+        with col2:
+            recreate_btn = st.button("Recreate embeddings")
+        with col3:
+            build_index_btn = st.button("Build FAISS index")
+        use_faiss_search = st.checkbox("Use FAISS for retrieval (faster retrieval for large documents)",
+                                       value=False)
 
     os.environ["USE_SAFE_EMBEDDINGS"] = "1" if use_safe_toggle else "0"
 
@@ -216,15 +223,27 @@ if uploaded:
         "Below the tabs you'll find Quiz and Review tools to test and retain what you learn."
     )
 
-    tab1, tab2, tab3 = st.tabs(["Ask a Question", "Generate Summary", "Chat"])
+    # Use slightly larger tabs with descriptions to improve discoverability
+    tab1, tab2, tab3 = st.tabs(
+        [
+            "Ask a Question — RAG",
+            "Generate Summary",
+            "Chat (conversational RAG)",
+        ]
+    )
 
     # -------------------
     # Tab: Ask a Question
     # -------------------
     with tab1:
         st.subheader("Ask a question (Retrieval-Augmented)")
-        question = st.text_input("Your question (based on uploaded lecture)", key="qa_question")
-        k = st.number_input("Top-k chunks to retrieve", min_value=1, max_value=10, value=3, step=1, key="qa_k")
+        st.markdown("Type a focused question about the uploaded lecture. The assistant will retrieve supporting chunks.")
+        qa_col1, qa_col2 = st.columns([4, 1])
+        with qa_col1:
+            question = st.text_input("Your question (based on uploaded lecture)", key="qa_question")
+        with qa_col2:
+            k = st.number_input("Top-k chunks to retrieve", min_value=1, max_value=10, value=3, step=1, key="qa_k")
+
         if st.button("Ask (RAG)"):
             if len(ids) == 0:
                 st.error("Embeddings not loaded. Create embeddings first.")
@@ -264,31 +283,37 @@ if uploaded:
                         latency = resp.get("latency", None)
 
                         display_answer = strip_key_concepts_from_answer(ans or "")
-                        st.subheader("Top retrieved chunks (expand to read)")
-                        if not retrieved_chunks:
-                            st.info("No chunks retrieved.")
-                        else:
-                            for i, chunk in enumerate(retrieved_chunks, start=1):
-                                score = chunk.get("score", 0.0)
-                                cid = chunk.get("id")
-                                pos = chunk.get("pos")
-                                with st.expander(f"{i}. chunk (id={cid} pos={pos} score={score:.4f})"):
-                                    st.write(chunk.get("text", "")[:2000] + ("..." if len(chunk.get("text", "")) > 2000 else ""))
-                        st.subheader("Answer")
-                        st.write(display_answer or "")
-                        if latency is not None:
-                            st.caption(f"Latency: {latency:.3f}s")
-                        st.subheader("Provenance (sentence -> chunk)")
-                        if provenance and provenance.get("sentences"):
-                            for s in provenance.get("sentences", []):
-                                st.write(f"- \"{s['sentence']}\" → chunk_id={s.get('chunk_id')} (score={s.get('score'):.3f})")
-                        else:
-                            st.info("No provenance available.")
-                        with st.expander("Prompt used (debug)"):
-                            if prompt_used:
-                                st.code(prompt_used[:4000])
+
+                        # Show retrieval + answer in two-column layout for clarity
+                        out_col_left, out_col_right = st.columns([2, 3])
+                        with out_col_left:
+                            st.subheader("Top retrieved chunks")
+                            if not retrieved_chunks:
+                                st.info("No chunks retrieved.")
                             else:
-                                st.info("No prompt captured.")
+                                for i, chunk in enumerate(retrieved_chunks, start=1):
+                                    score = chunk.get("score", 0.0)
+                                    cid = chunk.get("id")
+                                    pos = chunk.get("pos")
+                                    with st.expander(f"{i}. chunk — id={cid} pos={pos} score={score:.4f}"):
+                                        st.write(chunk.get("text", "")[:2000] + ("..." if len(chunk.get("text", "")) > 2000 else ""))
+                        with out_col_right:
+                            st.subheader("Answer")
+                            st.write(display_answer or "")
+                            if latency is not None:
+                                st.caption(f"Latency: {latency:.3f}s")
+                            st.subheader("Provenance (sentence → chunk)")
+                            if provenance and provenance.get("sentences"):
+                                for s in provenance.get("sentences", []):
+                                    st.write(f"- \"{s['sentence']}\" → chunk_id={s.get('chunk_id')} (score={s.get('score'):.3f})")
+                            else:
+                                st.info("No provenance available.")
+                            with st.expander("Prompt used (debug)"):
+                                if prompt_used:
+                                    st.code(prompt_used[:4000])
+                                else:
+                                    st.info("No prompt captured.")
+
                     except requests.HTTPError as he:
                         try:
                             err_json = he.response.json()
@@ -309,8 +334,13 @@ if uploaded:
     # -----------------------
     with tab2:
         st.subheader("Generate document-level summary (explicit)")
-        summary_type = st.selectbox("Summary detail level", ["brief", "detailed"], index=0)
-        summary_top_k = st.number_input("Limit to first N chunks (leave blank / 0 to use all)", min_value=0, max_value=10000, value=0, step=1)
+        st.markdown("Choose summary length and optionally limit the chunks used.")
+        s_col1, s_col2 = st.columns([2, 1])
+        with s_col1:
+            summary_type = st.selectbox("Summary detail level", ["brief", "detailed"], index=0)
+        with s_col2:
+            summary_top_k = st.number_input("Limit to first N chunks (0 = all)", min_value=0, max_value=10000, value=0, step=1)
+
         if st.button("Generate Summary"):
             if len(ids) == 0:
                 st.error("Embeddings not loaded. Create embeddings first.")
@@ -340,13 +370,16 @@ if uploaded:
                         key_concepts = resp.get("key_concepts", []) or []
                         used_chunks = resp.get("used_chunks", []) or []
                         summary_display = clean_summary_text(summary)
+
                         st.subheader("Summary")
-                        st.write(summary_display or "")
+                        with st.expander("Show summary (toggle)", expanded=True):
+                            st.write(summary_display or "")
                         st.subheader("Key concepts / highlights")
                         if key_concepts:
                             st.write(f"{len(key_concepts)} items — " + ", ".join(key_concepts))
                         else:
                             st.info("No key concepts extracted.")
+
                         with st.expander("Show used chunks (preview)"):
                             if not used_chunks:
                                 st.info("No chunks available.")
@@ -362,6 +395,7 @@ if uploaded:
                                     else:
                                         s = str(c)
                                         st.write(f"- {s[:300]}{'...' if len(s) > 300 else ''}")
+
                     except requests.HTTPError as he:
                         try:
                             detail = he.response.json().get("detail", str(he))
@@ -379,8 +413,6 @@ if uploaded:
     with tab3:
         render_chat(st=st, stem=stem, llm=llm)
 
-
-
     st.markdown("---")
     hist_key = f"chat_history_{stem}"
 
@@ -396,29 +428,32 @@ if uploaded:
     # Step 1: Quiz (unchanged behavior — just a short intro)
     st.markdown("### 1) Test yourself — Quiz")
     st.write("Generate a quick set of multiple-choice questions from the lecture and check your understanding.")
-    render_quiz(st=st, stem=stem, text=text, llm=llm, hist_key=hist_key)
+    # Put quiz in an expander to avoid very long pages by default
+    with st.expander("Open Quiz generator / questions", expanded=True):
+        render_quiz(st=st, stem=stem, text=text, llm=llm, hist_key=hist_key)
 
-    # Small separator to visually separate steps (harmless; sections themselves include separators)
     st.markdown("---")
 
     # Step 2: Confused (prioritized list of things you missed)
     st.markdown("### 2) Review what confused you")
     st.write("These are concepts you missed multiple times. Click 'Explain simply' for a short explanation or add items to SRS.")
-    render_confused(
-        st=st,
-        stem=stem,
-        embeddings_path=embeddings_path,
-        index_path=index_path,
-        use_faiss_search=use_faiss_search,
-        llm=llm,
-    )
+    with st.expander("Open Confused list", expanded=False):
+        render_confused(
+            st=st,
+            stem=stem,
+            embeddings_path=embeddings_path,
+            index_path=index_path,
+            use_faiss_search=use_faiss_search,
+            llm=llm,
+        )
 
     st.markdown("---")
 
     # Step 3: Spaced Repetition (SRS)
     st.markdown("### 3) Lock it in — Spaced Repetition (SRS)")
     st.write("Add items you want to retain and review due cards here. This helps move knowledge into long-term memory.")
-    render_srs(st)
+    with st.expander("Open SRS review", expanded=False):
+        render_srs(st)
 
     st.markdown("---")
     st.caption("Tip: For reproducible tests set USE_SAFE_EMBEDDINGS=1 and build FAISS index to compare results with NumPy search.")
