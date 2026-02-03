@@ -1,4 +1,3 @@
-# frontend/sections/srs.py
 """
 Spaced Repetition (SRS) UI extracted from frontend/app.py — UX-optimized presentation only.
 
@@ -182,165 +181,165 @@ def render(st: Any):
                 doc_name = cid.rsplit("_", 1)[0] if "_" in cid else "Unknown"
                 grouped.setdefault(doc_name, []).append(cid)
 
-            # Render groups as collapsible sections (keeps same card-level behavior)
+            # Render groups inline (previously expanders)
             for doc_name, card_ids in grouped.items():
-                with st.expander(f"📄 {doc_name} — {len(card_ids)} due", expanded=True):
-                    for idx_offset, card_id in enumerate(card_ids, 1):
-                        # preserve original index semantics by computing a stable index
-                        # find global index in due_cards to match original numbering if needed
-                        try:
-                            global_idx = due_cards.index(card_id) + 1
-                        except Exception:
-                            global_idx = idx_offset
+                st.markdown(f"### 📄 {doc_name} — {len(card_ids)} due")
+                for idx_offset, card_id in enumerate(card_ids, 1):
+                    # preserve original index semantics by computing a stable index
+                    # find global index in due_cards to match original numbering if needed
+                    try:
+                        global_idx = due_cards.index(card_id) + 1
+                    except Exception:
+                        global_idx = idx_offset
 
-                        if card_id in reviewed_this_session:
-                            continue
+                    if card_id in reviewed_this_session:
+                        continue
 
-                        card_meta = srs_mgr.get_card_meta(card_id)
-                        quiz_item = all_quiz_items.get(card_id)
-                        doc_name_local = card_id.rsplit("_", 1)[0] if "_" in card_id else "Unknown"
+                    card_meta = srs_mgr.get_card_meta(card_id)
+                    quiz_item = all_quiz_items.get(card_id)
+                    doc_name_local = card_id.rsplit("_", 1)[0] if "_" in card_id else "Unknown"
 
-                        if not quiz_item:
-                            # Placeholder / missing question case — preserve original behavior
-                            st.markdown(f"### Card {global_idx}: {card_id}")
-                            is_placeholder = "placeholder" in card_id.lower() or (card_meta and card_meta.get("review_count", 0) == 0)
-                            if doc_name_local != "Unknown":
-                                st.warning(f"📄 **Card from: {doc_name_local}**")
-                                if is_placeholder:
-                                    st.info(
-                                        "💡 This appears to be a placeholder card from an old session. "
-                                        "You can delete it and register new questions from the quiz section above."
-                                    )
-                                else:
-                                    st.info(
-                                        f"💡 **Tip:** Upload the PDF '{doc_name_local}.pdf' and generate a quiz to see the full question."
-                                    )
+                    if not quiz_item:
+                        # Placeholder / missing question case — preserve original behavior
+                        st.markdown(f"### Card {global_idx}: {card_id}")
+                        is_placeholder = "placeholder" in card_id.lower() or (card_meta and card_meta.get("review_count", 0) == 0)
+                        if doc_name_local != "Unknown":
+                            st.warning(f"📄 **Card from: {doc_name_local}**")
+                            if is_placeholder:
+                                st.info(
+                                    "💡 This appears to be a placeholder card from an old session. "
+                                    "You can delete it and register new questions from the quiz section above."
+                                )
                             else:
                                 st.info(
-                                    "💡 **Tip:** This card was registered from a previous session. "
-                                    "Upload the same PDF and generate a quiz to see the full question."
+                                    f"💡 **Tip:** Upload the PDF '{doc_name_local}.pdf' and generate a quiz to see the full question."
                                 )
+                        else:
+                            st.info(
+                                "💡 **Tip:** This card was registered from a previous session. "
+                                "Upload the same PDF and generate a quiz to see the full question."
+                            )
 
-                            st.markdown("**Do you remember this topic?**")
-                            st.caption("Think about what you learned. Can you recall the key concepts?")
+                        st.markdown("**Do you remember this topic?**")
+                        st.caption("Think about what you learned. Can you recall the key concepts?")
 
-                            if is_placeholder:
-                                if st.button(f"🗑️ Remove this placeholder card", key=f"remove_{card_id}"):
-                                    try:
-                                        del srs_mgr._data[card_id]
-                                        srs_mgr._save()
-                                        st.success("Card removed!")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Failed to remove card: {e}")
+                        if is_placeholder:
+                            if st.button(f"🗑️ Remove this placeholder card", key=f"remove_{card_id}"):
+                                try:
+                                    del srs_mgr._data[card_id]
+                                    srs_mgr._save()
+                                    st.success("Card removed!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to remove card: {e}")
 
-                            # Simple Yes / No columns
+                        # Simple Yes / No columns
+                        col_correct, col_incorrect = st.columns(2)
+                        with col_correct:
+                            if st.button(f"✅ Yes, I remember this", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
+                                srs_mgr.mark_review(card_id, correct=True)
+                                reviewed_this_session.add(card_id)
+                                st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                st.success("✅ Great! Card scheduled for next review.")
+                                st.balloons()
+                                st.rerun()
+
+                        with col_incorrect:
+                            if st.button(f"❌ No, I need to review", key=f"srs_incorrect_{card_id}", use_container_width=True):
+                                srs_mgr.mark_review(card_id, correct=False)
+                                reviewed_this_session.add(card_id)
+                                st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                st.info("📚 No problem! This card will come up again soon to help strengthen your memory.")
+                                st.rerun()
+
+                        if card_meta:
+                            review_count = card_meta.get("review_count", 0)
+                            interval_idx = card_meta.get("interval_index", 0)
+                            st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days")
+
+                        st.markdown("---")
+                    else:
+                        # Full question rendering (keeps original behavior and keys)
+                        st.markdown(f"### Card {global_idx}: Review Question")
+
+                        q_text = quiz_item.get("question", "")
+                        choices = quiz_item.get("choices", {}) or {}
+                        answer_letter = quiz_item.get("answer", None)
+                        explanation = quiz_item.get("explanation", "")
+
+                        # Question area with graceful handling for long text
+                        st.markdown("**📝 Question:**")
+                        if "\n" in q_text or len(q_text) > 300:
+                            st.text_area(label="", value=q_text, height=120, key=f"srs_qtext_{card_id}", disabled=True)
+                        else:
+                            st.write(q_text)
+
+                        # Show choices in a compact list for scanning
+                        st.markdown("**🔤 Answer Choices:**")
+                        for label in ["A", "B", "C", "D"]:
+                            if label in choices:
+                                st.write(f"**{label}.** {choices[label]}")
+
+                        show_answer_key = f"srs_show_{card_id}"
+                        if show_answer_key not in st.session_state:
+                            st.session_state[show_answer_key] = False
+
+                        st.markdown("---")
+
+                        # Primary CTA for revealing answer — large and clear
+                        if not st.session_state[show_answer_key]:
+                            st.info("💭 Think about your answer, then reveal it.")
+                            if st.button("🔍 Show Answer", key=f"show_{card_id}", type="primary", use_container_width=True):
+                                st.session_state[show_answer_key] = True
+                                st.rerun()
+                        else:
+                            # Show the correct answer clearly
+                            st.markdown("**✅ Correct Answer:**")
+                            if answer_letter and choices.get(answer_letter):
+                                st.success(f"**{answer_letter}.** {choices[answer_letter]}")
+
+                            # Show explanation if present
+                            if explanation:
+                                st.markdown("**📖 Explanation:**")
+                                # long explanations put in text area for scrollability
+                                if len(explanation) > 300:
+                                    st.info("")  # small visual gap
+                                    st.text_area("", value=explanation, height=140, disabled=True)
+                                else:
+                                    st.info(explanation)
+
+                            st.markdown("---")
+                            st.markdown("**🎯 Did you get it right?**")
+
+                            # Yes / No buttons with consistent messaging
                             col_correct, col_incorrect = st.columns(2)
+
                             with col_correct:
-                                if st.button(f"✅ Yes, I remember this", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
+                                if st.button(f"✅ Yes, I got it correct!", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
                                     srs_mgr.mark_review(card_id, correct=True)
                                     reviewed_this_session.add(card_id)
                                     st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                    st.success("✅ Great! Card scheduled for next review.")
+                                    st.session_state[show_answer_key] = False
+                                    st.success("🎉 Excellent! This card will be scheduled for review in a longer interval.")
                                     st.balloons()
                                     st.rerun()
 
                             with col_incorrect:
-                                if st.button(f"❌ No, I need to review", key=f"srs_incorrect_{card_id}", use_container_width=True):
+                                if st.button(f"❌ No, I got it wrong", key=f"srs_incorrect_{card_id}", use_container_width=True):
                                     srs_mgr.mark_review(card_id, correct=False)
                                     reviewed_this_session.add(card_id)
                                     st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                    st.info("📚 No problem! This card will come up again soon to help strengthen your memory.")
+                                    st.session_state[show_answer_key] = False
+                                    st.info("📚 That's okay! This card will come up again soon to help you learn it better.")
                                     st.rerun()
 
+                            # Show progress info (next due)
                             if card_meta:
                                 review_count = card_meta.get("review_count", 0)
                                 interval_idx = card_meta.get("interval_index", 0)
-                                st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days")
-
-                            st.markdown("---")
-                        else:
-                            # Full question rendering (keeps original behavior and keys)
-                            st.markdown(f"### Card {global_idx}: Review Question")
-
-                            q_text = quiz_item.get("question", "")
-                            choices = quiz_item.get("choices", {}) or {}
-                            answer_letter = quiz_item.get("answer", None)
-                            explanation = quiz_item.get("explanation", "")
-
-                            # Question area with graceful handling for long text
-                            st.markdown("**📝 Question:**")
-                            if "\n" in q_text or len(q_text) > 300:
-                                st.text_area(label="", value=q_text, height=120, key=f"srs_qtext_{card_id}", disabled=True)
-                            else:
-                                st.write(q_text)
-
-                            # Show choices in a compact list for scanning
-                            st.markdown("**🔤 Answer Choices:**")
-                            for label in ["A", "B", "C", "D"]:
-                                if label in choices:
-                                    st.write(f"**{label}.** {choices[label]}")
-
-                            show_answer_key = f"srs_show_{card_id}"
-                            if show_answer_key not in st.session_state:
-                                st.session_state[show_answer_key] = False
-
-                            st.markdown("---")
-
-                            # Primary CTA for revealing answer — large and clear
-                            if not st.session_state[show_answer_key]:
-                                st.info("💭 Think about your answer, then reveal it.")
-                                if st.button("🔍 Show Answer", key=f"show_{card_id}", type="primary", use_container_width=True):
-                                    st.session_state[show_answer_key] = True
-                                    st.rerun()
-                            else:
-                                # Show the correct answer clearly
-                                st.markdown("**✅ Correct Answer:**")
-                                if answer_letter and choices.get(answer_letter):
-                                    st.success(f"**{answer_letter}.** {choices[answer_letter]}")
-
-                                # Show explanation if present
-                                if explanation:
-                                    st.markdown("**📖 Explanation:**")
-                                    # long explanations put in text area for scrollability
-                                    if len(explanation) > 300:
-                                        st.info("")  # small visual gap
-                                        st.text_area("", value=explanation, height=140, disabled=True)
-                                    else:
-                                        st.info(explanation)
-
-                                st.markdown("---")
-                                st.markdown("**🎯 Did you get it right?**")
-
-                                # Yes / No buttons with consistent messaging
-                                col_correct, col_incorrect = st.columns(2)
-
-                                with col_correct:
-                                    if st.button(f"✅ Yes, I got it correct!", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
-                                        srs_mgr.mark_review(card_id, correct=True)
-                                        reviewed_this_session.add(card_id)
-                                        st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                        st.session_state[show_answer_key] = False
-                                        st.success("🎉 Excellent! This card will be scheduled for review in a longer interval.")
-                                        st.balloons()
-                                        st.rerun()
-
-                                with col_incorrect:
-                                    if st.button(f"❌ No, I got it wrong", key=f"srs_incorrect_{card_id}", use_container_width=True):
-                                        srs_mgr.mark_review(card_id, correct=False)
-                                        reviewed_this_session.add(card_id)
-                                        st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                        st.session_state[show_answer_key] = False
-                                        st.info("📚 That's okay! This card will come up again soon to help you learn it better.")
-                                        st.rerun()
-
-                                # Show progress info (next due)
-                                if card_meta:
-                                    review_count = card_meta.get("review_count", 0)
-                                    interval_idx = card_meta.get("interval_index", 0)
-                                    next_due = card_meta.get("next_due", "")
-                                    pretty = _pretty_date_delta(next_due)
-                                    st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} days | {pretty}")
+                                next_due = card_meta.get("next_due", "")
+                                pretty = _pretty_date_delta(next_due)
+                                st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} days | {pretty}")
 
                             st.markdown("---")
 
@@ -370,7 +369,7 @@ def render(st: Any):
                 display_items = {**cached_items, **filtered}
 
                 st.markdown("### All Your Study Cards")
-                # Render a compact list with expandable details to avoid long scrolls
+                # Render a compact list with expandable details to avoid long scrolls (now inline)
                 for card_id in all_cards:
                     meta = srs_mgr.get_card_meta(card_id)
                     quiz_item = display_items.get(card_id)
@@ -392,19 +391,19 @@ def render(st: Any):
                     review_count = meta.get("review_count", 0) if meta else 0
                     interval_idx = meta.get("interval_index", 0) if meta else 0
 
-                    # Each card in the list is an expander so users can inspect details if they want
-                    with st.expander(f"{status_icon} {card_id} — {status_text}", expanded=False):
-                        st.write(question_preview)
-                        pretty = _pretty_date_delta(next_due)
-                        st.caption(f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} days | {pretty}")
-                        # Optionally show full text if available
-                        if quiz_item and quiz_item.get("question", ""):
-                            if len(quiz_item.get("question", "")) > 250:
-                                st.text_area("", value=quiz_item.get("question", ""), height=120, disabled=True)
-                            else:
-                                st.write(quiz_item.get("question", ""))
+                    # Render card header inline
+                    st.markdown(f"#### {status_icon} {card_id} — {status_text}")
+                    st.write(question_preview)
+                    pretty = _pretty_date_delta(next_due)
+                    st.caption(f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} days | {pretty}")
+                    # Optionally show full text if available
+                    if quiz_item and quiz_item.get("question", ""):
+                        if len(quiz_item.get("question", "")) > 250:
+                            st.text_area("", value=quiz_item.get("question", ""), height=120, disabled=True)
+                        else:
+                            st.write(quiz_item.get("question", ""))
 
-                        st.markdown("")  # spacing
+                    st.markdown("")  # spacing
 
     except Exception as e:
         st.error("Error loading SRS data.")

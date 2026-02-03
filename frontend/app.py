@@ -428,32 +428,31 @@ if uploaded:
     # Step 1: Quiz (unchanged behavior — just a short intro)
     st.markdown("### 1) Test yourself — Quiz")
     st.write("Generate a quick set of multiple-choice questions from the lecture and check your understanding.")
-    # Put quiz in an expander to avoid very long pages by default
-    with st.expander("Open Quiz generator / questions", expanded=True):
-        render_quiz(st=st, stem=stem, text=text, llm=llm, hist_key=hist_key)
+    # Render quiz directly (removed outer expander)
+    render_quiz(st=st, stem=stem, text=text, llm=llm, hist_key=hist_key)
 
     st.markdown("---")
 
     # Step 2: Confused (prioritized list of things you missed)
     st.markdown("### 2) Review what confused you")
     st.write("These are concepts you missed multiple times. Click 'Explain simply' for a short explanation or add items to SRS.")
-    with st.expander("Open Confused list", expanded=False):
-        render_confused(
-            st=st,
-            stem=stem,
-            embeddings_path=embeddings_path,
-            index_path=index_path,
-            use_faiss_search=use_faiss_search,
-            llm=llm,
-        )
+    # Render confused directly (removed outer expander)
+    render_confused(
+        st=st,
+        stem=stem,
+        embeddings_path=embeddings_path,
+        index_path=index_path,
+        use_faiss_search=use_faiss_search,
+        llm=llm,
+    )
 
     st.markdown("---")
 
     # Step 3: Spaced Repetition (SRS)
     st.markdown("### 3) Lock it in — Spaced Repetition (SRS)")
     st.write("Add items you want to retain and review due cards here. This helps move knowledge into long-term memory.")
-    with st.expander("Open SRS review", expanded=False):
-        render_srs(st)
+    # Render SRS directly (removed outer expander)
+    render_srs(st)
 
     st.markdown("---")
     st.caption("Tip: For reproducible tests set USE_SAFE_EMBEDDINGS=1 and build FAISS index to compare results with NumPy search.")
