@@ -67,22 +67,40 @@ class SRSManager:
                 due.append(card_id)
         return due
 
-    def ensure_card(self, card_id: str):
+    def ensure_card(self, card_id: str, meta: Optional[Dict[str, Any]] = None):
+        created = False
         if card_id not in self._data:
             self._data[card_id] = {
                 "interval_index": 0,
                 "next_due": datetime.utcnow().isoformat(),
                 "review_count": 0,
             }
+            created = True
+        updated = False
+        if meta:
+            card_meta = self._data.get(card_id, {})
+            for key, value in meta.items():
+                if value is None or value == "":
+                    continue
+                if card_meta.get(key) != value:
+                    card_meta[key] = value
+                    updated = True
+            self._data[card_id] = card_meta
+        if created or updated:
             self._save()
 
     def reset_card(self, card_id: str):
         """Reset a card's scheduling to initial state."""
-        self._data[card_id] = {
+        existing = self._data.get(card_id, {})
+        base = {
             "interval_index": 0,
             "next_due": datetime.utcnow().isoformat(),
             "review_count": 0,
         }
+        for key, value in existing.items():
+            if key not in base:
+                base[key] = value
+        self._data[card_id] = base
         self._save()
 
     def mark_review(self, card_id: str, correct: bool):
@@ -99,3 +117,25 @@ class SRSManager:
 
     def get_card_meta(self, card_id: str):
         return self._data.get(card_id)
+
+
+    def update_card_meta(self, card_id: str, **meta: Any):
+        """Update metadata for a card (question text, stem, etc.)."""
+        self.ensure_card(card_id)
+        updated = False
+        card_meta = self._data.get(card_id, {})
+        for key, value in meta.items():
+            if value is None or value == "":
+                continue
+            if card_meta.get(key) != value:
+                card_meta[key] = value
+                updated = True
+        if updated:
+            self._data[card_id] = card_meta
+            self._save()
+
+    def delete_card(self, card_id: str):
+        """Delete a card from SRS data."""
+        if card_id in self._data:
+            del self._data[card_id]
+            self._save()

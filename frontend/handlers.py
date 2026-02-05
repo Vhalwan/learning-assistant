@@ -212,13 +212,13 @@ def perform_chat(
 
 
 
-def record_quiz_result(qid: str, question: str, is_correct: bool) -> None:
+def record_quiz_result(qid: str, question: str, is_correct: bool, stem: str = "") -> None:
     """
     Frontend-callable wrapper to persist a quiz result.
     Non-blocking: logs but doesn't raise in the UI path.
     """
     try:
-        _record_quiz_result(qid=qid, question=question or "", is_correct=bool(is_correct))
+        _record_quiz_result(qid=qid, question=question or "", is_correct=bool(is_correct), stem=stem or "")
     except Exception as e:
         # Keep UI stable; log to console
         print(f"[confusion_store] failed to record quiz result: {e}")
@@ -237,6 +237,7 @@ def perform_confusion_analysis(
     quiz_submissions: Optional[List[Dict[str, Any]]] = None,
     retrieved_chunks: Optional[List[Dict[str, Any]]] = None,
     top_n: int = 5,
+    stem: str = "",
     llm_call = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -268,6 +269,15 @@ def perform_confusion_analysis(
             continue
 
         qid = p.get("qid") or ""
+        entry_stem = (p.get("stem") or "").strip()
+        if stem:
+            matches = False
+            if entry_stem and entry_stem == stem:
+                matches = True
+            elif qid and qid.startswith(f"{stem}_"):
+                matches = True
+            if not matches:
+                continue
         qtext = (p.get("question") or "").strip()
         concept = _shorten(qtext or qid or "Unknown concept", 200)
 

@@ -22,6 +22,14 @@ from backend.study_srs import SRSManager
 
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
 
+def _shorten(text: str, limit: int = 140) -> str:
+    if not text:
+        return ""
+    clean = " ".join(text.split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 3].rsplit(" ", 1)[0] + "..."
+
 
 def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm):
     """
@@ -68,6 +76,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
             quiz_submissions=quiz_submissions,
             retrieved_chunks=[],
             top_n=top_limit,
+            stem=stem,
             llm_call=llm,
         ) or []
     except Exception as e:
@@ -89,9 +98,15 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 concept = item.get("concept", "(no concept)")
                 strength = int(item.get("signal_strength", 0))
                 st.markdown(f"**{idx}. {concept}** — missed {strength} time{'s' if strength != 1 else ''}.")
+                short_concept = _shorten(concept, 120) or concept
+                st.markdown(f"### 🤔 Confused Card {idx}: {short_concept}")
+                st.markdown(f"**Question / concept**")
+                st.write(concept)
+                st.markdown(f"**Progress / Review stats**")
+                st.write(f"📊 Missed {strength} time{'s' if strength != 1 else ''}")
                 if item.get("reason"):
                     st.caption(item.get("reason"))
-
+                st.info("You struggled with this concept. Review the explanation or add it to SRS.")
                 evidence = item.get("evidence", []) or []
                 if evidence:
                     with st.expander("Show evidence"):
@@ -144,13 +159,16 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 mgr = SRSManager()
                                 # try to extract canonical quiz id from evidence metadata
                                 card_id = None
+                                question_text = ""
                                 for e in evidence:
                                     meta = e.get("meta", {}) or {}
                                     if meta.get("qid"):
                                         card_id = meta.get("qid")
+                                        question_text = meta.get("question", "") or question_text
                                         break
                                     if e.get("qid"):
                                         card_id = e.get("qid")
+                                        question_text = e.get("question", "") or question_text
                                         break
 
                                 # fallback deterministic id derived from concept+stem
@@ -159,7 +177,18 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                     safe = re.sub(r"[^a-zA-Z0-9_]+", "_", concept).strip("_")[:40] or "conf"
                                     card_id = f"{stem}_{safe}"
 
-                                mgr.ensure_card(card_id)
+                                    question_text = question_text or concept
+
+                                mgr.ensure_card(card_id, meta={"question": question_text or "", "stem": stem})
+                                if "srs_quiz_items_cache" not in st.session_state:
+                                    st.session_state["srs_quiz_items_cache"] = {}
+                                st.session_state["srs_quiz_items_cache"][card_id] = {
+                                    "id": card_id,
+                                    "question": question_text or "",
+                                    "choices": {},
+                                    "answer": "",
+                                    "explanation": "",
+                                }
                                 st.success(f"Added to SRS: {card_id}")
                             except Exception as e:
                                 st.error("Failed to add to SRS.")

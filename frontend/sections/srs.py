@@ -22,16 +22,35 @@ from backend.study_srs import SRSManager, INTERVALS
 # Handler wrappers used to load quiz items from disk if missing
 from frontend.handlers import load_all_quiz_items_wrapper, load_quiz_item_by_id_wrapper
 
+def _shorten(text: str, limit: int = 80) -> str:
+    if not text:
+        return ""
+    clean = " ".join(text.split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 3].rsplit(" ", 1)[0] + "..."
+
+
+def _card_stem(card_id: str, meta: Dict | None) -> str:
+    if meta and meta.get("stem"):
+        return str(meta.get("stem"))
+    if card_id and "_" in card_id:
+        return card_id.split("_", 1)[0]
+    return ""
+
 
 def _infer_stem_from_session(session: Dict) -> str | None:
     """
     Try to infer the current `stem` used in app.py from session keys.
     Strategy:
+      0. use session["current_stem"] if present
       1. find stems that appear in both quiz_items_{stem} and chat_history_{stem}
       2. else use the first quiz_items_{stem}
       3. else use the first chat_history_{stem}
       4. else return None
     """
+    if session.get("current_stem"):
+        return session.get("current_stem")
     keys = list(session.keys())
     quiz_keys = [k for k in keys if k.startswith("quiz_items_")]
     chat_keys = [k for k in keys if k.startswith("chat_history_")]
@@ -64,6 +83,11 @@ def _pretty_date_delta(iso_ts: str) -> str:
     except Exception:
         # fallback to short iso prefix
         return iso_ts[:10] if iso_ts else "N/A"
+
+def _card_doc_name(card_id: str) -> str:
+    if "_" not in card_id:
+        return "Unknown"
+    return card_id.rsplit("_", 1)[0]
 
 
 def render(st: Any):
@@ -121,20 +145,41 @@ def render(st: Any):
                     f"💡 **Tip:** You have {len(unregistered)} quiz question(s) generated above. "
                     "Click **'Start SRS'** on any question to add it to your spaced repetition review!"
                 )
+        show_all_lectures = st.checkbox(
+            "📚 Show cards from all lectures",
+            value=False,
+            help="When disabled, SRS shows only cards tied to the currently uploaded lecture.",
+            key="srs_show_all_lectures",
+        )
 
+        if stem and not show_all_lectures:
+            filtered_cards = [cid for cid in all_cards if _card_stem(cid, srs_mgr.get_card_meta(cid)) == stem]
+            filtered_due_cards = [cid for cid in due_cards if _card_stem(cid, srs_mgr.get_card_meta(cid)) == stem]
+        else:
+            filtered_cards = all_cards
+            filtered_due_cards = due_cards
+
+        if stem and not show_all_lectures and not filtered_cards:
+            st.info("No SRS cards found for the current lecture yet. Start SRS on a quiz question to add one.")
         # --- Metrics row (clear visual hierarchy) ---
         col_stats1, col_stats2, col_stats3 = st.columns(3)
         with col_stats1:
-            st.metric("Total cards", len(all_cards))
+            st.metric("Total cards", len(filtered_cards))
         with col_stats2:
-            st.metric("Due now", len(due_cards), delta=None if len(due_cards) == 0 else f"{len(due_cards)} to review")
+            st.metric(
+                "Due now",
+                len(filtered_due_cards),
+                delta=None if len(filtered_due_cards) == 0 else f"{len(filtered_due_cards)} to review",
+            )
         with col_stats3:
-            reviewed_count = sum(1 for cid in all_cards if srs_mgr.get_card_meta(cid).get("review_count", 0) > 0)
+            reviewed_count = sum(
+                1 for cid in filtered_cards if srs_mgr.get_card_meta(cid).get("review_count", 0) > 0
+            )
             st.metric("Reviewed", reviewed_count)
 
         # If there are due cards, present them grouped by originating document for scanability
-        if due_cards:
-            st.success(f"🎯 You have {len(due_cards)} card(s) due for review")
+        if filtered_due_cards:
+            st.success(f"🎯 You have {len(filtered_due_cards)} card(s) due for review")
             st.markdown("---")
 
             # Build cache of quiz items (session cache key matches original app behavior)
@@ -150,7 +195,7 @@ def render(st: Any):
                 all_quiz_items[q.get("id")] = q
 
             # Fill missing cards from disk cache if possible (same logic as original)
-            missing_card_ids = [cid for cid in due_cards if cid not in all_quiz_items]
+            missing_card_ids = [cid for cid in filtered_due_cards if cid not in all_quiz_items]
             if missing_card_ids:
                 disk_cache_key = "srs_disk_quiz_items_cache"
                 if disk_cache_key not in st.session_state:
@@ -178,18 +223,19 @@ def render(st: Any):
 
             # Group due cards by document name to make long lists easier to scan
             grouped: Dict[str, List[str]] = {}
-            for cid in due_cards:
-                doc_name = cid.rsplit("_", 1)[0] if "_" in cid else "Unknown"
+            for cid in filtered_due_cards:
+                doc_name = _card_doc_name(cid)
                 grouped.setdefault(doc_name, []).append(cid)
 
             # Render groups inline (previously expanders)
             for doc_name, card_ids in grouped.items():
-                st.markdown(f"### 📄 {doc_name} — {len(card_ids)} due")
+                label = doc_name if doc_name else "Current lecture"
+                st.markdown(f"### 📄 {label} — {len(card_ids)} due")
                 for idx_offset, card_id in enumerate(card_ids, 1):
                     # preserve original index semantics by computing a stable index
                     # find global index in due_cards to match original numbering if needed
                     try:
-                        global_idx = due_cards.index(card_id) + 1
+                        global_idx = filtered_due_cards.index(card_id) + 1
                     except Exception:
                         global_idx = idx_offset
 
@@ -198,41 +244,42 @@ def render(st: Any):
 
                     card_meta = srs_mgr.get_card_meta(card_id)
                     quiz_item = all_quiz_items.get(card_id)
-                    doc_name_local = card_id.rsplit("_", 1)[0] if "_" in card_id else "Unknown"
-
+                    doc_name_local = _card_doc_name(card_id)
+                    stored_question = (card_meta or {}).get("question", "")
                     if not quiz_item:
                         with st.container():
                             st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
                             # Placeholder / missing question case — preserve original behavior
-                            st.markdown(f"### Card {global_idx}: {card_id}")
-                            is_placeholder = "placeholder" in card_id.lower() or (card_meta and card_meta.get("review_count", 0) == 0)
-                            if doc_name_local != "Unknown":
-                                st.warning(f"📄 **Card from: {doc_name_local}**")
-                                if is_placeholder:
-                                    st.info(
-                                        "💡 This appears to be a placeholder card from an old session. "
-                                        "You can delete it and register new questions from the quiz section above."
-                                    )
+                            card_title = _shorten(stored_question or card_id, 80) or card_id
+                            st.markdown(f"### 📄 Card {global_idx}: {card_title}")
+                            is_placeholder = "placeholder" in card_id.lower()
+                            if stored_question:
+                                st.markdown("**Question**")
+                                if "\n" in stored_question or len(stored_question) > 300:
+                                    st.text_area(label="", value=stored_question, height=120, key=f"srs_qtext_{card_id}", disabled=True)
                                 else:
+                                    st.write(stored_question)
+                            else:
+                                if doc_name_local != "Unknown":
+                                    st.warning(f"📄 **Card from: {doc_name_local}**")
                                     st.info(
                                         f"💡 **Tip:** Upload the PDF '{doc_name_local}.pdf' and generate a quiz to see the full question."
                                     )
-                            else:
-                                st.info(
-                                    "💡 **Tip:** This card was registered from a previous session. "
-                                    "Upload the same PDF and generate a quiz to see the full question."
-                                )
-                            st.markdown("**Do you remember this topic?**")
-                            st.caption("Think about what you learned. Can you recall the key concepts?")
-                            if is_placeholder:
-                                if st.button(f"🗑️ Remove this placeholder card", key=f"remove_{card_id}"):
-                                    try:
-                                        del srs_mgr._data[card_id]
-                                        srs_mgr._save()
-                                        st.success("Card removed!")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Failed to remove card: {e}")
+                                else:
+                                    st.info(
+                                        "💡 **Tip:** This card was registered from a previous session. "
+                                        "Upload the same PDF and generate a quiz to see the full question."
+                                    )
+                            st.caption("🗑️ Remove card deletes only this SRS card, not the original quiz question.")
+                            if st.button(f"🗑️ Remove card", key=f"remove_{card_id}"):
+                                try:
+                                    srs_mgr.delete_card(card_id)
+                                    st.success("Card removed!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to remove card: {e}")
+
+                            st.markdown("**💡 Review this question. Try to recall the answer before checking.**")
 
                             # Simple Yes / No columns
                             col_correct, col_incorrect = st.columns(2)
@@ -256,32 +303,42 @@ def render(st: Any):
                             if card_meta:
                                 review_count = card_meta.get("review_count", 0)
                                 interval_idx = card_meta.get("interval_index", 0)
-                                st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Current interval: {INTERVALS[interval_idx]} days")
+                                next_due = card_meta.get("next_due", "")
+                                pretty = _pretty_date_delta(next_due)
+                                st.markdown("**Progress / Review stats**")
+                                st.caption(
+                                    f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} day(s) | {pretty}"
+                                )
 
                             st.markdown("---")
                     else:
                         with st.container():
                             st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
                             # Full question rendering (keeps original behavior and keys)
-                            st.markdown(f"### Card {global_idx}: Review Question")
+                            q_text = quiz_item.get("question", "") or stored_question
+                            card_title = _shorten(q_text or card_id, 80) or card_id
+                            st.markdown(f"### 📄 Card {global_idx}: {card_title}")
 
-                            q_text = quiz_item.get("question", "")
                             choices = quiz_item.get("choices", {}) or {}
                             answer_letter = quiz_item.get("answer", None)
                             explanation = quiz_item.get("explanation", "")
 
                             # Question area with graceful handling for long text
-                            st.markdown("**📝 Question:**")
-                            if "\n" in q_text or len(q_text) > 300:
-                                st.text_area(label="", value=q_text, height=120, key=f"srs_qtext_{card_id}", disabled=True)
+                            st.markdown("**Question**")
+                            if q_text:
+                                if "\n" in q_text or len(q_text) > 300:
+                                    st.text_area(label="", value=q_text, height=120, key=f"srs_qtext_{card_id}", disabled=True)
+                                else:
+                                    st.info("Upload the PDF and regenerate the quiz to see the full question.")
                             else:
                                 st.write(q_text)
 
                             # Show choices in a compact list for scanning
-                            st.markdown("**🔤 Answer Choices:**")
-                            for label in ["A", "B", "C", "D"]:
-                                if label in choices:
-                                    st.write(f"**{label}.** {choices[label]}")
+                            if choices:
+                                st.markdown("**Answer Choices**")
+                                for label in ["A", "B", "C", "D"]:
+                                    if label in choices:
+                                        st.write(f"**{label}.** {choices[label]}")
 
                             show_answer_key = f"srs_show_{card_id}"
                             if show_answer_key not in st.session_state:
@@ -291,19 +348,30 @@ def render(st: Any):
 
                             # Primary CTA for revealing answer — large and clear
                             if not st.session_state[show_answer_key]:
-                                st.info("💭 Think about your answer, then reveal it.")
+                                st.info("💡 Review this question. Try to recall the answer before checking.")
+                                st.caption("🗑️ Remove card deletes only this SRS card, not the original quiz question.")
+                                if st.button("🗑️ Remove card", key=f"remove_{card_id}"):
+                                    try:
+                                        srs_mgr.delete_card(card_id)
+                                        st.success("Card removed!")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Failed to remove card: {e}")
                                 if st.button("🔍 Show Answer", key=f"show_{card_id}", type="primary", use_container_width=True):
                                     st.session_state[show_answer_key] = True
                                     st.rerun()
                             else:
                                 # Show the correct answer clearly
-                                st.markdown("**✅ Correct Answer:**")
+                                st.markdown("**✅ Correct Answer**")
                                 if answer_letter and choices.get(answer_letter):
                                     st.success(f"**{answer_letter}.** {choices[answer_letter]}")
-
+                                elif answer_letter:
+                                    st.success(f"{answer_letter}")
+                                else:
+                                    st.info("Answer choices aren't available for this card.")
                                 # Show explanation if present
                                 if explanation:
-                                    st.markdown("**📖 Explanation:**")
+                                    st.markdown("**Explanation**")
                                     # long explanations put in text area for scrollability
                                     if len(explanation) > 300:
                                         st.info("")  # small visual gap
@@ -312,7 +380,7 @@ def render(st: Any):
                                         st.info(explanation)
 
                                 st.markdown("---")
-                                st.markdown("**🎯 Did you get it right?**")
+                                st.markdown("**Did you get it correct?** ✅ / ❌")
 
                                 # Yes / No buttons with consistent messaging
                                 col_correct, col_incorrect = st.columns(2)
@@ -342,7 +410,10 @@ def render(st: Any):
                                     interval_idx = card_meta.get("interval_index", 0)
                                     next_due = card_meta.get("next_due", "")
                                     pretty = _pretty_date_delta(next_due)
-                                    st.caption(f"📊 Progress: Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} days | {pretty}")
+                                    st.markdown("**Progress / Review stats**")
+                                    st.caption(
+                                        f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} day(s) | {pretty}"
+                                    )
 
                                 st.markdown("---")
             # End grouped due cards
@@ -353,8 +424,15 @@ def render(st: Any):
 
         # Show all cards toggle (preserve original behavior)
         if st.checkbox("📋 Show all my SRS cards", help="View all cards you've registered, including those not due yet"):
-            if not all_cards:
-                st.info("No cards registered yet.")
+            display_cards = all_cards
+            if stem:
+                display_cards = [cid for cid in all_cards if _card_doc_name(cid) == stem]
+
+            if not display_cards:
+                if stem:
+                    st.info(f"No cards registered yet for **{stem}**.")
+                else:
+                    st.info("No cards registered yet.")
             else:
                 cache_key = "srs_quiz_items_cache"
                 cached_items = st.session_state.get(cache_key, {})
@@ -371,21 +449,26 @@ def render(st: Any):
                 display_items = {**cached_items, **filtered}
 
                 st.markdown("### All Your Study Cards")
+                if stem and not show_all_lectures:
+                    visible_cards = filtered_cards
+                else:
+                    visible_cards = all_cards
                 # Render a compact list with expandable details to avoid long scrolls (now inline)
-                for card_id in all_cards:
+                for card_id in display_cards:
                     meta = srs_mgr.get_card_meta(card_id)
                     quiz_item = display_items.get(card_id)
 
                     if not quiz_item:
                         quiz_item = load_quiz_item_by_id_wrapper(card_id)
-
+                    stored_question = meta.get("question", "") if meta else ""
                     if quiz_item:
                         question_preview = quiz_item.get("question", "")[:100] + "..." if len(quiz_item.get("question", "")) > 100 else quiz_item.get("question", "")
                     else:
-                        doc_name = card_id.rsplit("_", 1)[0] if "_" in card_id else "Unknown"
-                        question_preview = f"Card from {doc_name} (question not available)"
+                        doc_name = _card_doc_name(card_id)
+                        preview_source = stored_question or f"Card from {doc_name} (question not available)"
+                        question_preview = _shorten(preview_source, 120)
 
-                    is_due = card_id in due_cards
+                    is_due = card_id in filtered_due_cards
                     status_icon = "🎯" if is_due else "✅"
                     status_text = "Due now" if is_due else "Not due"
 
@@ -394,16 +477,30 @@ def render(st: Any):
                     interval_idx = meta.get("interval_index", 0) if meta else 0
 
                     # Render card header inline
-                    st.markdown(f"#### {status_icon} {card_id} — {status_text}")
+                    if quiz_item:
+                        question_text = quiz_item.get("question", "")
+                    else:
+                        question_text = stored_question or card_id + " (question missing)"
+                    card_title = _shorten(question_text, 80)
+                    st.markdown(f"#### {status_icon} 📄 {card_title} — {status_text}")
                     st.write(question_preview)
                     pretty = _pretty_date_delta(next_due)
-                    st.caption(f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} days | {pretty}")
+                    st.caption(f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} day(s) | {pretty}")
                     # Optionally show full text if available
-                    if quiz_item and quiz_item.get("question", ""):
-                        if len(quiz_item.get("question", "")) > 250:
-                            st.text_area("", value=quiz_item.get("question", ""), height=120, disabled=True)
+                    full_question = quiz_item.get("question", "") if quiz_item else stored_question
+                    if full_question:
+                        if len(full_question) > 250:
+                            st.text_area("", value=full_question, height=120, disabled=True)
                         else:
-                            st.write(quiz_item.get("question", ""))
+                            st.write(full_question)
+                    st.caption("🗑️ Remove card deletes only this SRS card, not the original quiz question.")
+                    if st.button("🗑️ Remove card", key=f"remove_all_{card_id}"):
+                        try:
+                            srs_mgr.delete_card(card_id)
+                            st.success("Card removed!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to remove card: {e}")
 
                     st.markdown("")  # spacing
 

@@ -131,19 +131,22 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
         return
 
     # Render each question as a clean "card" with clear spacing & buttons
+    seen_qids: Dict[str, int] = {}
     for idx, q in enumerate(quiz_items, start=1):
         with st.container():
             st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
             qid = q.get("id", str(uuid.uuid4()))
+            seen_qids[qid] = seen_qids.get(qid, 0) + 1
+            key_suffix = f"{qid}_{seen_qids[qid]}" if seen_qids[qid] > 1 else qid
             q_text = q.get("question", "")
             choices = q.get("choices", {}) or {}
             answer_letter = q.get("answer", None)
             explanation_text = q.get("explanation", "") or ""
 
-            selection_key = f"{quiz_state_key}_sel_{qid}"
-            submit_key = f"{quiz_state_key}_sub_{qid}"
-            srs_key = f"{quiz_state_key}_srs_{qid}"
-            exp_key = f"{quiz_state_key}_expander_{qid}"
+            selection_key = f"{quiz_state_key}_sel_{key_suffix}"
+            submit_key = f"{quiz_state_key}_sub_{key_suffix}"
+            srs_key = f"{quiz_state_key}_srs_{key_suffix}"
+            exp_key = f"{quiz_state_key}_expander_{key_suffix}"
             if exp_key not in st.session_state:
                 st.session_state[exp_key] = False
 
@@ -152,6 +155,8 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
             # Show a compact header with index, id (short), and status
             short_id = qid.split("-")[0] if "-" in qid else qid
+            if seen_qids[qid] > 1:
+                short_id = f"{short_id}-{seen_qids[qid]}"
             status_icon = ""
             if already_submitted:
                 submitted = st.session_state.get(submit_key, {})
@@ -171,7 +176,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
             # otherwise normal markdown which will wrap gracefully.
             if "\n" in q_text or len(q_text) > 300:
                 # long text — show a scrollable text area (read-only) to allow comfortable scanning
-                st.text_area(label="", value=q_text, height=140, key=f"{quiz_state_key}_qtext_{qid}", disabled=True)
+                st.text_area(label="", value=q_text, height=140, key=f"{quiz_state_key}_qtext_{key_suffix}", disabled=True)
             else:
                 st.write(q_text)
 
@@ -243,7 +248,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                 st.markdown("**Actions**")
                 btn_col_left, btn_col_mid, btn_col_right = st.columns([1, 1, 1])
                 with btn_col_left:
-                    check_key = f"{quiz_state_key}_check_{qid}"
+                    check_key = f"{quiz_state_key}_check_{key_suffix}"
                     check_disabled = (chosen_letter is None) or already_submitted
                     if st.button("Check answer", key=check_key, disabled=check_disabled):
                         is_correct = (chosen_letter == answer_letter) if (chosen_letter and answer_letter) else False
@@ -254,7 +259,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                         # --- persist the quiz result to confusion store so it survives restart ---
                         try:
                             # use question id and text if available
-                            record_quiz_result(qid=qid, question=q_text, is_correct=is_correct)
+                            record_quiz_result(qid=qid, question=q_text, is_correct=is_correct, stem=stem)
                         except Exception as e:
                             # don't crash the UI; just log
                             print(f"[ui] failed to persist quiz result: {e}")
@@ -264,10 +269,10 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
                 with btn_col_mid:
                     # Toggle showing explanation manually (keeps same expander key so state persists)
-                    show_expl_key = f"{quiz_state_key}_showex_{qid}"
+                    show_expl_key = f"{quiz_state_key}_showex_{key_suffix}"
                     if show_expl_key not in st.session_state:
                         st.session_state[show_expl_key] = False
-                    if st.button("Toggle explanation", key=f"{quiz_state_key}_toggleexp_{qid}"):
+                    if st.button("Toggle explanation", key=f"{quiz_state_key}_toggleexp_{key_suffix}"):
                         st.session_state[show_expl_key] = not st.session_state[show_expl_key]
                         st.session_state[exp_key] = True  # keep the question visible when toggling
 
@@ -276,7 +281,16 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                     if st.button(f"Start SRS for {qid}", key=srs_key):
                         try:
                             mgr = SRSManager()
-                            mgr.ensure_card(qid)
+                            mgr.ensure_card(qid, meta={"question": q_text or "", "stem": stem})
+                            if "srs_quiz_items_cache" not in st.session_state:
+                                st.session_state["srs_quiz_items_cache"] = {}
+                            st.session_state["srs_quiz_items_cache"][qid] = {
+                                "id": qid,
+                                "question": q_text or "",
+                                "choices": choices or {},
+                                "answer": answer_letter,
+                                "explanation": explanation_text or "",
+                            }
                             st.session_state[f"{srs_key}_done"] = True
                             st.info(f"Registered card {qid} in SRS.")
                         except Exception as e:

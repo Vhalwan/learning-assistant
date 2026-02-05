@@ -32,7 +32,15 @@ def save_confusion(data: Dict[str, Any], path: Optional[Path] = None) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(p)
 
-def record_quiz_result(qid: str, question: str, is_correct: bool, path: Optional[Path] = None) -> None:
+def _infer_stem_from_qid(qid: str) -> str:
+    if not qid:
+        return ""
+    if "_" in qid:
+        return qid.split("_", 1)[0]
+    return ""
+
+
+def record_quiz_result(qid: str, question: str, is_correct: bool, stem: str = "", path: Optional[Path] = None) -> None:
     """
     Record that the user answered a quiz item. If incorrect, increment wrong_count and update timestamps.
     If correct, increment correct_count (optional).
@@ -40,9 +48,11 @@ def record_quiz_result(qid: str, question: str, is_correct: bool, path: Optional
     p = Path(path or DEFAULT_PATH)
     data = load_confusion(p)
     key = qid or (question[:120] if question else "unknown")
+    inferred_stem = stem or _infer_stem_from_qid(qid)
     entry = data.get(key, {
         "qid": qid,
         "question": question,
+        "stem": inferred_stem,
         "wrong_count": 0,
         "correct_count": 0,
         "first_wrong": None,
@@ -63,6 +73,7 @@ def record_quiz_result(qid: str, question: str, is_correct: bool, path: Optional
             entry["first_wrong"] = t
     # store latest question text (in case id is same but text updated)
     entry["question"] = question or entry.get("question", "")
+    entry["stem"] = inferred_stem or entry.get("stem", "")
     data[key] = entry
     save_confusion(data, p)
 

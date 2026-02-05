@@ -300,6 +300,7 @@ if uploaded:
     stem = tmp_pdf.stem
     embeddings_path = Path(f"data/processed/{stem}_embeddings.json")
     index_path = Path(f"data/processed/{stem}_embeddings.index")
+    st.session_state["current_stem"] = stem
 
     # Group embedding controls into a neat card-like area
     with st.container():
