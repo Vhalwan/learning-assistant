@@ -1,143 +1,200 @@
 # Learning Assistant — Gemini RAG + FAISS Study Tool
 
-A learning assistant that helps students understand lecture PDFs using Retrieval-Augmented Generation (RAG), embeddings, and FAISS.  
-Upload a lecture → extract and chunk text → embed → index → ask questions → get grounded AI answers.  
-Future phases will add quiz generation and spaced-repetition support.
+A learning assistant that helps students study lecture PDFs using Retrieval-Augmented Generation (RAG), embeddings, and optional FAISS indexing.  
+Upload a lecture → extract and chunk text → embed → index → ask questions → get grounded AI answers.
+
+The app also includes **quiz generation**, **confusion tracking**, and a **spaced-repetition (SRS)** learning loop to help students test, fix, and retain knowledge.
 
 ---
 
 ## Features
-- Upload lecture PDFs
-- Extract and chunk text
-- Create embeddings (safe local or real Gemini)
-- FAISS semantic index for fast search
-- NumPy fallback retrieval
-- Retrieval-Augmented Q&A showing retrieved chunks for transparency
-- Works offline in SAFE mode (no API key required)
+
+- Upload and process lecture PDFs
+- Extract and chunk lecture text
+- Create embeddings (SAFE local mode or real Gemini embeddings)
+- Optional FAISS semantic index for fast retrieval
+- NumPy fallback retrieval when FAISS is unavailable
+- Retrieval-Augmented Q&A with transparent source chunks
+- Offline SAFE mode (no API key required)
+- Conversational chat with history
+- Quiz generation (MCQs) from lecture content
+- Confused concepts list (prioritized by repeated mistakes)
+- Spaced Repetition System (SRS) for long-term retention
+- Lecture-specific or cross-lecture review
 - Fully testable with mocks
-- Quiz generation and SRS spaced repetition
 
 ---
 
 ## Tech Stack
+
 - Python
-- FAISS (optional, for fast vector search)
-- NumPy
-- Google Gemini APIs for embeddings and LLMs
-- PyPDF (or other PDF extraction)
 - Streamlit (frontend)
+- NumPy
+- FAISS (optional, for fast vector search)
+- Google Gemini APIs (optional, for embeddings and LLMs)
+- pdfplumber / PyPDF (PDF extraction)
+- pytest (testing)
 
 ---
 
 ## Project Structure
-.env
-requirements.txt
-build_faiss_index.py
 
-data/
-raw/ # uploaded PDFs
-processed/ # text chunks, embeddings JSON, index files, quizzes, study progress
+.env  
+requirements.txt  
 
-backend/
-init.py
-extract_pdf.py # PDF -> plain text
-helpers.py # chunk_text, save/load helpers
-summarize_file.py # LLM summarization (Gemini)
-summarize_file_safe.py # offline summarizer fallback
-create_embeddings.py # chunk -> embeddings JSON (calls provider)
-embeddings_provider.py # Safe + Gemini provider (Day-5)
-rag_query.py # RAG orchestration (retrieval + LLM prompt)
-generate_quiz.py # quiz generation scaffold
-study_srs.py # spaced repetition scaffold
-vectorstore/
-faiss_store.py # build/load/search/rebuild/status helpers
+data/  
+&nbsp;&nbsp;raw/         # uploaded PDFs  
+&nbsp;&nbsp;processed/   # chunks, embeddings JSON, FAISS indexes, quizzes, study progress  
 
-test_create_embeddings.py
-test_embeddings_provider.py
-test_vectorstore.py
-test_rag_query.py
+backend/  
+&nbsp;&nbsp;__init__.py  
+&nbsp;&nbsp;extract_pdf.py         # PDF → plain text  
+&nbsp;&nbsp;helpers.py             # chunking and IO helpers  
+&nbsp;&nbsp;summarize_file.py      # LLM summarization (Gemini)  
+&nbsp;&nbsp;summarize_file_safe.py # offline summarizer fallback  
+&nbsp;&nbsp;create_embeddings.py   # chunk → embeddings JSON  
+&nbsp;&nbsp;embeddings_provider.py # SAFE + Gemini providers  
+&nbsp;&nbsp;rag_query.py           # RAG orchestration  
+&nbsp;&nbsp;generate_quiz.py       # quiz generation  
+&nbsp;&nbsp;study_srs.py           # spaced repetition system  
+&nbsp;&nbsp;confusion_store.py     # persisted confusion tracking  
+&nbsp;&nbsp;vectorstore/  
+&nbsp;&nbsp;&nbsp;&nbsp;faiss_store.py # FAISS build/load/search helpers  
 
-frontend/
-app.py # Streamlit UI (upload, embed, build index, query, quiz)
+frontend/  
+&nbsp;&nbsp;app.py                 # main Streamlit app  
+&nbsp;&nbsp;handlers.py            # UI ↔ backend glue  
+&nbsp;&nbsp;sections/  
+&nbsp;&nbsp;&nbsp;&nbsp;chat.py        # chat UI  
+&nbsp;&nbsp;&nbsp;&nbsp;quiz.py        # quiz UI  
+&nbsp;&nbsp;&nbsp;&nbsp;confused.py    # confused concepts UI  
+&nbsp;&nbsp;&nbsp;&nbsp;srs.py         # SRS review UI  
+
+tests/  
+&nbsp;&nbsp;test_create_embeddings.py  
+&nbsp;&nbsp;test_embeddings_provider.py  
+&nbsp;&nbsp;test_vectorstore.py  
+&nbsp;&nbsp;test_rag_query.py  
 
 ---
 
 ## Environment (.env example)
-Create a `.env` file at repo root with these variables (do not commit it):
 
-Embedding mode
-USE_SAFE_EMBEDDINGS=1 # 1 or 0 (default: 1). When 1 uses deterministic local embeddings.
+Create a `.env` file at the repo root (do **not** commit it):
 
-Real provider keys (optional)
-GEMINI_API_KEY=your_gemini_api_key_here
-GOOGLE_API_KEY=your_google_api_key_here # alternative env var fallback
+Embedding mode  
+USE_SAFE_EMBEDDINGS=1  
+# 1 = SAFE deterministic local embeddings (default)  
+# 0 = REAL provider embeddings  
 
-Embedding model & dims
-EMBED_MODEL=embedding-001
-EMBED_DIM=1536
+Real provider keys (optional)  
+GEMINI_API_KEY=your_gemini_api_key_here  
+GOOGLE_API_KEY=your_google_api_key_here  
 
-Optional custom endpoint for testing
-EMBEDDING_API_URL=https://example.com/v1/embeddings
+Embedding model & dimensions  
+EMBED_MODEL=embedding-001  
+EMBED_DIM=1536  
+
+Optional custom endpoints  
+EMBEDDING_API_URL=https://example.com/v1/embeddings  
+API_BASE=http://localhost:8000  
+API_TOKEN=
 
 ---
 
 ## Installation
 
 1. Create and activate a virtual environment:
-python -m venv venv
 
-Windows
-venv\Scripts\activate
+python -m venv venv  
 
-Mac/Linux
-source venv/bin/activate
+Windows:  
+venv\Scripts\activate  
 
-markdown
+Mac / Linux:  
+source venv/bin/activate  
 
 2. Install dependencies:
-pip install -r requirements.txt
 
-sql
+pip install -r requirements.txt  
 
-3. (Optional) Install FAISS for local similarity search:
-pip install faiss-cpu
+3. (Optional) Install FAISS:
+
+pip install faiss-cpu  
 
 ---
 
-## Running the app
+## Running the App
 
 Start the Streamlit UI:
-streamlit run frontend/app.py
 
-Typical workflow in the UI:
-1. Upload PDF (data/raw/)
-2. Extract preview and chunk
+streamlit run frontend/app.py  
+
+Typical workflow:
+
+1. Upload a lecture PDF (saved to `data/raw/`)
+2. Extract and preview text
 3. Toggle SAFE vs REAL embeddings
-4. Create embeddings file (data/processed/<stem>_embeddings.json)
-5. Can build FAISS index
-6. Ask a question (RAG) — retrieved chunks + LLM answer displayed
-7. Can generate quiz and use SRS
+4. Create embeddings (`data/processed/<stem>_embeddings.json`)
+5. Optionally build a FAISS index
+6. Ask questions using RAG (see retrieved chunks + answer)
+7. Chat conversationally with lecture context
+8. Generate quizzes to test understanding
+9. Review confused concepts
+10. Add important items to SRS and review due cards
+
+---
+
+## Learning Loop (Conceptual)
+
+**Test → Fix → Review**
+
+1. **Quiz** — test understanding with generated MCQs  
+2. **Confused** — review concepts you missed repeatedly  
+3. **SRS** — lock knowledge into long-term memory  
 
 ---
 
 ## Tests
 
-Run the test suite:
-pytest -q
+Run all tests:
+
+pytest -q  
 
 Notes:
-- Tests include provider normalization checks, FAISS build/search correctness, and RAG behavior with mocks.
-- If FAISS is not installed, FAISS tests will skip; CI attempts to install `faiss-cpu` but tolerates failure.
+- Tests cover embeddings, FAISS indexing/search, and RAG behavior
+- FAISS tests are skipped if `faiss-cpu` is not installed
+- SAFE mode is recommended for deterministic CI testing
 
 ---
 
-## How the pipeline works (high level)
-1. PDF -> extract plain text (`backend/extract_pdf.py`)
-2. Text -> chunking (`backend/helpers.py`)
-3. Chunks -> embeddings (`backend/create_embeddings.py` uses `embeddings_provider.py`)
-4. Embeddings -> FAISS index (`backend/vectorstore/faiss_store.py`)
-5. Query -> embed query -> retrieve top-k chunks (FAISS or NumPy)
-6. Combine retrieved chunks + question into a prompt -> send to LLM (`backend/rag_query.py`)
-7. Show LLM answer and the supporting chunks for provenance
+## How the Pipeline Works (High Level)
+
+1. PDF → extract plain text (`backend/extract_pdf.py`)
+2. Text → chunking (`backend/helpers.py`)
+3. Chunks → embeddings (`backend/create_embeddings.py`)
+4. Embeddings → FAISS index (optional)
+5. Query → embed → retrieve top-k chunks
+6. Retrieved chunks + question → LLM prompt
+7. Display answer with supporting chunks (provenance)
+
+---
+
+## Notes for Developers
+
+- Streamlit widgets must use **unique keys** (especially in loops)
+- SRS cards should ideally store question text at creation time
+- Confused and SRS sections support lecture-specific filtering
+- SAFE mode is ideal for offline work and reproducible testing
+- UI favors clarity over hidden state: most learning content is visible by default
+
+---
+
+## Project Status
+
+- Core RAG pipeline complete
+- Quiz, Confused, and SRS learning loop implemented
+- UI/UX actively refined for clarity, readability, and scale
+- Designed to feel like a real study web app, not a demo
 
 ---
