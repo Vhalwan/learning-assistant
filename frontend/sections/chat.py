@@ -54,7 +54,21 @@ def render(st: Any, stem: str, llm):
     if history_toggle_key not in st.session_state:
         st.session_state[history_toggle_key] = False
 
-    st.subheader("Chat with the lecture (conversational)")
+    st.subheader("💬 Chat with the lecture (conversational)")
+    scope_mode = st.session_state.get("scope_mode", "current")
+    chat_current_only = st.checkbox(
+        "Use current lecture only",
+        value=(scope_mode == "current"),
+        key=f"chat_scope_current_{stem}",
+        disabled=(scope_mode == "current"),
+    )
+    mod_cols = st.columns(3)
+    with mod_cols[0]:
+        explain_new = st.checkbox("Explain like I'm new to this", key=f"chat_mod_new_{stem}")
+    with mod_cols[1]:
+        include_example = st.checkbox("Give me an example", key=f"chat_mod_example_{stem}")
+    with mod_cols[2]:
+        turn_quiz = st.checkbox("Turn this into a quiz question", key=f"chat_mod_quiz_{stem}")
 
     # --------------------------
     # Top controls: k, save, history buttons, clear
@@ -188,6 +202,18 @@ def render(st: Any, stem: str, llm):
                 st.warning("Please enter a message.")
             else:
                 payload_history = [{"role": h.get("role"), "content": h.get("content")} for h in st.session_state.get(hist_key, [])]
+                modifiers = []
+                if explain_new:
+                    modifiers.append("Explain as if the learner is new to the topic.")
+                if include_example:
+                    modifiers.append("Include one concrete example.")
+                if turn_quiz:
+                    modifiers.append("End with one quiz question.")
+                if chat_current_only:
+                    modifiers.append("Use only current lecture context.")
+                prompt_question = user_msg.strip()
+                if modifiers:
+                    prompt_question = f"{prompt_question}\n\nInstructions: " + " ".join(modifiers)
                 candidate_index_path = str(index_path) if index_path.exists() else None
 
                 # decide use_faiss_search from session (app.py must set this before calling render)
@@ -197,7 +223,7 @@ def render(st: Any, stem: str, llm):
                     try:
                         if st.session_state.get("use_api_mode", False):
                             resp = perform_chat(
-                                question=user_msg,
+                                question=prompt_question,
                                 embeddings_path=str(embeddings_path),
                                 history=payload_history,
                                 top_k=int(chat_k),
@@ -210,7 +236,7 @@ def render(st: Any, stem: str, llm):
                             )
                         else:
                             resp = perform_chat(
-                                question=user_msg,
+                                question=prompt_question,
                                 embeddings_path=str(embeddings_path),
                                 history=payload_history,
                                 top_k=int(chat_k),
@@ -270,6 +296,7 @@ def render(st: Any, stem: str, llm):
     chat_html, chat_height = build_chat_html(display_history, max_height=720)
 
     with chat_container:
+        st.markdown('<div class="chat-fade-top"></div>', unsafe_allow_html=True)
         # Surround chat with a subtle header that shows count & quick actions
         header_cols = st.columns([3, 1])
         with header_cols[0]:

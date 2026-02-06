@@ -90,13 +90,13 @@ def _card_doc_name(card_id: str) -> str:
     return card_id.rsplit("_", 1)[0]
 
 
-def render(st: Any):
+def render(st: Any, stem: str | None = None, scope_mode: str = "current"):
     """
     Render the SRS review UI. Attempts to infer the current `stem` from st.session_state.
     Preserves all session_state keys and SRSManager behavior exactly.
     """
     # Infer stem (same behavior as original)
-    stem = _infer_stem_from_session(st.session_state)
+    stem = stem or _infer_stem_from_session(st.session_state)
     quiz_state_key = f"quiz_items_{stem}" if stem else None
 
     st.markdown("---")
@@ -145,12 +145,16 @@ def render(st: Any):
                     f"💡 **Tip:** You have {len(unregistered)} quiz question(s) generated above. "
                     "Click **'Start SRS'** on any question to add it to your spaced repetition review!"
                 )
+        force_current_scope = (scope_mode == "current")
         show_all_lectures = st.checkbox(
             "📚 Show cards from all lectures",
-            value=False,
-            help="When disabled, SRS shows only cards tied to the currently uploaded lecture.",
+            value=not force_current_scope,
+            help="When disabled, SRS shows only cards tied to the current lecture.",
             key="srs_show_all_lectures",
+            disabled=force_current_scope,
         )
+        if force_current_scope:
+            show_all_lectures = False
 
         if stem and not show_all_lectures:
             filtered_cards = [cid for cid in all_cards if _card_stem(cid, srs_mgr.get_card_meta(cid)) == stem]
@@ -252,6 +256,9 @@ def render(st: Any):
                             # Placeholder / missing question case — preserve original behavior
                             card_title = _shorten(stored_question or card_id, 80) or card_id
                             st.markdown(f"### 📄 Card {global_idx}: {card_title}")
+                            source_reason = (card_meta or {}).get("source_reason", "")
+                            if source_reason:
+                                st.caption(f"Why this card exists: {source_reason}")
                             is_placeholder = "placeholder" in card_id.lower()
                             if stored_question:
                                 st.markdown("**Question**")
@@ -318,7 +325,9 @@ def render(st: Any):
                             q_text = quiz_item.get("question", "") or stored_question
                             card_title = _shorten(q_text or card_id, 80) or card_id
                             st.markdown(f"### 📄 Card {global_idx}: {card_title}")
-
+                            source_reason = (card_meta or {}).get("source_reason", "")
+                            if source_reason:
+                                st.caption(f"Why this card exists: {source_reason}")
                             choices = quiz_item.get("choices", {}) or {}
                             answer_letter = quiz_item.get("answer", None)
                             explanation = quiz_item.get("explanation", "")
@@ -329,9 +338,9 @@ def render(st: Any):
                                 if "\n" in q_text or len(q_text) > 300:
                                     st.text_area(label="", value=q_text, height=120, key=f"srs_qtext_{card_id}", disabled=True)
                                 else:
-                                    st.info("Upload the PDF and regenerate the quiz to see the full question.")
+                                    st.write(q_text)
                             else:
-                                st.write(q_text)
+                                st.info("Question text unavailable for this card. Upload the lecture and regenerate quiz history to restore full text.")
 
                             # Show choices in a compact list for scanning
                             if choices:
@@ -346,10 +355,23 @@ def render(st: Any):
 
                             st.markdown("---")
 
-                            # Primary CTA for revealing answer — large and clear
                             if not st.session_state[show_answer_key]:
-                                st.info("💡 Review this question. Try to recall the answer before checking.")
+                                st.markdown("**Front**")
+                                st.info(_shorten(q_text or stored_question or card_id, 140))
+                                st.caption("Try recalling the answer before revealing it.")
                                 st.caption("🗑️ Remove card deletes only this SRS card, not the original quiz question.")
+                                cfront1, cfront2 = st.columns(2)
+                                with cfront1:
+                                    if st.button("Show answer", key=f"show_{card_id}", type="primary", use_container_width=True):
+                                        st.session_state[show_answer_key] = True
+                                        st.rerun()
+                                with cfront2:
+                                    if st.button("I don't remember", key=f"forget_{card_id}", use_container_width=True):
+                                        srs_mgr.mark_review(card_id, correct=False)
+                                        reviewed_this_session.add(card_id)
+                                        st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                        st.session_state[show_answer_key] = False
+                                        st.rerun()
                                 if st.button("🗑️ Remove card", key=f"remove_{card_id}"):
                                     try:
                                         srs_mgr.delete_card(card_id)
@@ -357,52 +379,45 @@ def render(st: Any):
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"Failed to remove card: {e}")
-                                if st.button("🔍 Show Answer", key=f"show_{card_id}", type="primary", use_container_width=True):
-                                    st.session_state[show_answer_key] = True
-                                    st.rerun()
                             else:
-                                # Show the correct answer clearly
-                                st.markdown("**✅ Correct Answer**")
+                                st.markdown("**Back**")
                                 if answer_letter and choices.get(answer_letter):
                                     st.success(f"**{answer_letter}.** {choices[answer_letter]}")
                                 elif answer_letter:
                                     st.success(f"{answer_letter}")
                                 else:
                                     st.info("Answer choices aren't available for this card.")
-                                # Show explanation if present
                                 if explanation:
-                                    st.markdown("**Explanation**")
-                                    # long explanations put in text area for scrollability
-                                    if len(explanation) > 300:
-                                        st.info("")  # small visual gap
-                                        st.text_area("", value=explanation, height=140, disabled=True)
-                                    else:
-                                        st.info(explanation)
+                                    st.markdown("**Generated explanation**")
+                                    st.write(explanation)
+                                with st.expander("Evidence chunk"):
+                                    st.write(_shorten(q_text or stored_question or card_id, 300))
 
-                                st.markdown("---")
-                                st.markdown("**Did you get it correct?** ✅ / ❌")
-
-                                # Yes / No buttons with consistent messaging
-                                col_correct, col_incorrect = st.columns(2)
-
-                                with col_correct:
-                                    if st.button(f"✅ Yes, I got it correct!", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
-                                        srs_mgr.mark_review(card_id, correct=True)
-                                        reviewed_this_session.add(card_id)
-                                        st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                        st.session_state[show_answer_key] = False
-                                        st.success("🎉 Excellent! This card will be scheduled for review in a longer interval.")
-                                        st.balloons()
-                                        st.rerun()
-
-                                with col_incorrect:
-                                    if st.button(f"❌ No, I got it wrong", key=f"srs_incorrect_{card_id}", use_container_width=True):
-                                        srs_mgr.mark_review(card_id, correct=False)
-                                        reviewed_this_session.add(card_id)
-                                        st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                        st.session_state[show_answer_key] = False
-                                        st.info("📚 That's okay! This card will come up again soon to help you learn it better.")
-                                        st.rerun()
+                                rating_cols = st.columns(4)
+                                if rating_cols[0].button("Again", key=f"rate_again_{card_id}", use_container_width=True):
+                                    srs_mgr.mark_review(card_id, correct=False)
+                                    reviewed_this_session.add(card_id)
+                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                    st.session_state[show_answer_key] = False
+                                    st.rerun()
+                                if rating_cols[1].button("Hard", key=f"rate_hard_{card_id}", use_container_width=True):
+                                    srs_mgr.mark_review(card_id, correct=True)
+                                    reviewed_this_session.add(card_id)
+                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                    st.session_state[show_answer_key] = False
+                                    st.rerun()
+                                if rating_cols[2].button("Good", key=f"rate_good_{card_id}", type="primary", use_container_width=True):
+                                    srs_mgr.mark_review(card_id, correct=True)
+                                    reviewed_this_session.add(card_id)
+                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                    st.session_state[show_answer_key] = False
+                                    st.rerun()
+                                if rating_cols[3].button("Easy", key=f"rate_easy_{card_id}", use_container_width=True):
+                                    srs_mgr.mark_review(card_id, correct=True)
+                                    reviewed_this_session.add(card_id)
+                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                    st.session_state[show_answer_key] = False
+                                    st.rerun()
 
                                 # Show progress info (next due)
                                 if card_meta:

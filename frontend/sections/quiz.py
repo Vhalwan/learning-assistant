@@ -49,7 +49,10 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
     st.markdown("---")
     st.markdown('<a id="study-quiz-mcq-v1"></a>', unsafe_allow_html=True)
-    st.subheader("Study / Quiz (MCQ v1)")
+    st.subheader("📝 Study / Quiz (MCQ v1)")
+    scope_mode = st.session_state.get("scope_mode", "current")
+    scope_label = "Current lecture only" if scope_mode == "current" else "All lectures"
+    st.caption(f"Scope: {scope_label}")
     st.markdown(
         "Generate short multiple-choice quizzes from your lecture. "
         "Click a question to expand, select an answer, then **Check answer**. "
@@ -281,7 +284,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                     if st.button(f"Start SRS for {qid}", key=srs_key):
                         try:
                             mgr = SRSManager()
-                            mgr.ensure_card(qid, meta={"question": q_text or "", "stem": stem})
+                            mgr.ensure_card(qid, meta={"question": q_text or "", "stem": stem, "source_reason": "Added from quiz review"})
                             if "srs_quiz_items_cache" not in st.session_state:
                                 st.session_state["srs_quiz_items_cache"] = {}
                             st.session_state["srs_quiz_items_cache"][qid] = {
@@ -339,5 +342,40 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
             # Optionally show a small divider between questions
             st.markdown("---")
+    total_answered = 0
+    total_wrong = 0
+    for q in quiz_items:
+        qid = q.get("id", "")
+        submit_key = f"{quiz_state_key}_sub_{qid}"
+        submitted = st.session_state.get(submit_key)
+        if submitted:
+            total_answered += 1
+            if not submitted.get("is_correct", False):
+                total_wrong += 1
+
+    if total_answered:
+        st.markdown("### 🔁 Next step recommendations")
+        st.info(f"You answered {total_answered} question(s). Missed: {total_wrong}.")
+        if total_wrong > 0:
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Add missed concepts to SRS", key=f"quiz_push_missed_{stem}"):
+                    try:
+                        mgr = SRSManager()
+                        added = 0
+                        for q in quiz_items:
+                            qid = q.get("id", "")
+                            submit_key = f"{quiz_state_key}_sub_{qid}"
+                            sub = st.session_state.get(submit_key)
+                            if sub and not sub.get("is_correct", False):
+                                mgr.ensure_card(qid, meta={"question": q.get("question", ""), "stem": stem, "source_reason": "Added because you missed this in quiz"})
+                                added += 1
+                        st.success(f"Added {added} missed concept(s) to SRS.")
+                    except Exception as e:
+                        st.error(f"Could not add missed concepts: {e}")
+            with c2:
+                if st.button("Review top 3 confused concepts now", key=f"quiz_focus_confused_{stem}"):
+                    st.session_state[f"focus_confused_{stem}"] = True
+                    st.success("Jump to Confused section below.")
 
     # End loop over quiz items — UI improved but all keys + behavior preserved.

@@ -31,7 +31,7 @@ def _shorten(text: str, limit: int = 140) -> str:
     return clean[: limit - 3].rsplit(" ", 1)[0] + "..."
 
 
-def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm):
+def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm, scope_mode: str = "current"):
     """
     Render the 'Confused? Quick prioritized list' UI for the given document (stem).
     Keep behavior identical to previous inline implementation.
@@ -49,8 +49,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     quiz_state_key = f"quiz_items_{stem}"
 
     st.markdown('<a id="confused-quick-prioritized-list"></a>', unsafe_allow_html=True)
-    st.markdown("## Confused? Quick prioritized list")
-    st.write("These are concepts you repeatedly missed in quizzes — review them before moving on.")
+    st.markdown("## 🤝 Confused? Coaching list")
+    scope_label = "Current lecture only" if scope_mode == "current" else "All lectures"
+    st.caption(f"Scope: {scope_label}")
+    st.write("These concepts are worth reviewing next.")
 
     # gather session-local quiz context (not authoritative)
     history = st.session_state.get(hist_key, []) or []
@@ -86,6 +88,18 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
     # require positive signal_strength (wrong_count) — safety filter
     real_confusions = [r for r in results if int(r.get("signal_strength", 0)) > 0]
+    merged = {}
+    for r in real_confusions:
+        key = re.sub(r"[^a-z0-9 ]+", "", (r.get("concept", "") or "").lower())
+        key = " ".join(key.split())
+        if not key:
+            key = r.get("concept", "")
+        if key not in merged:
+            merged[key] = r
+        else:
+            merged[key]["signal_strength"] = int(merged[key].get("signal_strength", 0)) + int(r.get("signal_strength", 0))
+            merged[key]["evidence"] = (merged[key].get("evidence", []) or []) + (r.get("evidence", []) or [])
+    real_confusions = list(merged.values())
 
     # When empty, show one calm line only (no cards/icons)
     if not real_confusions:
@@ -97,16 +111,16 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
                 concept = item.get("concept", "(no concept)")
                 strength = int(item.get("signal_strength", 0))
-                st.markdown(f"**{idx}. {concept}** — missed {strength} time{'s' if strength != 1 else ''}.")
+                st.markdown(f"**{idx}. {concept}** — this concept is worth reviewing.")
                 short_concept = _shorten(concept, 120) or concept
                 st.markdown(f"### 🤔 Confused Card {idx}: {short_concept}")
                 st.markdown(f"**Question / concept**")
                 st.write(concept)
                 st.markdown(f"**Progress / Review stats**")
-                st.write(f"📊 Missed {strength} time{'s' if strength != 1 else ''}")
+                st.write(f"📊 Review signal: {strength}")
                 if item.get("reason"):
                     st.caption(item.get("reason"))
-                st.info("You struggled with this concept. Review the explanation or add it to SRS.")
+                st.info("You can quickly reinforce this with a simple explanation or move it into SRS.")
                 evidence = item.get("evidence", []) or []
                 if evidence:
                     with st.expander("Show evidence"):
@@ -121,7 +135,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                 with st.container():
                     st.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
-                    action_cols = st.columns(2)
+                    action_cols = st.columns(3)
                     with action_cols[0]:
                         # Explain simply (kept — student-first)
                         explain_btn_key = f"conf_explain_{stem}_{idx}"
@@ -179,7 +193,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                                     question_text = question_text or concept
 
-                                mgr.ensure_card(card_id, meta={"question": question_text or "", "stem": stem})
+                                mgr.ensure_card(card_id, meta={"question": question_text or "", "stem": stem, "source_reason": "Added from Confused review"})
                                 if "srs_quiz_items_cache" not in st.session_state:
                                     st.session_state["srs_quiz_items_cache"] = {}
                                 st.session_state["srs_quiz_items_cache"][card_id] = {
@@ -193,5 +207,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             except Exception as e:
                                 st.error("Failed to add to SRS.")
                                 st.exception(e)
+                    with action_cols[2]:
+                        follow_key = f"conf_follow_{stem}_{idx}"
+                        if st.button("Ask a follow-up question", key=follow_key):
+                            st.session_state[f"chat_input_{stem}"] = f"I am confused about: {concept}. Can you explain with an example?"
+                            st.success("Prefilled a follow-up prompt in Chat.")
 
     st.markdown("---")
