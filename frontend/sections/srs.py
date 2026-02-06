@@ -90,7 +90,7 @@ def _card_doc_name(card_id: str) -> str:
     return card_id.rsplit("_", 1)[0]
 
 
-def render(st: Any, stem: str | None = None, scope_mode: str = "current"):
+def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
     """
     Render the SRS review UI. Attempts to infer the current `stem` from st.session_state.
     Preserves all session_state keys and SRSManager behavior exactly.
@@ -148,7 +148,7 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "current"):
         force_current_scope = (scope_mode == "current")
         show_all_lectures = st.checkbox(
             "📚 Show cards from all lectures",
-            value=not force_current_scope,
+            value=False, 
             help="When disabled, SRS shows only cards tied to the current lecture.",
             key="srs_show_all_lectures",
             disabled=force_current_scope,

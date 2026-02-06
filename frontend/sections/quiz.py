@@ -50,9 +50,6 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     st.markdown("---")
     st.markdown('<a id="study-quiz-mcq-v1"></a>', unsafe_allow_html=True)
     st.subheader("📝 Study / Quiz (MCQ v1)")
-    scope_mode = st.session_state.get("scope_mode", "current")
-    scope_label = "Current lecture only" if scope_mode == "current" else "All lectures"
-    st.caption(f"Scope: {scope_label}")
     st.markdown(
         "Generate short multiple-choice quizzes from your lecture. "
         "Click a question to expand, select an answer, then **Check answer**. "

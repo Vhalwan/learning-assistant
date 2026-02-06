@@ -31,7 +31,7 @@ def _shorten(text: str, limit: int = 140) -> str:
     return clean[: limit - 3].rsplit(" ", 1)[0] + "..."
 
 
-def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm, scope_mode: str = "current"):
+def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm):
     """
     Render the 'Confused? Quick prioritized list' UI for the given document (stem).
     Keep behavior identical to previous inline implementation.
@@ -50,8 +50,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
     st.markdown('<a id="confused-quick-prioritized-list"></a>', unsafe_allow_html=True)
     st.markdown("## 🤝 Confused? Coaching list")
-    scope_label = "Current lecture only" if scope_mode == "current" else "All lectures"
-    st.caption(f"Scope: {scope_label}")
     st.write("These concepts are worth reviewing next.")
 
     # gather session-local quiz context (not authoritative)
@@ -210,7 +208,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     with action_cols[2]:
                         follow_key = f"conf_follow_{stem}_{idx}"
                         if st.button("Ask a follow-up question", key=follow_key):
-                            st.session_state[f"chat_input_{stem}"] = f"I am confused about: {concept}. Can you explain with an example?"
-                            st.success("Prefilled a follow-up prompt in Chat.")
+                            st.session_state[f"chat_pending_input_{stem}"] = f"I am confused about: {concept}. Can you explain with an example?"
+                            st.success("Prepared a follow-up prompt in Chat.")
 
     st.markdown("---")

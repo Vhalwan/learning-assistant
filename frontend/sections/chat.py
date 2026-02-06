@@ -55,13 +55,6 @@ def render(st: Any, stem: str, llm):
         st.session_state[history_toggle_key] = False
 
     st.subheader("💬 Chat with the lecture (conversational)")
-    scope_mode = st.session_state.get("scope_mode", "current")
-    chat_current_only = st.checkbox(
-        "Use current lecture only",
-        value=(scope_mode == "current"),
-        key=f"chat_scope_current_{stem}",
-        disabled=(scope_mode == "current"),
-    )
     mod_cols = st.columns(3)
     with mod_cols[0]:
         explain_new = st.checkbox("Explain like I'm new to this", key=f"chat_mod_new_{stem}")
@@ -183,6 +176,11 @@ def render(st: Any, stem: str, llm):
     with col_collapse[1]:
         if st.button("Toggle collapse old", key=f"{collapse_key}_btn"):
             st.session_state[collapse_key] = not st.session_state[collapse_key]
+    pending_input_key = f"chat_pending_input_{stem}"
+    pending_input = st.session_state.pop(pending_input_key, None)
+    if pending_input:
+        st.session_state[f"chat_input_{stem}"] = pending_input
+        st.info("Loaded follow-up prompt from Confused section. You can edit before sending.")
 
     # Input form (clear_on_submit=True so Streamlit clears the input automatically)
     with st.form(key=f"chat_form_{stem}", clear_on_submit=True):
@@ -209,8 +207,6 @@ def render(st: Any, stem: str, llm):
                     modifiers.append("Include one concrete example.")
                 if turn_quiz:
                     modifiers.append("End with one quiz question.")
-                if chat_current_only:
-                    modifiers.append("Use only current lecture context.")
                 prompt_question = user_msg.strip()
                 if modifiers:
                     prompt_question = f"{prompt_question}\n\nInstructions: " + " ".join(modifiers)

@@ -284,9 +284,6 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-if "scope_mode" not in st.session_state:
-    st.session_state.scope_mode = "current"
-
 st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
 st.markdown("## 1️⃣ Setup your lecture")
 st.write(
@@ -318,21 +315,7 @@ if uploaded:
     st.session_state["current_stem"] = stem
     current_label = stem.replace("_", " ").title()
 
-    scope_col1, scope_col2 = st.columns([2, 2])
-    with scope_col1:
-        st.info(f"📄 Current lecture: {current_label}")
-    with scope_col2:
-        st.session_state.scope_mode = st.radio(
-            "Study scope",
-            options=["current", "all"],
-            format_func=lambda v: "Current lecture only" if v == "current" else "All lectures",
-            horizontal=True,
-            key="scope_mode_selector",
-        )
-
-    st.caption(
-        "Scope applies to SRS, Confused, Quiz history prompts, and chat memory controls."
-    )
+    st.info(f"📄 Current lecture: {current_label}")
     # Group embedding controls into a neat card-like area
     with st.container():
         st.markdown("#### Embeddings & Indexing")
@@ -620,7 +603,6 @@ if uploaded:
         index_path=index_path,
         use_faiss_search=use_faiss_search,
         llm=llm,
-        scope_mode=st.session_state.scope_mode,
     )
 
     st.markdown("---")
@@ -629,7 +611,7 @@ if uploaded:
     st.markdown("### 3) Lock it in — Spaced Repetition (SRS)")
     st.write("Add items you want to retain and review due cards here. This helps move knowledge into long-term memory.")
     # Render SRS directly (removed outer expander)
-    render_srs(st, stem=stem, scope_mode=st.session_state.scope_mode)
+    render_srs(st, stem=stem)
 
     st.markdown("---")
     st.caption("Tip: For reproducible tests set USE_SAFE_EMBEDDINGS=1 and build FAISS index to compare results with NumPy search.")
