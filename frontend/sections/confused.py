@@ -30,6 +30,10 @@ def _shorten(text: str, limit: int = 140) -> str:
         return clean
     return clean[: limit - 3].rsplit(" ", 1)[0] + "..."
 
+def _deterministic_confusion_id(stem: str, concept_text: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", concept_text).strip("_")[:40] or "conf"
+    return f"{stem}_{safe}"
+
 
 def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm):
     """
@@ -108,18 +112,60 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
             with st.container():
                 st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
                 concept = item.get("concept", "(no concept)")
+                original_question = item.get("original_question", "")
                 strength = int(item.get("signal_strength", 0))
                 st.markdown(f"**{idx}. {concept}** — this concept is worth reviewing.")
                 short_concept = _shorten(concept, 120) or concept
                 st.markdown(f"### 🤔 Confused Card {idx}: {short_concept}")
                 st.markdown(f"**Question / concept**")
                 st.write(concept)
+                if original_question and original_question.strip() and original_question.strip() != concept.strip():
+                    st.markdown("**Original question**")
+                    st.write(original_question)
                 st.markdown(f"**Progress / Review stats**")
                 st.write(f"📊 Review signal: {strength}")
                 if item.get("reason"):
                     st.caption(item.get("reason"))
                 st.info("You can quickly reinforce this with a simple explanation or move it into SRS.")
                 evidence = item.get("evidence", []) or []
+                evidence_quiz_rows = []
+
+                # Build a deduplicated list of candidate original MCQs from evidence
+                mcq_candidates = []
+                seen_mcq = set()
+                for e in evidence:
+                    meta = e.get("meta", {}) or {}
+                    qid = meta.get("qid") or e.get("qid")
+                    question = meta.get("question") or e.get("question") or ""
+                    stable_id = str(qid).strip() if qid else ""
+                    dedupe_key = (stable_id, str(question).strip())
+                    if dedupe_key in seen_mcq:
+                        continue
+                    seen_mcq.add(dedupe_key)
+                    if not stable_id and not question:
+                        continue
+                    preview = _shorten(question or "(question text unavailable)", 100)
+                    if stable_id:
+                        label = f"{preview} [id={stable_id}]"
+                    else:
+                        label = f"{preview} [id=<no-id>]"
+                    mcq_candidates.append({"id": stable_id or None, "question": question, "label": label})
+
+                fallback_label = "No original MCQ available"
+                if not mcq_candidates:
+                    mcq_candidates = [{"id": None, "question": "", "label": fallback_label}]
+
+                selected_mcq_key = f"conf_selected_mcq_{stem}_{idx}"
+                selected_mcq_label = st.selectbox(
+                    "Original question(s)",
+                    options=[c["label"] for c in mcq_candidates],
+                    key=selected_mcq_key,
+                )
+                selected_mcq = next(
+                    (c for c in mcq_candidates if c["label"] == selected_mcq_label),
+                    mcq_candidates[0],
+                )
+
                 if evidence:
                     with st.expander("Show evidence"):
                         for e in evidence:
@@ -127,9 +173,40 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 meta = e.get("meta", {}) or {}
                                 qid = meta.get("qid") or e.get("qid") or "<no-id>"
                                 qtext = (meta.get("question") or e.get("question") or "")[:400]
-                                st.write(f"- Quiz: id={qid} — {qtext}")
+                                if qid and qid != "<no-id>" and qtext:
+                                    evidence_quiz_rows.append({"qid": str(qid), "question": qtext})
+                                ctext = meta.get("concept") or ""
+                                if ctext:
+                                    st.write(f"- Quiz: id={qid} — concept: {ctext}")
+                                if qtext:
+                                    st.write(f"  - original question: {qtext}")
                             else:
                                 st.write(f"- {str(e)[:400]}")
+
+                # Centralized action input resolution for this card
+                extracted_concept = item.get("concept", "") or concept
+                deterministic_fallback_id = _deterministic_confusion_id(stem, extracted_concept)
+
+                selected_qid = None
+                selected_question = ""
+                if evidence_quiz_rows:
+                    option_labels = ["None (use deterministic concept ID)"]
+                    option_map = {}
+                    for row in evidence_quiz_rows:
+                        label = f"{row['qid']} — {_shorten(row['question'], 110)}"
+                        option_labels.append(label)
+                        option_map[label] = row
+                    selected_label = st.selectbox(
+                        "Link to original MCQ (optional)",
+                        options=option_labels,
+                        index=1 if len(option_labels) > 1 else 0,
+                        key=f"conf_selected_q_{stem}_{idx}",
+                        help="Choose the original quiz question to anchor explain/SRS/follow-up actions.",
+                    )
+                    selected_row = option_map.get(selected_label)
+                    if selected_row:
+                        selected_qid = selected_row["qid"]
+                        selected_question = selected_row["question"]
 
                 with st.container():
                     st.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
@@ -141,7 +218,19 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             try:
                                 candidate_index_path = str(index_path) if index_path and Path(index_path).exists() else None
                                 raw_concept = item.get("concept", "")
-                                explain_q = f"Explain this simply and give 1 short example: {raw_concept}"
+                                selected_prompt_topic = selected_mcq.get("question") or raw_concept
+                                explain_q = f"Explain this simply and give 1 short example: {selected_prompt_topic}"
+                                compact_evidence = []
+                                for row in evidence_quiz_rows[:2]:
+                                    compact_evidence.append(f"- [{row['qid']}] {_shorten(row['question'], 120)}")
+                                explain_q = (
+                                    "You are tutoring a learner on a confusion point. "
+                                    "Explain simply and provide one short concrete example.\n\n"
+                                    f"Confused concept: {extracted_concept}\n"
+                                    f"Selected original question: {selected_question if selected_question else 'None selected'}\n"
+                                    "Compact evidence snippets:\n"
+                                    f"{chr(10).join(compact_evidence) if compact_evidence else '- None available'}"
+                                )
                                 resp = perform_query(
                                     question=explain_q,
                                     embeddings_path=str(embeddings_path),
@@ -169,19 +258,9 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                         if st.button("➕ Add to SRS", key=add_srs_key):
                             try:
                                 mgr = SRSManager()
-                                # try to extract canonical quiz id from evidence metadata
-                                card_id = None
-                                question_text = ""
-                                for e in evidence:
-                                    meta = e.get("meta", {}) or {}
-                                    if meta.get("qid"):
-                                        card_id = meta.get("qid")
-                                        question_text = meta.get("question", "") or question_text
-                                        break
-                                    if e.get("qid"):
-                                        card_id = e.get("qid")
-                                        question_text = e.get("question", "") or question_text
-                                        break
+                                # Use selected original MCQ (if available) as primary source
+                                card_id = selected_qid or deterministic_fallback_id
+                                question_text = selected_question or extracted_concept
 
                                 # fallback deterministic id derived from concept+stem
                                 if not card_id:
@@ -208,7 +287,18 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     with action_cols[2]:
                         follow_key = f"conf_follow_{stem}_{idx}"
                         if st.button("Ask a follow-up question", key=follow_key):
-                            st.session_state[f"chat_pending_input_{stem}"] = f"I am confused about: {concept}. Can you explain with an example?"
+                            follow_topic = selected_mcq.get("question") or concept
+                            selected_ctx = (
+                                f"Original MCQ context: {selected_question}\n"
+                                if selected_question else
+                                "Original MCQ context: none selected (use the most relevant quiz item if needed).\n"
+                            )
+                            st.session_state[f"chat_pending_input_{stem}"] = (
+                                "Continue coaching me on this confusion.\n"
+                                f"Concept I am struggling with: {extracted_concept}\n"
+                                f"{selected_ctx}"
+                                "Please explain simply, then ask me one quick check question."
+                            )
                             st.success("Prepared a follow-up prompt in Chat.")
 
     st.markdown("---")

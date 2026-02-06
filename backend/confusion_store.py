@@ -40,7 +40,14 @@ def _infer_stem_from_qid(qid: str) -> str:
     return ""
 
 
-def record_quiz_result(qid: str, question: str, is_correct: bool, stem: str = "", path: Optional[Path] = None) -> None:
+def record_quiz_result(
+    qid: str,
+    question: str,
+    is_correct: bool,
+    stem: str = "",
+    concept: str = "",
+    path: Optional[Path] = None,
+) -> None:
     """
     Record that the user answered a quiz item. If incorrect, increment wrong_count and update timestamps.
     If correct, increment correct_count (optional).
@@ -73,6 +80,7 @@ def record_quiz_result(qid: str, question: str, is_correct: bool, stem: str = ""
             entry["first_wrong"] = t
     # store latest question text (in case id is same but text updated)
     entry["question"] = question or entry.get("question", "")
+    entry["concept"] = concept or entry.get("concept", "")
     entry["stem"] = inferred_stem or entry.get("stem", "")
     data[key] = entry
     save_confusion(data, p)

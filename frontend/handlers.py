@@ -1,5 +1,6 @@
 # frontend/handlers.py
 import os
+import re
 from typing import Optional, List, Dict, Any, Tuple
 import requests
 from backend.confusion_analysis import analyze_confusion
@@ -27,6 +28,64 @@ except Exception:
 from frontend.ui_helpers import (
     call_query_api, call_summarize_api, call_chat_api
 )
+
+_PREFIX_PATTERNS = [
+    r"^\s*(?:q(?:uestion)?\s*\d*[:\-\.)]?|problem\s*\d*[:\-\.)]?|quiz\s*\d*[:\-\.)]?)\s*",
+    r"^\s*(?:which of the following|choose the correct answer|select the correct answer|select one|pick one)\s*[:\-]?\s*",
+    r"^\s*(?:true or false|t\/f)\s*[:\-]?\s*",
+]
+
+
+def extract_concept_from_mcq_stem(question_text: str, max_len: int = 80) -> str:
+    """Extract a deterministic short concept label from an MCQ-style question."""
+    text = " ".join((question_text or "").strip().split())
+    if not text:
+        return "Unknown concept"
+
+    cleaned = text
+    for pat in _PREFIX_PATTERNS:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE)
+
+    # Remove obvious option-like suffixes from first option marker onward.
+    option_markers = [
+        r"\s+[A-Da-d][\)\.:]\s+",
+        r"\s+\([A-Da-d]\)\s+",
+        r"\s+1[\)\.:]\s+",
+        r"\s+\*\s+",
+    ]
+    cut = len(cleaned)
+    for marker in option_markers:
+        m = re.search(marker, cleaned)
+        if m:
+            cut = min(cut, m.start())
+    cleaned = cleaned[:cut].strip(" -:;,.?!")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+
+    # Try to keep only the leading noun-phrase-ish part before helper clauses.
+    splitters = [" is ", " are ", " was ", " were ", " can ", " does ", " do ", " means ", " refers to "]
+    lowered = f" {cleaned.lower()} "
+    split_at = None
+    for token in splitters:
+        idx = lowered.find(token)
+        if idx > 0:
+            split_at = idx
+            break
+    if split_at:
+        cleaned = cleaned[:split_at].strip(" -:;,.?!")
+
+    # Convert question forms to a concise label.
+    cleaned = re.sub(r"^(what|which|why|how|when|where|who)\s+(is|are|was|were)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(define|describe|explain|identify)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" -:;,.?!")
+
+    if 3 <= len(cleaned) <= max_len:
+        return cleaned
+
+    # Fallback: bounded cleaned snippet from original question.
+    fallback = re.sub(r"\s+", " ", text).strip(" -:;,.?!")
+    if len(fallback) > max_len:
+        fallback = fallback[:max_len].rsplit(" ", 1)[0].rstrip(" -:;,.?!") + "..."
+    return fallback or "Unknown concept"
 
 
 def init_llm():
@@ -218,7 +277,14 @@ def record_quiz_result(qid: str, question: str, is_correct: bool, stem: str = ""
     Non-blocking: logs but doesn't raise in the UI path.
     """
     try:
-        _record_quiz_result(qid=qid, question=question or "", is_correct=bool(is_correct), stem=stem or "")
+        concept = extract_concept_from_mcq_stem(question or "")
+        _record_quiz_result(
+            qid=qid,
+            question=question or "",
+            is_correct=bool(is_correct),
+            stem=stem or "",
+            concept=concept,
+        )
     except Exception as e:
         # Keep UI stable; log to console
         print(f"[confusion_store] failed to record quiz result: {e}")
@@ -279,7 +345,8 @@ def perform_confusion_analysis(
             if not matches:
                 continue
         qtext = (p.get("question") or "").strip()
-        concept = _shorten(qtext or qid or "Unknown concept", 200)
+        concept = (p.get("concept") or "").strip() or extract_concept_from_mcq_stem(qtext or qid or "")
+        concept = _shorten(concept or qid or "Unknown concept", 200)
 
         status = "confused" if wrong_count > 1 else "shaky"
         reason = f"Persisted incorrect answers (count={wrong_count})"
@@ -288,6 +355,7 @@ def perform_confusion_analysis(
 
         real.append({
             "concept": concept,
+            "original_question": qtext,
             "status": status,
             "reason": reason,
             "evidence": evidence,
