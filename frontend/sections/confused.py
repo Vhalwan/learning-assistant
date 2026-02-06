@@ -157,9 +157,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                 selected_mcq_key = f"conf_selected_mcq_{stem}_{idx}"
                 selected_mcq_label = st.selectbox(
-                    "Original question(s)",
+                    "Original question(s) [used for Add to SRS only]",
                     options=[c["label"] for c in mcq_candidates],
                     key=selected_mcq_key,
+                    help="Explain Simply and Ask Follow-up always use the concept. Pick a question here only when adding to SRS.",
                 )
                 selected_mcq = next(
                     (c for c in mcq_candidates if c["label"] == selected_mcq_label),
@@ -187,26 +188,8 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 extracted_concept = item.get("concept", "") or concept
                 deterministic_fallback_id = _deterministic_confusion_id(stem, extracted_concept)
 
-                selected_qid = None
-                selected_question = ""
-                if evidence_quiz_rows:
-                    option_labels = ["None (use deterministic concept ID)"]
-                    option_map = {}
-                    for row in evidence_quiz_rows:
-                        label = f"{row['qid']} — {_shorten(row['question'], 110)}"
-                        option_labels.append(label)
-                        option_map[label] = row
-                    selected_label = st.selectbox(
-                        "Link to original MCQ (optional)",
-                        options=option_labels,
-                        index=1 if len(option_labels) > 1 else 0,
-                        key=f"conf_selected_q_{stem}_{idx}",
-                        help="Choose the original quiz question to anchor explain/SRS/follow-up actions.",
-                    )
-                    selected_row = option_map.get(selected_label)
-                    if selected_row:
-                        selected_qid = selected_row["qid"]
-                        selected_question = selected_row["question"]
+                selected_qid = selected_mcq.get("id")
+                selected_question = selected_mcq.get("question") or ""
 
                 with st.container():
                     st.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
@@ -217,9 +200,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                         if st.button("Explain simply", key=explain_btn_key):
                             try:
                                 candidate_index_path = str(index_path) if index_path and Path(index_path).exists() else None
-                                raw_concept = item.get("concept", "")
-                                selected_prompt_topic = selected_mcq.get("question") or raw_concept
-                                explain_q = f"Explain this simply and give 1 short example: {selected_prompt_topic}"
                                 compact_evidence = []
                                 for row in evidence_quiz_rows[:2]:
                                     compact_evidence.append(f"- [{row['qid']}] {_shorten(row['question'], 120)}")
@@ -227,7 +207,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                     "You are tutoring a learner on a confusion point. "
                                     "Explain simply and provide one short concrete example.\n\n"
                                     f"Confused concept: {extracted_concept}\n"
-                                    f"Selected original question: {selected_question if selected_question else 'None selected'}\n"
                                     "Compact evidence snippets:\n"
                                     f"{chr(10).join(compact_evidence) if compact_evidence else '- None available'}"
                                 )
@@ -287,18 +266,11 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     with action_cols[2]:
                         follow_key = f"conf_follow_{stem}_{idx}"
                         if st.button("Ask a follow-up question", key=follow_key):
-                            follow_topic = selected_mcq.get("question") or concept
-                            selected_ctx = (
-                                f"Original MCQ context: {selected_question}\n"
-                                if selected_question else
-                                "Original MCQ context: none selected (use the most relevant quiz item if needed).\n"
-                            )
                             st.session_state[f"chat_pending_input_{stem}"] = (
                                 "Continue coaching me on this confusion.\n"
                                 f"Concept I am struggling with: {extracted_concept}\n"
-                                f"{selected_ctx}"
                                 "Please explain simply, then ask me one quick check question."
                             )
-                            st.success("Prepared a follow-up prompt in Chat.")
+                            st.success("Prepared a follow-up prompt in Chat. Open Chat to review/edit it, then press Send.")
 
     st.markdown("---")
