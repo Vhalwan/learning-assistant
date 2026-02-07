@@ -33,6 +33,7 @@ _PREFIX_PATTERNS = [
     r"^\s*(?:q(?:uestion)?\s*\d*[:\-\.)]?|problem\s*\d*[:\-\.)]?|quiz\s*\d*[:\-\.)]?)\s*",
     r"^\s*(?:which of the following|choose the correct answer|select the correct answer|select one|pick one)\s*[:\-]?\s*",
     r"^\s*(?:true or false|t\/f)\s*[:\-]?\s*",
+    r"^\s*(?:according to (?:the )?(?:provided|given) text[,]?\s*)",
 ]
 
 
@@ -60,6 +61,19 @@ def extract_concept_from_mcq_stem(question_text: str, max_len: int = 80) -> str:
             cut = min(cut, m.start())
     cleaned = cleaned[:cut].strip(" -:;,.?!")
     cleaned = re.sub(r"\s+", " ", cleaned)
+    # Remove common MCQ leading boilerplate that is not conceptual.
+    cleaned = re.sub(
+        r"^(?:according to (?:the )?(?:provided|given) text[,]?\s*)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^(?:which of the following\s+)?(?:best\s+)?(?:describes?|explains?|represents?)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
 
     # Try to keep only the leading noun-phrase-ish part before helper clauses.
     splitters = [" is ", " are ", " was ", " were ", " can ", " does ", " do ", " means ", " refers to "]
@@ -75,6 +89,7 @@ def extract_concept_from_mcq_stem(question_text: str, max_len: int = 80) -> str:
 
     # Convert question forms to a concise label.
     cleaned = re.sub(r"^(what|which|why|how|when|where|who)\s+(is|are|was|were)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:which of the following)\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^(define|describe|explain|identify)\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip(" -:;,.?!")
 

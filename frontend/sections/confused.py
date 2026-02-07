@@ -115,9 +115,8 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 original_question = item.get("original_question", "")
                 strength = int(item.get("signal_strength", 0))
                 st.markdown(f"**{idx}. {concept}** — this concept is worth reviewing.")
-                short_concept = _shorten(concept, 120) or concept
-                st.markdown(f"### 🤔 Confused Card {idx}: {short_concept}")
-                st.markdown(f"**Question / concept**")
+                st.markdown(f"### 🤔 Confused Card {idx}: {concept}")
+                st.markdown("**Concept**")
                 st.write(concept)
                 if original_question and original_question.strip() and original_question.strip() != concept.strip():
                     st.markdown("**Original question**")
@@ -265,11 +264,12 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 st.exception(e)
                     with action_cols[2]:
                         follow_key = f"conf_follow_{stem}_{idx}"
-                        if st.button("Ask a follow-up question", key=follow_key):
+                        if st.button("Follow up", key=follow_key):
                             st.session_state[f"chat_pending_input_{stem}"] = (
-                                "Continue coaching me on this confusion.\n"
-                                f"Concept I am struggling with: {extracted_concept}\n"
-                                "Please explain simply, then ask me one quick check question."
+                                "I'm reviewing this concept and I'm confused. Please teach it clearly.\n\n"
+                                f"Concept: {extracted_concept}\n"
+                                "Start with a plain-language explanation, then give one intuitive example, "
+                                "and finally ask me one short check question to test my understanding."
                             )
                             st.success("Prepared a follow-up prompt in Chat. Open Chat to review/edit it, then press Send.")
 
