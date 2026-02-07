@@ -112,15 +112,11 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
             with st.container():
                 st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
                 concept = item.get("concept", "(no concept)")
-                original_question = item.get("original_question", "")
                 strength = int(item.get("signal_strength", 0))
                 st.markdown(f"**{idx}. {concept}** — this concept is worth reviewing.")
                 st.markdown(f"### 🤔 Confused Card {idx}: {concept}")
                 st.markdown("**Concept**")
                 st.write(concept)
-                if original_question and original_question.strip() and original_question.strip() != concept.strip():
-                    st.markdown("**Original question**")
-                    st.write(original_question)
                 st.markdown(f"**Progress / Review stats**")
                 st.write(f"📊 Review signal: {strength}")
                 if item.get("reason"):
@@ -231,6 +227,18 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 st.exception(e)
 
                     with action_cols[1]:
+                        follow_key = f"conf_follow_{stem}_{idx}"
+                        if st.button("Follow up", key=follow_key):
+                            follow_prompt = (
+                                "I'm reviewing this concept and I'm confused. Please teach it clearly.\n\n"
+                                f"Concept: {extracted_concept}\n"
+                                "Use the quiz misses only as evidence. "
+                                "Start with a plain-language explanation, then give one intuitive example, "
+                                "and finally ask me one short check question to test my understanding."
+                            )
+                            st.session_state[f"chat_input_{stem}"] = follow_prompt
+                            st.success("Loaded a follow-up prompt into Chat input. Open Chat to review/edit it, then press Send.")
+                    with action_cols[2]:
                         # ➕ Add to SRS (idempotent)
                         add_srs_key = f"conf_add_srs_{stem}_{idx}"
                         if st.button("➕ Add to SRS", key=add_srs_key):
@@ -262,15 +270,4 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             except Exception as e:
                                 st.error("Failed to add to SRS.")
                                 st.exception(e)
-                    with action_cols[2]:
-                        follow_key = f"conf_follow_{stem}_{idx}"
-                        if st.button("Follow up", key=follow_key):
-                            st.session_state[f"chat_pending_input_{stem}"] = (
-                                "I'm reviewing this concept and I'm confused. Please teach it clearly.\n\n"
-                                f"Concept: {extracted_concept}\n"
-                                "Start with a plain-language explanation, then give one intuitive example, "
-                                "and finally ask me one short check question to test my understanding."
-                            )
-                            st.success("Prepared a follow-up prompt in Chat. Open Chat to review/edit it, then press Send.")
-
     st.markdown("---")

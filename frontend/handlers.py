@@ -3,7 +3,6 @@ import os
 import re
 from typing import Optional, List, Dict, Any, Tuple
 import requests
-from backend.confusion_analysis import analyze_confusion
 # backend imports (same as the original app.py used)
 from backend.llm_client import get_llm_call
 from backend.summarize_file import summarize_with_gemini
@@ -16,7 +15,7 @@ from backend.generate_quiz import generate_quiz_from_context, generate_mcq_from_
 from backend.study_srs import SRSManager, INTERVALS
 from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all_quiz_items
 from backend.confusion_store import record_quiz_result as _record_quiz_result, get_top_confusions as _get_top_confusions
-from backend.confusion_analysis import analyze_confusion, _shorten
+from backend.confusion_analysis import analyze_confusion
 # faiss builder (optional)
 try:
     from backend.vectorstore.faiss_store import build_faiss_index
@@ -36,9 +35,12 @@ _PREFIX_PATTERNS = [
     r"^\s*(?:according to (?:the )?(?:provided|given) text[,]?\s*)",
 ]
 
+_CONCEPT_STOPWORDS = {
+    "the", "a", "an", "of", "in", "on", "to", "for", "and", "or", "by", "from", "with", "at", "as", "into"
+}
 
-def extract_concept_from_mcq_stem(question_text: str, max_len: int = 80) -> str:
-    """Extract a deterministic short concept label from an MCQ-style question."""
+def extract_concept_from_mcq_stem(question_text: str, max_words: int = 6) -> str:
+    """Extract a deterministic normalized concept label from an MCQ stem."""
     text = " ".join((question_text or "").strip().split())
     if not text:
         return "Unknown concept"
@@ -93,14 +95,47 @@ def extract_concept_from_mcq_stem(question_text: str, max_len: int = 80) -> str:
     cleaned = re.sub(r"^(define|describe|explain|identify)\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip(" -:;,.?!")
 
-    if 3 <= len(cleaned) <= max_len:
-        return cleaned
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:;,.?!")
 
-    # Fallback: bounded cleaned snippet from original question.
-    fallback = re.sub(r"\s+", " ", text).strip(" -:;,.?!")
-    if len(fallback) > max_len:
-        fallback = fallback[:max_len].rsplit(" ", 1)[0].rstrip(" -:;,.?!") + "..."
-    return fallback or "Unknown concept"
+    # Build a short noun-phrase-ish concept token sequence.
+    tokens = [t for t in re.findall(r"[A-Za-z0-9\-/']+", cleaned) if t]
+    if not tokens:
+        return "Unknown concept"
+
+    trimmed = []
+    for tok in tokens:
+        low = tok.lower()
+        if low in _CONCEPT_STOPWORDS and trimmed:
+            continue
+        trimmed.append(tok)
+        if len(trimmed) >= max_words:
+            break
+
+    concept = " ".join(trimmed).strip(" -:;,.?!")
+    if len(concept) < 3:
+        return "Unknown concept"
+    return concept
+
+
+def derive_concept_from_mcq_stems(stems: List[str]) -> str:
+    """Derive a stable concept from one or more related MCQ stems."""
+    normalized = []
+    for stem in stems or []:
+        c = extract_concept_from_mcq_stem(stem or "")
+        if c and c != "Unknown concept":
+            normalized.append(c)
+    if not normalized:
+        return "Unknown concept"
+
+    freq: Dict[str, int] = {}
+    for c in normalized:
+        k = c.lower()
+        freq[k] = freq.get(k, 0) + 1
+    best_key = sorted(freq.items(), key=lambda kv: (-kv[1], len(kv[0])))[0][0]
+    for c in normalized:
+        if c.lower() == best_key:
+            return c
+    return normalized[0]
 
 
 def init_llm():
@@ -361,7 +396,6 @@ def perform_confusion_analysis(
                 continue
         qtext = (p.get("question") or "").strip()
         concept = (p.get("concept") or "").strip() or extract_concept_from_mcq_stem(qtext or qid or "")
-        concept = _shorten(concept or qid or "Unknown concept", 200)
 
         status = "confused" if wrong_count > 1 else "shaky"
         reason = f"Persisted incorrect answers (count={wrong_count})"
@@ -377,11 +411,30 @@ def perform_confusion_analysis(
             "signal_strength": wrong_count,
         })
 
+    # Group by normalized concept to allow one concept from multiple MCQ stems.
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for item in real:
+        evidence = item.get("evidence", []) or []
+        stems_for_concept = [e.get("question", "") for e in evidence if e.get("question")]
+        stems_for_concept.append(item.get("original_question", "") or "")
+        concept = derive_concept_from_mcq_stems(stems_for_concept)
+        group_key = concept.lower()
+        if group_key not in grouped:
+            grouped[group_key] = {
+                **item,
+                "concept": concept,
+                "signal_strength": int(item.get("signal_strength", 0)),
+                "evidence": list(evidence),
+            }
+        else:
+            grouped[group_key]["signal_strength"] += int(item.get("signal_strength", 0))
+            grouped[group_key]["evidence"] = (grouped[group_key].get("evidence", []) or []) + list(evidence)
+
     # Sort by signal_strength (wrong_count) desc
     try:
-        real_sorted = sorted(real, key=lambda r: -int(r.get("signal_strength", 0)))
+        real_sorted = sorted(grouped.values(), key=lambda r: -int(r.get("signal_strength", 0)))
     except Exception:
-        real_sorted = real
+        real_sorted = list(grouped.values())
 
     # Enforce UI cap: at most top_n (recommended 3-5; callers may pass 5)
     return real_sorted[:int(top_n or 5)]
