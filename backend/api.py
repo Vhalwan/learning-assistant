@@ -36,6 +36,8 @@ from backend.vectorstore.faiss_store import (
     rebuild_index_if_needed,
 )
 from backend.generate_quiz import generate_quiz_from_context
+import hashlib
+from backend.concept_storage import load_concepts, save_concepts
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -384,7 +386,7 @@ def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(chec
             raise HTTPException(status_code=400, detail=f"Unsupported quiz type: {body.type}")
 
         # lazy import to avoid circulars
-        from backend.generate_quiz import generate_mcq_from_context
+        from backend import generate_quiz as _gen_quiz
 
         # get a working llm_call (or None)
         llm_call = get_llm_call()
@@ -401,8 +403,44 @@ def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(chec
                 raw_outputs.append("<unable to stringify raw output>")
             return out
 
+        doc_id = hashlib.sha1((body.context_text or "").encode("utf-8")).hexdigest()[:12]
+        meta = None
+        try:
+            from backend.concept_storage import load_concepts_with_meta
+            meta = load_concepts_with_meta(body.stem)
+        except ImportError:
+            meta = None
+        concepts = []
+        if meta and isinstance(meta, dict):
+            concepts = meta.get("concepts") or []
+            meta_doc_id = (meta.get("doc_id") or "").strip()
+            if not meta_doc_id or meta_doc_id != doc_id:
+                concepts = []
+        if not concepts:
+            gen_concepts = getattr(_gen_quiz, "generate_concepts_from_context", None)
+            if gen_concepts is None:
+                concepts = []
+            else:
+                concepts = gen_concepts(body.context_text, max_concepts=5, llm_call=capturing_llm)
+            try:
+                save_concepts(body.stem, concepts, doc_id=doc_id)
+            except Exception:
+                pass
+
         # generate MCQs (will call the capturing_llm above)
-        quiz_list = generate_mcq_from_context(body.context_text, n=body.n or 5, llm_call=capturing_llm)
+        try:
+            quiz_list = _gen_quiz.generate_mcq_from_context(
+                body.context_text,
+                n=body.n or 5,
+                llm_call=capturing_llm,
+                concepts=concepts,
+            )
+        except TypeError:
+            quiz_list = _gen_quiz.generate_mcq_from_context(
+                body.context_text,
+                n=body.n or 5,
+                llm_call=capturing_llm,
+            )
 
         # prefix IDs with stem
         prefixed = []

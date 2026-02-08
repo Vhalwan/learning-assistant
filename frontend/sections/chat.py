@@ -176,19 +176,24 @@ def render(st: Any, stem: str, llm):
     with col_collapse[1]:
         if st.button("Toggle collapse old", key=f"{collapse_key}_btn"):
             st.session_state[collapse_key] = not st.session_state[collapse_key]
+    
+    # Check for pending input from Confused section
     pending_input_key = f"chat_pending_input_{stem}"
     pending_input = st.session_state.pop(pending_input_key, None)
     if pending_input:
         st.session_state[f"chat_input_{stem}"] = pending_input
-        st.info("Loaded follow-up prompt from Confused section. You can edit before sending.")
+        st.success("✅ Follow-up prompt loaded! Edit and send below.")
 
     # Input form (clear_on_submit=True so Streamlit clears the input automatically)
     with st.form(key=f"chat_form_{stem}", clear_on_submit=True):
-        # Larger input area for multi-line messages (improves UX)
-        user_msg = st.text_input(
+        # Use text_area for multi-line input display
+        # Explicitly set value from session_state to show pending follow-up prompts
+        user_msg = st.text_area(
             "Message to assistant",
+            value=st.session_state.get(f"chat_input_{stem}", ""),
             key=f"chat_input_{stem}",
-            placeholder="Type your message here..."
+            placeholder="Type your message here...",
+            height=100,
         )
         send_pressed = st.form_submit_button("Send")
 

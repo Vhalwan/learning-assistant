@@ -35,9 +35,16 @@ def save_confusion(data: Dict[str, Any], path: Optional[Path] = None) -> None:
 def _infer_stem_from_qid(qid: str) -> str:
     if not qid:
         return ""
+    # Common qid formats use underscore as separator (e.g. "lecture1_Q1").
+    # Some generators may use spaces or hyphens in stems (e.g. "lecture 3_P1_Q1").
+    # Be tolerant: split on first underscore, else first space, else first hyphen.
     if "_" in qid:
         return qid.split("_", 1)[0]
-    return ""
+    if " " in qid:
+        return qid.split(" ", 1)[0]
+    if "-" in qid:
+        return qid.split("-", 1)[0]
+    return qid
 
 
 def record_quiz_result(
@@ -46,6 +53,9 @@ def record_quiz_result(
     is_correct: bool,
     stem: str = "",
     concept: str = "",
+    concept_id: str = "",
+    concept_label: str = "",
+    doc_id: str = "",
     path: Optional[Path] = None,
 ) -> None:
     """
@@ -80,7 +90,14 @@ def record_quiz_result(
             entry["first_wrong"] = t
     # store latest question text (in case id is same but text updated)
     entry["question"] = question or entry.get("question", "")
-    entry["concept"] = concept or entry.get("concept", "")
+    entry["store_key"] = key
+    resolved_label = concept_label or concept or entry.get("concept_label") or entry.get("concept", "")
+    resolved_id = concept_id or entry.get("concept_id", "")
+    entry["concept"] = resolved_label
+    entry["concept_label"] = resolved_label
+    entry["concept_id"] = resolved_id
+    if doc_id:
+        entry["doc_id"] = doc_id
     entry["stem"] = inferred_stem or entry.get("stem", "")
     data[key] = entry
     save_confusion(data, p)
@@ -91,7 +108,12 @@ def get_top_confusions(limit: int = 10, path: Optional[Path] = None) -> List[Dic
     """
     p = Path(path or DEFAULT_PATH)
     data = load_confusion(p)
-    items = list(data.values())
+    items: List[Dict[str, Any]] = []
+    for k, v in data.items():
+        item = dict(v or {})
+        if not item.get("store_key"):
+            item["store_key"] = k
+        items.append(item)
     # sort: highest wrong_count first, tie-break by recent last_wrong
     def sort_key(it):
         wc = int(it.get("wrong_count", 0))
@@ -99,3 +121,21 @@ def get_top_confusions(limit: int = 10, path: Optional[Path] = None) -> List[Dic
         return (-wc, last_wrong)
     items.sort(key=sort_key)
     return items[:limit]
+
+
+def delete_confusion_entries(keys: List[str], path: Optional[Path] = None) -> int:
+    """
+    Delete confusion entries by their store keys. Returns number removed.
+    """
+    p = Path(path or DEFAULT_PATH)
+    data = load_confusion(p)
+    if not data:
+        return 0
+    removed = 0
+    for k in keys or []:
+        if k in data:
+            del data[k]
+            removed += 1
+    if removed:
+        save_confusion(data, p)
+    return removed

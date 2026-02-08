@@ -9,6 +9,7 @@ Behavior & state keys are unchanged — only presentation/layout has been improv
 """
 
 import uuid
+import hashlib
 import requests
 from pathlib import Path
 from typing import Any, List, Dict
@@ -58,6 +59,12 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
     # session_state key for storing generated quiz for this document
     quiz_state_key = f"quiz_items_{stem}"
+    doc_id_key = f"doc_id_{stem}"
+    if text is not None:
+        doc_id = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:12]
+        st.session_state[doc_id_key] = doc_id
+    else:
+        doc_id = st.session_state.get(doc_id_key, "")
 
     # Top controls inline: number input + generate button
     cols_top = st.columns([2, 1])
@@ -259,13 +266,26 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                         # --- persist the quiz result to confusion store so it survives restart ---
                         try:
                             # use question id and text if available
-                            record_quiz_result(qid=qid, question=q_text, is_correct=is_correct, stem=stem)
+                            record_quiz_result(
+                                qid=qid,
+                                question=q_text,
+                                is_correct=is_correct,
+                                stem=stem,
+                                question_item=q,
+                                doc_id=doc_id,
+                            )
                         except Exception as e:
                             # don't crash the UI; just log
                             print(f"[ui] failed to persist quiz result: {e}")
 
                         # mark state that would previously open the expander
                         st.session_state[exp_key] = True
+                        # Force a rerun so the Confused section reloads persisted entries immediately
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            # If rerun fails (e.g., during testing), continue gracefully
+                            pass
 
                 with btn_col_mid:
                     # Toggle showing explanation manually (keeps same expander key so state persists)

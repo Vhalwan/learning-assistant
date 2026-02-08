@@ -26,6 +26,23 @@ _BAD_PHRASES = [
     "not asked in the lecture", "not supported by", "This statement is not supported"
 ]
 
+_DEFAULT_CONCEPTS = [
+    {
+        "concept_id": "unlabeled_concept",
+        "concept_label": "Unlabeled concept",
+    }
+]
+
+_CONCEPT_PROMPT_TEMPLATE = """
+You are an expert educator. Extract 2 to {max_concepts} canonical concepts from the lecture content when possible.
+Return JSON ONLY (no extra text). Output must be a JSON array of objects with keys:
+  - concept_id (snake_case, short, stable)
+  - concept_label (human-readable)
+
+Lecture content:
+\"\"\"{content}\"\"\"
+"""
+
 
 # ---------- robust JSON loader ----------
 def safe_json_load(s):
@@ -115,6 +132,91 @@ def _shorten(s: str, max_len=240) -> str:
     if last_p > max_len - 80:
         return cut[:last_p + 1].strip()
     return cut[:max_len - 3].rstrip() + "..."
+
+
+def _slugify_concept_id(label: str, fallback: str) -> str:
+    base = re.sub(r"[^a-zA-Z0-9]+", "_", (label or "").strip().lower()).strip("_")
+    return base or fallback
+
+
+def _normalize_concepts(raw, max_concepts: int = 5) -> List[Dict[str, str]]:
+    max_concepts = int(max_concepts or 1)
+    max_concepts = max(1, min(max_concepts, 20))
+    concepts: List[Dict[str, str]] = []
+    used_ids = set()
+
+    if raw is None:
+        raw_list = []
+    elif isinstance(raw, dict):
+        if "concepts" in raw and isinstance(raw.get("concepts"), list):
+            raw_list = raw.get("concepts") or []
+        else:
+            raw_list = [raw]
+    elif isinstance(raw, list):
+        raw_list = raw
+    else:
+        raw_list = []
+
+    for idx, item in enumerate(raw_list):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("concept_label") or item.get("label") or item.get("concept") or "").strip()
+        concept_id = str(item.get("concept_id") or item.get("id") or "").strip()
+        if not label and not concept_id:
+            continue
+        if not label:
+            label = concept_id
+        if not concept_id:
+            concept_id = _slugify_concept_id(label, f"concept_{len(concepts) + 1}")
+        concept_id = re.sub(r"[^a-z0-9_]", "_", concept_id.lower())
+        concept_id = re.sub(r"_+", "_", concept_id).strip("_") or f"concept_{len(concepts) + 1}"
+        base_id = concept_id
+        suffix = 2
+        while concept_id in used_ids:
+            concept_id = f"{base_id}_{suffix}"
+            suffix += 1
+        used_ids.add(concept_id)
+        concepts.append({"concept_id": concept_id, "concept_label": label})
+        if len(concepts) >= max_concepts:
+            break
+
+    if not concepts:
+        concepts = list(_DEFAULT_CONCEPTS)
+    return concepts
+
+
+def generate_concepts_from_context(
+    context_text: str,
+    max_concepts: int = 5,
+    llm_call: Optional[Callable[[str], str]] = None,
+) -> List[Dict[str, str]]:
+    """
+    Generate a canonical list of concepts from lecture content.
+    If llm_call is None, return a deterministic fallback.
+    """
+    if llm_call is None:
+        # Deterministic fallback: derive short concept labels from lecture text.
+        chunks = _paragraph_chunks(context_text or "", approx_words=80)
+        concepts = []
+        for chunk in chunks:
+            if len(concepts) >= int(max_concepts or 5):
+                break
+            first = re.split(r"[.!?]\s+", chunk.strip(), maxsplit=1)[0] if chunk else ""
+            label = " ".join((first or chunk).split()[:8]).strip()
+            if len(label) < 3:
+                continue
+            concepts.append({"concept_label": label})
+        return _normalize_concepts(concepts, max_concepts=max_concepts)
+    prompt = _CONCEPT_PROMPT_TEMPLATE.format(
+        max_concepts=int(max_concepts or 5),
+        content=_shorten(context_text or "", max_len=4000),
+    )
+    try:
+        raw = llm_call(prompt)
+        parsed = safe_json_load(raw)
+        return _normalize_concepts(parsed, max_concepts=max_concepts)
+    except Exception:
+        return list(_DEFAULT_CONCEPTS)
 
 
 def _token_overlap_fraction(a: str, b: str) -> float:
@@ -220,11 +322,21 @@ def _validate_mcq_obj(obj: dict, paragraph: str) -> bool:
 # ---------- core generator ----------
 def generate_mcq_from_context(context_text: str, n: int = 5,
                               llm_call: Optional[Callable[[str], str]] = None,
-                              chunk_word_target: int = 90) -> List[Dict]:
+                              chunk_word_target: int = 90,
+                              concepts: Optional[List[Dict[str, str]]] = None) -> List[Dict]:
     """
     Generate up to n MCQs. If llm_call is None -> deterministic placeholders.
     If llm_call provided -> use it for each chunk, validate JSON, and collect MCQs.
     """
+    concept_list = _normalize_concepts(
+        concepts,
+        max_concepts=5,
+    ) if concepts is not None else generate_concepts_from_context(
+        context_text,
+        max_concepts=5,
+        llm_call=llm_call,
+    )
+
     if llm_call is None:
         # deterministic placeholders for local dev/testing
         chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target) or [
@@ -241,7 +353,12 @@ def generate_mcq_from_context(context_text: str, n: int = 5,
                 "D": "The correct placeholder answer is this one."
             }
             out.append({"id": qid, "question": q, "choices": choices, "answer": "D", "explanation": "Placeholder explanation."})
-        return [{"id": it["id"], "question": it["question"], "choices": it["choices"], "answer": it["answer"]} for it in out]
+        cleaned = [{"id": it["id"], "question": it["question"], "choices": it["choices"], "answer": it["answer"]} for it in out]
+        for idx, itm in enumerate(cleaned):
+            concept = concept_list[idx % len(concept_list)]
+            itm["concept_id"] = concept["concept_id"]
+            itm["concept_label"] = concept["concept_label"]
+        return cleaned
 
     # Use LLM
     chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target)
@@ -354,6 +471,10 @@ def generate_mcq_from_context(context_text: str, n: int = 5,
         if q.get("explanation"):
             base["explanation"] = q["explanation"]
         cleaned.append(base)
+    for idx, itm in enumerate(cleaned):
+        concept = concept_list[idx % len(concept_list)]
+        itm["concept_id"] = concept["concept_id"]
+        itm["concept_label"] = concept["concept_label"]
     return cleaned
 
 

@@ -1,6 +1,6 @@
 # frontend/handlers.py
 import os
-import re
+import hashlib
 from typing import Optional, List, Dict, Any, Tuple
 import requests
 # backend imports (same as the original app.py used)
@@ -12,9 +12,18 @@ from backend.rag_query import (
     rag_answer_from_embeddings, rag_generate_summary_from_embeddings, rag_chat_answer,
 )
 from backend.generate_quiz import generate_quiz_from_context, generate_mcq_from_context
+from backend.concept_storage import load_concepts, save_concepts
+try:
+    from backend.concept_storage import load_concepts_with_meta as _load_concepts_with_meta
+except ImportError:
+    _load_concepts_with_meta = None
 from backend.study_srs import SRSManager, INTERVALS
 from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all_quiz_items
-from backend.confusion_store import record_quiz_result as _record_quiz_result, get_top_confusions as _get_top_confusions
+from backend.confusion_store import (
+    record_quiz_result as _record_quiz_result,
+    get_top_confusions as _get_top_confusions,
+    delete_confusion_entries as _delete_confusion_entries,
+)
 from backend.confusion_analysis import analyze_confusion
 # faiss builder (optional)
 try:
@@ -28,115 +37,10 @@ from frontend.ui_helpers import (
     call_query_api, call_summarize_api, call_chat_api
 )
 
-_PREFIX_PATTERNS = [
-    r"^\s*(?:q(?:uestion)?\s*\d*[:\-\.)]?|problem\s*\d*[:\-\.)]?|quiz\s*\d*[:\-\.)]?)\s*",
-    r"^\s*(?:which of the following|choose the correct answer|select the correct answer|select one|pick one)\s*[:\-]?\s*",
-    r"^\s*(?:true or false|t\/f)\s*[:\-]?\s*",
-    r"^\s*(?:according to (?:the )?(?:provided|given) text[,]?\s*)",
-]
-
-_CONCEPT_STOPWORDS = {
-    "the", "a", "an", "of", "in", "on", "to", "for", "and", "or", "by", "from", "with", "at", "as", "into"
-}
-
-def extract_concept_from_mcq_stem(question_text: str, max_words: int = 6) -> str:
-    """Extract a deterministic normalized concept label from an MCQ stem."""
-    text = " ".join((question_text or "").strip().split())
-    if not text:
-        return "Unknown concept"
-
-    cleaned = text
-    for pat in _PREFIX_PATTERNS:
-        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE)
-
-    # Remove obvious option-like suffixes from first option marker onward.
-    option_markers = [
-        r"\s+[A-Da-d][\)\.:]\s+",
-        r"\s+\([A-Da-d]\)\s+",
-        r"\s+1[\)\.:]\s+",
-        r"\s+\*\s+",
-    ]
-    cut = len(cleaned)
-    for marker in option_markers:
-        m = re.search(marker, cleaned)
-        if m:
-            cut = min(cut, m.start())
-    cleaned = cleaned[:cut].strip(" -:;,.?!")
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    # Remove common MCQ leading boilerplate that is not conceptual.
-    cleaned = re.sub(
-        r"^(?:according to (?:the )?(?:provided|given) text[,]?\s*)",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r"^(?:which of the following\s+)?(?:best\s+)?(?:describes?|explains?|represents?)\s+",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-
-    # Try to keep only the leading noun-phrase-ish part before helper clauses.
-    splitters = [" is ", " are ", " was ", " were ", " can ", " does ", " do ", " means ", " refers to "]
-    lowered = f" {cleaned.lower()} "
-    split_at = None
-    for token in splitters:
-        idx = lowered.find(token)
-        if idx > 0:
-            split_at = idx
-            break
-    if split_at:
-        cleaned = cleaned[:split_at].strip(" -:;,.?!")
-
-    # Convert question forms to a concise label.
-    cleaned = re.sub(r"^(what|which|why|how|when|where|who)\s+(is|are|was|were)\s+", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^(?:which of the following)\s+", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^(define|describe|explain|identify)\s+", "", cleaned, flags=re.IGNORECASE)
-    cleaned = cleaned.strip(" -:;,.?!")
-
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:;,.?!")
-
-    # Build a short noun-phrase-ish concept token sequence.
-    tokens = [t for t in re.findall(r"[A-Za-z0-9\-/']+", cleaned) if t]
-    if not tokens:
-        return "Unknown concept"
-
-    trimmed = []
-    for tok in tokens:
-        low = tok.lower()
-        if low in _CONCEPT_STOPWORDS and trimmed:
-            continue
-        trimmed.append(tok)
-        if len(trimmed) >= max_words:
-            break
-
-    concept = " ".join(trimmed).strip(" -:;,.?!")
-    if len(concept) < 3:
-        return "Unknown concept"
-    return concept
-
-
-def derive_concept_from_mcq_stems(stems: List[str]) -> str:
-    """Derive a stable concept from one or more related MCQ stems."""
-    normalized = []
-    for stem in stems or []:
-        c = extract_concept_from_mcq_stem(stem or "")
-        if c and c != "Unknown concept":
-            normalized.append(c)
-    if not normalized:
-        return "Unknown concept"
-
-    freq: Dict[str, int] = {}
-    for c in normalized:
-        k = c.lower()
-        freq[k] = freq.get(k, 0) + 1
-    best_key = sorted(freq.items(), key=lambda kv: (-kv[1], len(kv[0])))[0][0]
-    for c in normalized:
-        if c.lower() == best_key:
-            return c
-    return normalized[0]
-
+try:
+    from backend.generate_quiz import generate_concepts_from_context as _generate_concepts_from_context
+except ImportError:
+    _generate_concepts_from_context = None
 
 def init_llm():
     """Return callable llm if available (same behavior as original app.py)"""
@@ -321,19 +225,33 @@ def perform_chat(
 
 
 
-def record_quiz_result(qid: str, question: str, is_correct: bool, stem: str = "") -> None:
+def record_quiz_result(
+    qid: str,
+    question: str,
+    is_correct: bool,
+    stem: str = "",
+    question_item: Optional[Dict[str, Any]] = None,
+    doc_id: str = "",
+) -> None:
     """
     Frontend-callable wrapper to persist a quiz result.
     Non-blocking: logs but doesn't raise in the UI path.
     """
     try:
-        concept = extract_concept_from_mcq_stem(question or "")
+        concept_label = ""
+        concept_id = ""
+        if isinstance(question_item, dict):
+            concept_label = (question_item.get("concept_label") or "").strip()
+            concept_id = (question_item.get("concept_id") or "").strip()
         _record_quiz_result(
             qid=qid,
             question=question or "",
             is_correct=bool(is_correct),
             stem=stem or "",
-            concept=concept,
+            concept=concept_label,
+            concept_label=concept_label,
+            concept_id=concept_id,
+            doc_id=doc_id or "",
         )
     except Exception as e:
         # Keep UI stable; log to console
@@ -348,12 +266,21 @@ def load_persisted_confusions(limit: int = 10):
         return []
 
 
+def delete_confusion_entries(keys: List[str]) -> int:
+    try:
+        return int(_delete_confusion_entries(keys or []))
+    except Exception as e:
+        print(f"[confusion_store] failed to delete confusions: {e}")
+        return 0
+
+
 def perform_confusion_analysis(
     history: Optional[List[Dict[str, str]]] = None,
     quiz_submissions: Optional[List[Dict[str, Any]]] = None,
     retrieved_chunks: Optional[List[Dict[str, Any]]] = None,
     top_n: int = 5,
     stem: str = "",
+    doc_id: str = "",
     llm_call = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -373,6 +300,12 @@ def perform_confusion_analysis(
         print(f"[confusion_analysis] failed to load persisted confusions: {e}")
         persisted = []
 
+    # Debugging: surface counts to help diagnose missing entries during UI tests
+    try:
+        print(f"[confusion_analysis] loaded_persisted={len(persisted)} top_n={top_n} stem='{stem}' doc_id='{doc_id}'")
+    except Exception:
+        pass
+
     # Filter to only real confusion items from quizzes (wrong_count > 0)
     real = []
     for p in persisted:
@@ -386,16 +319,33 @@ def perform_confusion_analysis(
 
         qid = p.get("qid") or ""
         entry_stem = (p.get("stem") or "").strip()
+        entry_doc_id = (p.get("doc_id") or "").strip()
+        if doc_id:
+            # When doc_id is available, prefer entries that have the same doc id.
+            # But do NOT exclude entries that lack a doc_id (backwards compatibility
+            # with older records). Only skip when an entry has a doc_id and it
+            # doesn't match the current lecture.
+            if entry_doc_id and entry_doc_id != doc_id:
+                continue
         if stem:
             matches = False
-            if entry_stem and entry_stem == stem:
+            s = (stem or "").strip()
+            s_alt = s.replace(" ", "_")
+            # exact stem match
+            if entry_stem and (entry_stem == s or entry_stem == s_alt):
                 matches = True
-            elif qid and qid.startswith(f"{stem}_"):
+            # qid prefix match using either space or underscore variants
+            elif qid and (qid.startswith(f"{s}_") or qid.startswith(f"{s_alt}_")):
                 matches = True
             if not matches:
                 continue
         qtext = (p.get("question") or "").strip()
-        concept = (p.get("concept") or "").strip() or extract_concept_from_mcq_stem(qtext or qid or "")
+        concept_id = (p.get("concept_id") or "").strip()
+        concept_label = (p.get("concept_label") or p.get("concept") or "").strip()
+        if concept_label.lower() == "unknown concept":
+            concept_label = ""
+        has_concept = bool(concept_id or concept_label)
+        display_concept = concept_label if concept_label else ""
 
         status = "confused" if wrong_count > 1 else "shaky"
         reason = f"Persisted incorrect answers (count={wrong_count})"
@@ -403,7 +353,11 @@ def perform_confusion_analysis(
         evidence = [{"type": "quiz", "qid": qid, "question": qtext, "meta": p}]
 
         real.append({
-            "concept": concept,
+            "concept_id": concept_id,
+            "concept_label": concept_label,
+            "concept": display_concept,
+            "concept_unlabeled": (not has_concept),
+            "store_key": (p.get("store_key") or ""),
             "original_question": qtext,
             "status": status,
             "reason": reason,
@@ -411,30 +365,43 @@ def perform_confusion_analysis(
             "signal_strength": wrong_count,
         })
 
-    # Group by normalized concept to allow one concept from multiple MCQ stems.
+    # Group strictly by concept_id for deterministic grouping.
     grouped: Dict[str, Dict[str, Any]] = {}
     for item in real:
         evidence = item.get("evidence", []) or []
-        stems_for_concept = [e.get("question", "") for e in evidence if e.get("question")]
-        stems_for_concept.append(item.get("original_question", "") or "")
-        concept = derive_concept_from_mcq_stems(stems_for_concept)
-        group_key = concept.lower()
+        group_key = str(item.get("concept_id") or "").strip()
+        if not group_key:
+            group_key = (item.get("store_key") or "").strip() or (item.get("original_question") or "").strip()
+            if group_key:
+                group_key = f"qid:{group_key}"
+            else:
+                group_key = f"idx:{len(grouped)}"
+        display_concept = (item.get("concept_label") or item.get("concept") or "").strip()
         if group_key not in grouped:
             grouped[group_key] = {
                 **item,
-                "concept": concept,
+                "concept": display_concept,
                 "signal_strength": int(item.get("signal_strength", 0)),
                 "evidence": list(evidence),
             }
         else:
             grouped[group_key]["signal_strength"] += int(item.get("signal_strength", 0))
             grouped[group_key]["evidence"] = (grouped[group_key].get("evidence", []) or []) + list(evidence)
+            if not grouped[group_key].get("concept") and display_concept:
+                grouped[group_key]["concept"] = display_concept
+            if not grouped[group_key].get("concept_label") and item.get("concept_label"):
+                grouped[group_key]["concept_label"] = item.get("concept_label")
 
     # Sort by signal_strength (wrong_count) desc
     try:
         real_sorted = sorted(grouped.values(), key=lambda r: -int(r.get("signal_strength", 0)))
     except Exception:
         real_sorted = list(grouped.values())
+
+    try:
+        print(f"[confusion_analysis] filtered_real={len(real)} grouped={len(grouped)} returning={len(real_sorted[:int(top_n or 5)])}")
+    except Exception:
+        pass
 
     # Enforce UI cap: at most top_n (recommended 3-5; callers may pass 5)
     return real_sorted[:int(top_n or 5)]
@@ -451,6 +418,26 @@ def generate_quiz(
     llm_call = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[float]]:
     """Generate MCQ quiz items. Returns (quiz_items, latency)"""
+    def _ensure_concept_fields(items: List[Dict[str, Any]]):
+        if not items:
+            return
+        concept_label = ""
+        concept_id = ""
+        for itm in items:
+            if not concept_label:
+                concept_label = (itm.get("concept_label") or "").strip()
+            if not concept_id:
+                concept_id = (itm.get("concept_id") or "").strip()
+        if not concept_label and not concept_id:
+            return
+        for itm in items:
+            if not (itm.get("concept_label") or "").strip():
+                if concept_label:
+                    itm["concept_label"] = concept_label
+            if not (itm.get("concept_id") or "").strip():
+                if concept_id:
+                    itm["concept_id"] = concept_id
+
     api_base = api_base or os.getenv("API_BASE", "http://localhost:8000")
     if use_api_mode:
         url = f"{api_base.rstrip('/')}/generate_quiz_live"
@@ -467,9 +454,30 @@ def generate_quiz(
         for itm in quiz_items:
             if "id" in itm and not str(itm["id"]).startswith(f"{stem}_"):
                 itm["id"] = f"{stem}_{itm['id']}"
+        _ensure_concept_fields(quiz_items)
         return quiz_items, latency
     else:
-        quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call)
+        doc_id = hashlib.sha1((context_text or "").encode("utf-8")).hexdigest()[:12]
+        meta = _load_concepts_with_meta(stem) if _load_concepts_with_meta else None
+        concepts = []
+        if meta and isinstance(meta, dict):
+            concepts = meta.get("concepts") or []
+            meta_doc_id = (meta.get("doc_id") or "").strip()
+            if not meta_doc_id or meta_doc_id != doc_id:
+                concepts = []
+        if not concepts:
+            if _generate_concepts_from_context is None:
+                concepts = []
+            else:
+                concepts = _generate_concepts_from_context(context_text, max_concepts=5, llm_call=llm_call)
+            try:
+                save_concepts(stem, concepts, doc_id=doc_id)
+            except Exception:
+                pass
+        try:
+            quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call, concepts=concepts)
+        except TypeError:
+            quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call)
         # prefix IDs to match expected pattern and ensure uniqueness
         for idx, itm in enumerate(quiz_items, start=1):
             if "id" in itm:
@@ -477,6 +485,7 @@ def generate_quiz(
                     itm["id"] = f"{stem}_{itm['id']}"
             else:
                 itm["id"] = f"{stem}_q{idx}"
+        _ensure_concept_fields(quiz_items)
         return quiz_items, None
 
 

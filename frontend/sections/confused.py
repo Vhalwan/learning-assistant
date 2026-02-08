@@ -16,7 +16,7 @@ from typing import Any
 import streamlit as st
 
 # handlers and backend helpers (same as in app.py)
-from frontend.handlers import perform_confusion_analysis, perform_query
+from frontend.handlers import perform_confusion_analysis, perform_query, delete_confusion_entries
 from backend.study_srs import SRSManager
 
 
@@ -51,6 +51,8 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     # session/state keys that were used inline in app.py
     hist_key = f"chat_history_{stem}"
     quiz_state_key = f"quiz_items_{stem}"
+    doc_id_key = f"doc_id_{stem}"
+    doc_id = st.session_state.get(doc_id_key, "")
 
     st.markdown('<a id="confused-quick-prioritized-list"></a>', unsafe_allow_html=True)
     st.markdown("## 🤝 Confused? Coaching list")
@@ -81,6 +83,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
             retrieved_chunks=[],
             top_n=top_limit,
             stem=stem,
+            doc_id=doc_id,
             llm_call=llm,
         ) or []
     except Exception as e:
@@ -92,16 +95,34 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     real_confusions = [r for r in results if int(r.get("signal_strength", 0)) > 0]
     merged = {}
     for r in real_confusions:
-        key = re.sub(r"[^a-z0-9 ]+", "", (r.get("concept", "") or "").lower())
-        key = " ".join(key.split())
-        if not key:
-            key = r.get("concept", "")
+        concept_id = (r.get("concept_id") or "").strip()
+        concept_label = (r.get("concept_label") or r.get("concept") or "").strip()
+        if r.get("concept_unlabeled"):
+            concept_label = ""
+        if concept_id:
+            key = f"id:{concept_id}"
+        else:
+            label_key = re.sub(r"[^a-z0-9 ]+", "", concept_label.lower())
+            label_key = " ".join(label_key.split())
+            if label_key:
+                key = f"label:{label_key}"
+            else:
+                evidence = r.get("evidence", []) or []
+                first = evidence[0] if evidence else {}
+                meta = first.get("meta", {}) or {}
+                qid = meta.get("qid") or first.get("qid") or ""
+                key = f"qid:{qid}" if qid else f"idx:{len(merged)}"
         if key not in merged:
             merged[key] = r
         else:
             merged[key]["signal_strength"] = int(merged[key].get("signal_strength", 0)) + int(r.get("signal_strength", 0))
             merged[key]["evidence"] = (merged[key].get("evidence", []) or []) + (r.get("evidence", []) or [])
+            if not merged[key].get("concept_label") and concept_label:
+                merged[key]["concept_label"] = concept_label
+            if not merged[key].get("concept_id") and concept_id:
+                merged[key]["concept_id"] = concept_id
     real_confusions = list(merged.values())
+    real_confusions.sort(key=lambda r: -int(r.get("signal_strength", 0)))
 
     # When empty, show one calm line only (no cards/icons)
     if not real_confusions:
@@ -111,14 +132,22 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
         for idx, item in enumerate(real_confusions[:preview_limit], start=1):
             with st.container():
                 st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
-                concept = item.get("concept", "(no concept)")
+                concept = item.get("concept_label") or item.get("concept") or ""
+                if not concept:
+                    first_evidence = (item.get("evidence") or [{}])[0]
+                    meta = first_evidence.get("meta", {}) or {}
+                    qid = meta.get("qid") or first_evidence.get("qid") or ""
+                    if qid:
+                        concept = f"Unlabeled concept ({qid})"
+                    else:
+                        concept = "Unlabeled concept"
                 strength = int(item.get("signal_strength", 0))
                 st.markdown(f"**{idx}. {concept}** — this concept is worth reviewing.")
                 st.markdown(f"### 🤔 Confused Card {idx}: {concept}")
                 st.markdown("**Concept**")
                 st.write(concept)
                 st.markdown(f"**Progress / Review stats**")
-                st.write(f"📊 Review signal: {strength}")
+                st.write(f"📊 Confusion signals: {strength}")
                 if item.get("reason"):
                     st.caption(item.get("reason"))
                 st.info("You can quickly reinforce this with a simple explanation or move it into SRS.")
@@ -171,7 +200,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 qtext = (meta.get("question") or e.get("question") or "")[:400]
                                 if qid and qid != "<no-id>" and qtext:
                                     evidence_quiz_rows.append({"qid": str(qid), "question": qtext})
-                                ctext = meta.get("concept") or ""
+                                ctext = meta.get("concept_label") or meta.get("concept") or ""
                                 if ctext:
                                     st.write(f"- Quiz: id={qid} — concept: {ctext}")
                                 if qtext:
@@ -179,8 +208,24 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             else:
                                 st.write(f"- {str(e)[:400]}")
 
+                delete_keys = []
+                for e in evidence:
+                    meta = e.get("meta", {}) or {}
+                    store_key = (meta.get("store_key") or "").strip()
+                    if not store_key:
+                        qid = meta.get("qid") or e.get("qid")
+                        if qid:
+                            store_key = str(qid).strip()
+                        else:
+                            qtext = meta.get("question") or e.get("question") or ""
+                            if qtext:
+                                store_key = qtext[:120]
+                    if store_key:
+                        delete_keys.append(store_key)
+                delete_keys = sorted(set(delete_keys))
+
                 # Centralized action input resolution for this card
-                extracted_concept = item.get("concept", "") or concept
+                extracted_concept = item.get("concept_label") or item.get("concept") or concept
                 deterministic_fallback_id = _deterministic_confusion_id(stem, extracted_concept)
 
                 selected_qid = selected_mcq.get("id")
@@ -188,7 +233,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                 with st.container():
                     st.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
-                    action_cols = st.columns(3)
+                    action_cols = st.columns(4)
                     with action_cols[0]:
                         # Explain simply (kept — student-first)
                         explain_btn_key = f"conf_explain_{stem}_{idx}"
@@ -230,14 +275,12 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                         follow_key = f"conf_follow_{stem}_{idx}"
                         if st.button("Follow up", key=follow_key):
                             follow_prompt = (
-                                "I'm reviewing this concept and I'm confused. Please teach it clearly.\n\n"
                                 f"Concept: {extracted_concept}\n"
-                                "Use the quiz misses only as evidence. "
-                                "Start with a plain-language explanation, then give one intuitive example, "
-                                "and finally ask me one short check question to test my understanding."
+                                "The user struggled with this concept in recent quizzes. Explain it clearly, give simple examples, and highlight key points that might cause confusion."
                             )
-                            st.session_state[f"chat_input_{stem}"] = follow_prompt
-                            st.success("Loaded a follow-up prompt into Chat input. Open Chat to review/edit it, then press Send.")
+                            st.session_state[f"chat_pending_input_{stem}"] = follow_prompt
+                            st.success("✓ Loaded! Check the Chat section above.")
+                            st.rerun()
                     with action_cols[2]:
                         # ➕ Add to SRS (idempotent)
                         add_srs_key = f"conf_add_srs_{stem}_{idx}"
@@ -270,4 +313,19 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             except Exception as e:
                                 st.error("Failed to add to SRS.")
                                 st.exception(e)
+                    with action_cols[3]:
+                        delete_key = f"conf_delete_{stem}_{idx}"
+                        if st.button("Delete card", key=delete_key):
+                            if not delete_keys:
+                                st.warning("No persisted entries found to delete.")
+                            else:
+                                removed = delete_confusion_entries(delete_keys)
+                                st.success(f"Deleted {removed} confusion item(s).")
+                                try:
+                                    st.rerun()
+                                except Exception:
+                                    try:
+                                        st.experimental_rerun()
+                                    except Exception:
+                                        pass
     st.markdown("---")
