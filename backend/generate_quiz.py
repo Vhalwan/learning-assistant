@@ -267,6 +267,12 @@ You are an expert quiz writer. Produce ONE high-quality multiple-choice question
 a learner's understanding of the provided paragraph. Return JSON ONLY (no extra text).
 JSON must be an object with keys: id, question, choices (A-D), answer (A-D), explanation.
 
+IMPORTANT INSTRUCTIONS:
+- The correct answer (A, B, C, or D) must be RANDOMLY PLACED across different positions.
+- Do NOT bias toward C, B, or any particular letter.
+- Ensure all four options are plausible but only one is correct.
+- Make distractors (wrong answers) clearly distinct from each other to test understanding.
+
 Paragraph:
 \"\"\"{paragraph}\"\"\"
 """
