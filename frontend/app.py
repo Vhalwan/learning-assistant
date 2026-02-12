@@ -51,20 +51,25 @@ from frontend.handlers import (
     perform_confusion_analysis,
     record_quiz_result,
 )
-
-
+st.set_page_config(
+    page_title="Learning Assistant",
+    layout="centered",
+    initial_sidebar_state="expanded"
+)
+st.markdown("""
+<style>
+header[data-testid="stHeader"] {
+    height: 0px;
+}
+</style>
+""", unsafe_allow_html=True)
 # Backend helpers (unchanged)
 from backend.create_embeddings import EMBED_DIM, create_embeddings_for_text, load_embeddings
 from backend.vectorstore.faiss_store import build_faiss_index  # optional; handlers uses it too
 from backend.generate_quiz import generate_mcq_from_context
 from backend.study_srs import SRSManager, INTERVALS
 from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all_quiz_items
-hide_deploy_bar = """
-    <style>
-    header[data-testid="stHeader"] {display: none;}  /* Hides the top Deploy bar */
-    </style>
-"""
-st.markdown(hide_deploy_bar, unsafe_allow_html=True)
+
 # initialize LLM (this mirrors existing behaviour)
 llm = init_llm()
 # We avoid calling st.* until after set_page_config — but keep same behavior messages
@@ -81,9 +86,6 @@ try:
     _faiss_builder_available = True
 except Exception:
     _faiss_builder_available = False
-
-st.set_page_config(page_title="Learning Assistant", layout="centered")
-
 st.markdown(
     """
     <style>
@@ -96,21 +98,14 @@ st.markdown(
         --error-bg: #fef2f2;
         --warning-bg: #fff7ed;
       }
+
+      /* Keep main content spacing */
       div.block-container {
         padding-top: 1.5rem;
         padding-bottom: 3rem;
       }
-      section[data-testid="stSidebar"] {
-        position: fixed;
-        top: 0;
-        left: 0;
-        height: 100%;
-        border-right: 1px solid #e5e7eb;
-        background: #fbfbfd;
-      }
-      section[data-testid="stSidebar"] > div {
-        padding-top: 1.5rem;
-      }
+
+      /* Typography and headings */
       h1, h2, h3, h4 {
         color: #111827;
       }
@@ -118,6 +113,8 @@ st.markdown(
         border-left: 4px solid var(--accent);
         padding-left: 0.5rem;
       }
+
+      /* Metric / alert visuals */
       div[data-testid="stMetric"] {
         background: var(--accent-soft);
         padding: 0.75rem;
@@ -139,6 +136,9 @@ st.markdown(
       div[data-testid="stAlert"][data-alert-type="warning"] {
         background: var(--warning-bg);
       }
+
+      /* Card-like blocks (non-invasive selectors) */
+      div[data-testid="stVerticalBlock"] > div.la-card,
       div[data-testid="stVerticalBlock"]:has(> div.la-card) {
         background: var(--card-bg);
         border: 1px solid var(--card-border);
@@ -160,6 +160,8 @@ st.markdown(
       div.la-action-bar {
         display: none;
       }
+
+      /* App header visuals */
       .app-header {
         display: flex;
         align-items: center;
@@ -191,6 +193,8 @@ st.markdown(
         font-size: 0.95rem;
         opacity: 0.9;
       }
+
+      /* Sticky bottom form area (keeps chat input visible) */
       div[data-testid="stForm"] {
         position: sticky;
         bottom: 0;
@@ -203,10 +207,15 @@ st.markdown(
         height: 12px;
         background: linear-gradient(to bottom, rgba(255,255,255,0.95), rgba(255,255,255,0));
       }
+
+      /* NOTE: intentionally do NOT target section[data-testid="stSidebar"]
+         or the toggle button. Modifying those breaks Streamlit's internal
+         layout/toggle logic. */
     </style>
     """,
     unsafe_allow_html=True,
 )
+
 
 st.markdown(
     """
@@ -389,6 +398,12 @@ if uploaded:
         ]
     )
 
+    # Hidden defaults: keep top-k fixed for QA and Chat (3), and summary default 0
+    if "qa_k" not in st.session_state:
+        st.session_state["qa_k"] = 3
+    if "summary_top_k" not in st.session_state:
+        st.session_state["summary_top_k"] = 0
+
     # -------------------
     # Tab: Ask a Question
     # -------------------
@@ -398,8 +413,8 @@ if uploaded:
         qa_col1, qa_col2 = st.columns([4, 1])
         with qa_col1:
             question = st.text_input("Your question (based on uploaded lecture)", key="qa_question")
-        with qa_col2:
-            k = st.number_input("Top-k chunks to retrieve", min_value=1, max_value=10, value=3, step=1, key="qa_k")
+        # hide top-k input from users; keep value in session_state
+        k = st.session_state.get("qa_k", 3)
 
         if st.button("Ask (RAG)"):
             if len(ids) == 0:
@@ -495,8 +510,8 @@ if uploaded:
         s_col1, s_col2 = st.columns([2, 1])
         with s_col1:
             summary_type = st.selectbox("Summary detail level", ["brief", "detailed"], index=0)
-        with s_col2:
-            summary_top_k = st.number_input("Limit to first N chunks (0 = all)", min_value=0, max_value=10000, value=0, step=1)
+        # hide explicit summary chunk limit from users; compute automatically for large docs
+        summary_top_k = st.session_state.get("summary_top_k", 0)
 
         if st.button("Generate Summary"):
             if len(ids) == 0:
@@ -505,11 +520,27 @@ if uploaded:
                 candidate_index_path = str(index_path) if index_path.exists() else None
                 with st.spinner("Generating summary..."):
                     try:
+                        # determine effective top_k for summarization: usually all (None),
+                        # but for very large documents use a limited number of chunks silently
+                        effective_top_k = None
+                        try:
+                            num_chunks = int(len(ids))
+                        except Exception:
+                            num_chunks = 0
+                        if summary_top_k and int(summary_top_k) > 0:
+                            effective_top_k = int(summary_top_k)
+                        else:
+                            # automatic heuristic: if many chunks, restrict to a fraction
+                            if num_chunks > 300:
+                                effective_top_k = min(500, max(200, int(num_chunks * 0.25)))
+                            else:
+                                effective_top_k = None
+
                         if st.session_state.use_api_mode:
                             resp = perform_summary(
                                 embeddings_path=str(embeddings_path),
                                 summary_type=summary_type,
-                                top_k=(int(summary_top_k) if summary_top_k > 0 else None),
+                                top_k=effective_top_k,
                                 use_api_mode=True,
                                 api_base=os.getenv("API_BASE", API_DEFAULT),
                                 token=st.session_state.api_token or "",
@@ -518,7 +549,7 @@ if uploaded:
                             resp = perform_summary(
                                 embeddings_path=str(embeddings_path),
                                 summary_type=summary_type,
-                                top_k=(int(summary_top_k) if summary_top_k > 0 else None),
+                                top_k=effective_top_k,
                                 use_api_mode=False,
                                 llm_call=None,
                             )

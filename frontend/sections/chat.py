@@ -64,18 +64,14 @@ def render(st: Any, stem: str, llm):
         turn_quiz = st.checkbox("Turn this into a quiz question", key=f"chat_mod_quiz_{stem}")
 
     # --------------------------
-    # Top controls: k, save, history buttons, clear
-    # (visual layout improved but keys & behavior preserved)
+    # Top controls: save, history buttons, clear
+    # NOTE: keep top-k internal/default but hide input from users
+    # (preserve behavior but do not show the number input)
     # --------------------------
-    chat_k = st.number_input(
-        "Top-k chunks to retrieve for each turn",
-        min_value=1,
-        max_value=10,
-        value=3,
-        step=1,
-        key=f"chat_k_{stem}",
-        help="How many retrieved chunks to use when composing each assistant reply.",
-    )
+    chat_k_key = f"chat_k_{stem}"
+    if chat_k_key not in st.session_state:
+        st.session_state[chat_k_key] = 3
+    chat_k = st.session_state[chat_k_key]
 
     save_title_key = f"save_title_{stem}"
     st.text_input("Save conversation as (optional)", key=save_title_key, placeholder="Title (optional)")
