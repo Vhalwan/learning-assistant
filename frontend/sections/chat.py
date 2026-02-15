@@ -11,8 +11,9 @@ This file preserves all logic, call signatures, and session_state keys exactly.
 
 import os
 import uuid
+import re
 from pathlib import Path
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Tuple
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -26,6 +27,98 @@ from frontend.ui_helpers import (
 )
 
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
+
+# --------------------------
+# Quiz helpers (chat mode)
+# --------------------------
+_QUESTION_PREFIXES = ("q:", "question:", "new question:", "ask:")
+_ANSWER_PREFIXES = ("a:", "answer:", "ans:")
+_QUESTION_STARTERS = (
+    "what", "why", "how", "when", "where", "who", "which",
+    "explain", "define", "describe", "tell me", "give me", "list",
+    "compare", "contrast",
+)
+
+
+def _strip_inline_instructions(text: str) -> str:
+    """Remove auto-appended Instructions block from stored user messages."""
+    if not text:
+        return ""
+    parts = str(text).split("\n\nInstructions:", 1)
+    return parts[0].strip()
+
+
+def _normalize_user_msg(text: str) -> Tuple[str, str]:
+    """Return (clean_text, mode) where mode is 'question', 'answer', or 'unknown'."""
+    raw = (text or "").strip()
+    low = raw.lower()
+    for p in _QUESTION_PREFIXES:
+        if low.startswith(p):
+            return raw[len(p):].lstrip(), "question"
+    for p in _ANSWER_PREFIXES:
+        if low.startswith(p):
+            return raw[len(p):].lstrip(), "answer"
+    return raw, "unknown"
+
+
+def _looks_like_question(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if "?" in t:
+        return True
+    low = t.lower()
+    for starter in _QUESTION_STARTERS:
+        if low.startswith(starter + " ") or low == starter:
+            return True
+    return False
+
+
+def _extract_last_question(text: str) -> str:
+    """Return the last question (ending with '?') if present; otherwise empty string."""
+    if not text:
+        return ""
+    idx = text.rfind("?")
+    if idx < 0:
+        return ""
+    # Find a sensible start boundary
+    start = max(text.rfind("\n", 0, idx), text.rfind(".", 0, idx), text.rfind("!", 0, idx))
+    start = 0 if start < 0 else start + 1
+    q = text[start:idx + 1].strip()
+    q = re.sub(r"^(quiz|question|q)\s*[:\-]\s*", "", q, flags=re.IGNORECASE)
+    # Require a minimal length to avoid capturing stray '?'
+    if len(q.split()) < 3:
+        return ""
+    if not q.endswith("?"):
+        q = q + "?"
+    return q
+
+
+def _fallback_quiz_question(retrieved: List[Dict[str, Any]]) -> str:
+    """Heuristic fallback to ensure a quiz question exists when the model omits one."""
+    if not retrieved:
+        return "What is one key idea discussed in the lecture?"
+    text = (retrieved[0].get("text") or "").strip()
+    if not text:
+        return "What is one key idea discussed in the lecture?"
+    # Take the first sentence as a seed
+    first = re.split(r"(?<=[.!?])\s+", text)[0].strip()
+    if not first:
+        return "What is one key idea discussed in the lecture?"
+    # Pattern: "X stands for Y" -> "What does X stand for?"
+    m = re.match(r"(.+?)\s+stands\s+for\s+.+", first, flags=re.IGNORECASE)
+    if m:
+        subj = m.group(1).strip()
+        if subj:
+            return f"What does {subj} stand for?"
+    # Pattern: "X is/are Y" -> "What is/are X?"
+    m = re.match(r"(.+?)\s+(is|are)\s+.+", first, flags=re.IGNORECASE)
+    if m:
+        subj = m.group(1).strip()
+        verb = m.group(2).lower()
+        if subj and len(subj.split()) <= 8:
+            return f"What {verb} {subj}?"
+    return "What is one key idea discussed in the lecture?"
 
 
 def render(st: Any, stem: str, llm):
@@ -55,13 +148,20 @@ def render(st: Any, stem: str, llm):
         st.session_state[history_toggle_key] = False
 
     st.subheader("💬 Chat with the lecture (conversational)")
+
+    # Apply any pending modifier reset BEFORE widgets are instantiated
+    mod_reset_key = f"chat_mod_reset_{stem}"
+    if st.session_state.pop(mod_reset_key, False):
+        st.session_state[f"chat_mod_new_{stem}"] = False
+        st.session_state[f"chat_mod_example_{stem}"] = False
+        st.session_state[f"chat_mod_quiz_{stem}"] = False
     mod_cols = st.columns(3)
     with mod_cols[0]:
         explain_new = st.checkbox("Explain like I'm new to this", key=f"chat_mod_new_{stem}")
     with mod_cols[1]:
         include_example = st.checkbox("Give me an example", key=f"chat_mod_example_{stem}")
     with mod_cols[2]:
-        turn_quiz = st.checkbox("Turn this into a quiz question", key=f"chat_mod_quiz_{stem}")
+        turn_quiz = st.checkbox("Add knowledge check", key=f"chat_mod_quiz_{stem}")
 
     # --------------------------
     # Top controls: save, history buttons, clear
@@ -176,9 +276,17 @@ def render(st: Any, stem: str, llm):
     # Check for pending input from Confused section
     pending_input_key = f"chat_pending_input_{stem}"
     pending_input = st.session_state.pop(pending_input_key, None)
+    pending_loaded = False
     if pending_input:
         st.session_state[f"chat_input_{stem}"] = pending_input
+        st.session_state[f"chat_force_question_{stem}"] = True
+        pending_loaded = True
         st.success("✅ Follow-up prompt loaded! Edit and send below.")
+
+    # Clear input on next run after a successful send (but don't override pending prompts)
+    clear_input_key = f"chat_clear_input_{stem}"
+    if st.session_state.pop(clear_input_key, False) and not pending_loaded:
+        st.session_state[f"chat_input_{stem}"] = ""
 
     # Input form (clear_on_submit=True so Streamlit clears the input automatically)
     with st.form(key=f"chat_form_{stem}", clear_on_submit=True):
@@ -200,15 +308,62 @@ def render(st: Any, stem: str, llm):
             elif not user_msg or not user_msg.strip():
                 st.warning("Please enter a message.")
             else:
-                payload_history = [{"role": h.get("role"), "content": h.get("content")} for h in st.session_state.get(hist_key, [])]
+                pending_quiz_key = f"chat_pending_quiz_{stem}"
+                pending_quiz = st.session_state.get(pending_quiz_key)
+                pending_question = ""
+                if isinstance(pending_quiz, dict):
+                    pending_question = str(pending_quiz.get("question") or "").strip()
+                elif isinstance(pending_quiz, str):
+                    pending_question = pending_quiz.strip()
+
+                user_msg_clean, msg_mode = _normalize_user_msg(user_msg)
+                force_question = msg_mode == "question"
+                force_answer = msg_mode == "answer"
+                force_flag_key = f"chat_force_question_{stem}"
+                force_flag = bool(st.session_state.pop(force_flag_key, False))
+                if force_flag and not force_answer:
+                    force_question = True
+                looks_question = _looks_like_question(user_msg_clean)
+
+                # Decide if this user message should be treated as a quiz answer
+                answer_mode = False
+                if pending_question and not force_question and (force_answer or not looks_question):
+                    answer_mode = True
+                else:
+                    # user asked a new question; clear any pending quiz
+                    if pending_question:
+                        st.session_state[pending_quiz_key] = None
+
+                # Clean history before sending to model (remove auto-appended instructions)
+                payload_history = []
+                for h in st.session_state.get(hist_key, []) or []:
+                    role = h.get("role")
+                    content = h.get("content", "") or ""
+                    if role and str(role).lower().startswith("user"):
+                        content = _strip_inline_instructions(content)
+                    payload_history.append({"role": role, "content": content})
+
                 modifiers = []
                 if explain_new:
                     modifiers.append("Explain as if the learner is new to the topic.")
                 if include_example:
                     modifiers.append("Include one concrete example.")
                 if turn_quiz:
-                    modifiers.append("End with one quiz question.")
-                prompt_question = user_msg.strip()
+                    modifiers.append("End with one quiz question (single sentence ending with '?'). Do not add any text after the question.")
+
+                if answer_mode:
+                    # Evaluate the user's answer against the prior quiz question
+                    prompt_question = (
+                        "You are grading a student's answer to a quiz question about the lecture. "
+                        "Use ONLY the provided context.\n\n"
+                        f"Quiz question:\n{pending_question}\n\n"
+                        f"Student answer:\n{user_msg_clean}\n\n"
+                        "Provide a brief verdict (Correct/Partially correct/Incorrect) and a short explanation. "
+                        "If incorrect or incomplete, state the correct answer succinctly."
+                    )
+                else:
+                    prompt_question = user_msg_clean
+
                 if modifiers:
                     prompt_question = f"{prompt_question}\n\nInstructions: " + " ".join(modifiers)
                 candidate_index_path = str(index_path) if index_path.exists() else None
@@ -250,6 +405,20 @@ def render(st: Any, stem: str, llm):
                         provenance = resp.get("provenance")
                         display_answer = strip_key_concepts_from_answer(ans or "")
 
+                        # Ensure a quiz question exists if requested (fallback if missing)
+                        quiz_question = ""
+                        if turn_quiz:
+                            quiz_question = _extract_last_question(display_answer)
+                            if not quiz_question:
+                                fallback_q = _fallback_quiz_question(retrieved)
+                                if fallback_q:
+                                    display_answer = display_answer.strip()
+                                    if display_answer:
+                                        display_answer = f"{display_answer}\n\n{fallback_q}"
+                                    else:
+                                        display_answer = fallback_q
+                                    quiz_question = _extract_last_question(display_answer) or fallback_q
+
                         # prefer backend-provided updated history; otherwise append user+assistant
                         if updated_history:
                             new_hist: List[Dict[str, str]] = []
@@ -259,11 +428,20 @@ def render(st: Any, stem: str, llm):
                                 if role and role.lower().startswith("assistant"):
                                     content = strip_key_concepts_from_answer(content_raw)
                                 else:
-                                    content = content_raw
+                                    content = _strip_inline_instructions(content_raw)
                                 new_hist.append({"role": role, "content": content})
+                            # Replace last user/assistant messages with clean versions for display
+                            for i in range(len(new_hist) - 1, -1, -1):
+                                if (new_hist[i].get("role") or "").lower().startswith("user"):
+                                    new_hist[i]["content"] = user_msg_clean
+                                    break
+                            for i in range(len(new_hist) - 1, -1, -1):
+                                if (new_hist[i].get("role") or "").lower().startswith("assistant"):
+                                    new_hist[i]["content"] = display_answer
+                                    break
                             st.session_state[hist_key] = trim_history_to_max_turns(new_hist, max_turns=60)
                         else:
-                            st.session_state[hist_key].append({"role": "user", "content": user_msg})
+                            st.session_state[hist_key].append({"role": "user", "content": user_msg_clean})
                             st.session_state[hist_key].append({
                                 "role": "assistant",
                                 "content": display_answer,
@@ -271,7 +449,25 @@ def render(st: Any, stem: str, llm):
                             })
                             st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
 
+                        # Reset modifiers + clear input on next run to avoid widget state errors
+                        st.session_state[mod_reset_key] = True
+                        st.session_state[clear_input_key] = True
+
+                        # Track pending quiz question for next turn
+                        if turn_quiz and quiz_question:
+                            st.session_state[pending_quiz_key] = {"question": quiz_question}
+                        else:
+                            st.session_state[pending_quiz_key] = None
+
                         st.success("Assistant replied — chat updated.")
+                        # Rerun so checkbox/input resets take effect immediately
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
 
                     except Exception as e:
                         st.error("Conversational RAG failed.")
