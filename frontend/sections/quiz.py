@@ -53,8 +53,8 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     st.subheader("📝 Study / Quiz (MCQ v1)")
     st.markdown(
         "Generate short multiple-choice quizzes from your lecture. "
-        "Click a question to expand, select an answer, then **Check answer**. "
-        "Use **Start SRS** to add questions you'd like to review later."
+        "Read each card, select an answer, then **Check answer**. "
+        "Use **Add to SRS** to save questions you'd like to review later."
     )
 
     # session_state key for storing generated quiz for this document
@@ -73,7 +73,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     with cols_top[1]:
         gen_key = f"gen_quiz_{stem}"
         # keep the same button key as original
-        if st.button("Generate Quiz from lecture", key=gen_key):
+        if st.button("Generate quiz", key=gen_key, type="primary", use_container_width=True):
             if not text:
                 st.warning("No document text extracted.")
             else:
@@ -134,7 +134,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
     # Display MCQs with choices A-D and stable widget keys
     if not quiz_items:
-        st.info("No quiz items generated yet. Click 'Generate Quiz from lecture' to create items.")
+        st.info("No quiz items generated yet. Click 'Generate quiz' to create items.")
         return
 
     # Render each question as a clean "card" with clear spacing & buttons
@@ -257,7 +257,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                 with btn_col_left:
                     check_key = f"{quiz_state_key}_check_{key_suffix}"
                     check_disabled = (chosen_letter is None) or already_submitted
-                    if st.button("Check answer", key=check_key, disabled=check_disabled):
+                    if st.button("Check answer", key=check_key, disabled=check_disabled, use_container_width=True):
                         is_correct = (chosen_letter == answer_letter) if (chosen_letter and answer_letter) else False
                         st.session_state[submit_key] = {
                             "chosen": chosen_letter,
@@ -292,13 +292,13 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                     show_expl_key = f"{quiz_state_key}_showex_{key_suffix}"
                     if show_expl_key not in st.session_state:
                         st.session_state[show_expl_key] = False
-                    if st.button("Toggle explanation", key=f"{quiz_state_key}_toggleexp_{key_suffix}"):
+                    if st.button("Show / hide explanation", key=f"{quiz_state_key}_toggleexp_{key_suffix}", use_container_width=True):
                         st.session_state[show_expl_key] = not st.session_state[show_expl_key]
                         st.session_state[exp_key] = True  # keep the question visible when toggling
 
                 with btn_col_right:
                     # Start SRS (keeps same key and behavior)
-                    if st.button(f"Start SRS for {qid}", key=srs_key):
+                    if st.button("Add to SRS", key=srs_key, use_container_width=True):
                         try:
                             mgr = SRSManager()
                             mgr.ensure_card(qid, meta={"question": q_text or "", "stem": stem, "source_reason": "Added from quiz review"})
@@ -376,7 +376,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
         if total_wrong > 0:
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("Add missed concepts to SRS", key=f"quiz_push_missed_{stem}"):
+                if st.button("Add missed concepts to SRS", key=f"quiz_push_missed_{stem}", use_container_width=True):
                     try:
                         mgr = SRSManager()
                         added = 0
@@ -391,7 +391,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                     except Exception as e:
                         st.error(f"Could not add missed concepts: {e}")
             with c2:
-                if st.button("Review top 3 confused concepts now", key=f"quiz_focus_confused_{stem}"):
+                if st.button("Review top confused concepts", key=f"quiz_focus_confused_{stem}", use_container_width=True):
                     st.session_state[f"focus_confused_{stem}"] = True
                     st.success("Jump to Confused section below.")
 

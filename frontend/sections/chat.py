@@ -281,7 +281,7 @@ def render(st: Any, stem: str, llm):
         st.session_state[f"chat_input_{stem}"] = pending_input
         st.session_state[f"chat_force_question_{stem}"] = True
         pending_loaded = True
-        st.success("✅ Follow-up prompt loaded! Edit and send below.")
+        st.success("Follow-up prompt loaded. Review it and send below.")
 
     # Clear input on next run after a successful send (but don't override pending prompts)
     clear_input_key = f"chat_clear_input_{stem}"

@@ -53,10 +53,15 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     quiz_state_key = f"quiz_items_{stem}"
     doc_id_key = f"doc_id_{stem}"
     doc_id = st.session_state.get(doc_id_key, "")
+    followup_notice_key = f"conf_followup_notice_{stem}"
 
     st.markdown('<a id="confused-quick-prioritized-list"></a>', unsafe_allow_html=True)
-    st.markdown("## 🤝 Confused? Coaching list")
-    st.write("These concepts are worth reviewing next.")
+    st.markdown("## Confused? Coaching list")
+    st.write("These are the concepts most worth reviewing next.")
+    st.caption("Start with the top card, get a simple explanation, or queue a follow-up prompt for Chat.")
+
+    followup_notice = st.session_state.get(followup_notice_key)
+    notice_rendered = False
 
     # gather session-local quiz context (not authoritative)
     history = st.session_state.get(hist_key, []) or []
@@ -126,7 +131,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
     # When empty, show one calm line only (no cards/icons)
     if not real_confusions:
-        st.write("No repeated quiz mistakes yet 👍")
+        st.success("No repeated quiz mistakes yet. This section will fill in after the same concept is missed more than once.")
     else:
         preview_limit = min(len(real_confusions), 5)
         for idx, item in enumerate(real_confusions[:preview_limit], start=1):
@@ -142,15 +147,14 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     else:
                         concept = "Unlabeled concept"
                 strength = int(item.get("signal_strength", 0))
-                st.markdown(f"**{idx}. {concept}** — this concept is worth reviewing.")
-                st.markdown(f"### 🤔 Confused Card {idx}: {concept}")
-                st.markdown("**Concept**")
-                st.write(concept)
-                st.markdown(f"**Progress / Review stats**")
-                st.write(f"📊 Confusion signals: {strength}")
-                if item.get("reason"):
-                    st.caption(item.get("reason"))
-                st.info("You can quickly reinforce this with a simple explanation or move it into SRS.")
+                header_cols = st.columns([3.2, 1.2])
+                with header_cols[0]:
+                    st.markdown(f"### {idx}. {concept}")
+                    st.write("This concept showed up as a repeated weak spot in your recent quiz answers.")
+                    if item.get("reason"):
+                        st.caption(item.get("reason"))
+                with header_cols[1]:
+                    st.metric("Signals", strength)
                 evidence = item.get("evidence", []) or []
                 evidence_quiz_rows = []
 
@@ -181,18 +185,19 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                 selected_mcq_key = f"conf_selected_mcq_{stem}_{idx}"
                 selected_mcq_label = st.selectbox(
-                    "Original question(s) [used for Add to SRS only]",
+                    "Source question for Add to SRS",
                     options=[c["label"] for c in mcq_candidates],
                     key=selected_mcq_key,
-                    help="Explain Simply and Ask Follow-up always use the concept. Pick a question here only when adding to SRS.",
+                    help="Explain simply and Ask follow-up in Chat use the concept directly. Pick a question here only for Add to SRS.",
                 )
+                st.caption("The dropdown only affects Add to SRS. Explain simply and Chat follow-up always use the concept itself.")
                 selected_mcq = next(
                     (c for c in mcq_candidates if c["label"] == selected_mcq_label),
                     mcq_candidates[0],
                 )
 
                 if evidence:
-                    with st.expander("Show evidence"):
+                    with st.expander("Why this concept was flagged"):
                         for e in evidence:
                             if e.get("type") in ("quiz", "persisted"):
                                 meta = e.get("meta", {}) or {}
@@ -228,16 +233,26 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 extracted_concept = item.get("concept_label") or item.get("concept") or concept
                 deterministic_fallback_id = _deterministic_confusion_id(stem, extracted_concept)
 
+                if (
+                    not notice_rendered
+                    and isinstance(followup_notice, dict)
+                    and followup_notice.get("card_id") == deterministic_fallback_id
+                ):
+                    st.info(followup_notice.get("message", "Follow-up prompt queued for chat."))
+                    notice_rendered = True
+
                 selected_qid = selected_mcq.get("id")
                 selected_question = selected_mcq.get("question") or ""
 
                 with st.container():
                     st.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
-                    action_cols = st.columns(4)
-                    with action_cols[0]:
+                    st.markdown("**Next step**")
+                    primary_action_cols = st.columns(2)
+                    secondary_action_cols = st.columns(2)
+                    with primary_action_cols[0]:
                         # Explain simply (kept — student-first)
                         explain_btn_key = f"conf_explain_{stem}_{idx}"
-                        if st.button("Explain simply", key=explain_btn_key):
+                        if st.button("Explain simply", key=explain_btn_key, type="primary", use_container_width=True):
                             try:
                                 candidate_index_path = str(index_path) if index_path and Path(index_path).exists() else None
                                 compact_evidence = []
@@ -271,20 +286,29 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 st.error("Failed to generate explanation.")
                                 st.exception(e)
 
-                    with action_cols[1]:
+                    with primary_action_cols[1]:
                         follow_key = f"conf_follow_{stem}_{idx}"
-                        if st.button("Follow up", key=follow_key):
+                        if st.button("Ask follow-up in Chat", key=follow_key, use_container_width=True):
                             follow_prompt = (
                                 f"Concept: {extracted_concept}\n"
                                 "The user struggled with this concept in recent quizzes. Explain it clearly, give simple examples, and highlight key points that might cause confusion."
                             )
                             st.session_state[f"chat_pending_input_{stem}"] = follow_prompt
-                            st.success("✓ Loaded! Check the Chat section above.")
-                            st.rerun()
-                    with action_cols[2]:
+                            st.session_state[followup_notice_key] = {
+                                "card_id": deterministic_fallback_id,
+                                "message": f"Follow-up prompt queued for '{extracted_concept}'. Open the Chat tab to review or send it.",
+                            }
+                            try:
+                                st.rerun()
+                            except Exception:
+                                try:
+                                    st.experimental_rerun()
+                                except Exception:
+                                    pass
+                    with secondary_action_cols[0]:
                         # ➕ Add to SRS (idempotent)
                         add_srs_key = f"conf_add_srs_{stem}_{idx}"
-                        if st.button("➕ Add to SRS", key=add_srs_key):
+                        if st.button("Add to SRS", key=add_srs_key, use_container_width=True):
                             try:
                                 mgr = SRSManager()
                                 # Use selected original MCQ (if available) as primary source
@@ -313,9 +337,9 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             except Exception as e:
                                 st.error("Failed to add to SRS.")
                                 st.exception(e)
-                    with action_cols[3]:
+                    with secondary_action_cols[1]:
                         delete_key = f"conf_delete_{stem}_{idx}"
-                        if st.button("Delete card", key=delete_key):
+                        if st.button("Delete this card", key=delete_key, use_container_width=True):
                             if not delete_keys:
                                 st.warning("No persisted entries found to delete.")
                             else:
@@ -328,4 +352,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                         st.experimental_rerun()
                                     except Exception:
                                         pass
+        if notice_rendered:
+            st.session_state.pop(followup_notice_key, None)
     st.markdown("---")

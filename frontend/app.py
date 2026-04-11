@@ -90,39 +90,61 @@ st.markdown(
     """
     <style>
       :root {
-        --accent: #4f46e5;
-        --accent-soft: #eef2ff;
-        --card-bg: #f8fafc;
-        --card-border: #e2e8f0;
+        --accent: #0f766e;
+        --accent-strong: #115e59;
+        --accent-soft: #ecfeff;
+        --accent-warm: #f59e0b;
+        --card-bg: rgba(255, 255, 255, 0.88);
+        --card-border: #d7e5e4;
+        --text: #12212a;
+        --muted: #546571;
         --success-bg: #ecfdf3;
         --error-bg: #fef2f2;
         --warning-bg: #fff7ed;
       }
 
       /* Keep main content spacing */
+      div[data-testid="stAppViewContainer"] {
+        background:
+          radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 30%),
+          radial-gradient(circle at top right, rgba(245, 158, 11, 0.12), transparent 24%),
+          linear-gradient(180deg, #f7fbfb 0%, #eef4f5 100%);
+      }
       div.block-container {
         padding-top: 1.5rem;
         padding-bottom: 3rem;
+        max-width: 1080px;
       }
 
       /* Typography and headings */
+      html, body, [class*="css"] {
+        color: var(--text);
+      }
       h1, h2, h3, h4 {
-        color: #111827;
+        color: var(--text);
       }
       h2 {
-        border-left: 4px solid var(--accent);
-        padding-left: 0.5rem;
+        border-left: 5px solid var(--accent);
+        padding-left: 0.75rem;
+        margin-top: 0.4rem;
+      }
+      h3 {
+        margin-top: 0.2rem;
+      }
+      p, li, label, .stMarkdown, .stCaption {
+        color: var(--text);
       }
 
       /* Metric / alert visuals */
       div[data-testid="stMetric"] {
         background: var(--accent-soft);
-        padding: 0.75rem;
-        border-radius: 12px;
-        border: 1px solid #e0e7ff;
+        padding: 0.85rem 0.9rem;
+        border-radius: 16px;
+        border: 1px solid #cce7e3;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
       }
       div[data-testid="stAlert"] {
-        border-radius: 12px;
+        border-radius: 14px;
       }
       div[data-testid="stAlert"][data-baseweb="notification"] {
         border-left: 4px solid var(--accent);
@@ -137,28 +159,88 @@ st.markdown(
         background: var(--warning-bg);
       }
 
+      div[data-testid="stTextInput"] input,
+      div[data-testid="stTextArea"] textarea,
+      div[data-testid="stNumberInput"] input,
+      div[data-baseweb="select"] > div,
+      div[data-baseweb="base-input"] > div {
+        border-radius: 14px !important;
+        border-color: #d2dfdf !important;
+        background: rgba(255, 255, 255, 0.96) !important;
+      }
+      div[data-testid="stTextInput"] input:focus,
+      div[data-testid="stTextArea"] textarea:focus,
+      div[data-testid="stNumberInput"] input:focus {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.18) !important;
+      }
+
+      div.stButton > button,
+      div[data-testid="stFormSubmitButton"] > button {
+        border-radius: 14px;
+        border: 1px solid #c8d8d8;
+        background: rgba(255, 255, 255, 0.96);
+        color: var(--text);
+        font-weight: 600;
+        min-height: 2.95rem;
+        line-height: 1.25;
+        white-space: normal;
+        padding: 0.6rem 1rem;
+        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+        transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+      }
+      div.stButton > button:hover,
+      div[data-testid="stFormSubmitButton"] > button:hover {
+        border-color: var(--accent);
+        box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
+        transform: translateY(-1px);
+      }
+      div.stButton > button[kind="primary"],
+      div[data-testid="stFormSubmitButton"] > button[kind="primary"] {
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        color: #ffffff;
+        border-color: transparent;
+      }
+      div[data-testid="stCheckbox"] {
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid #d6e1e1;
+        border-radius: 14px;
+        padding: 0.2rem 0.75rem;
+      }
+
       /* Card-like blocks (non-invasive selectors) */
       div[data-testid="stVerticalBlock"] > div.la-card,
       div[data-testid="stVerticalBlock"]:has(> div.la-card) {
         background: var(--card-bg);
         border: 1px solid var(--card-border);
-        padding: 1rem 1.1rem;
-        border-radius: 16px;
+        padding: 1.1rem 1.2rem;
+        border-radius: 22px;
         margin-bottom: 1.2rem;
-        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+        box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
+        backdrop-filter: blur(6px);
       }
       div.la-card {
         display: none;
       }
       div[data-testid="stVerticalBlock"]:has(> div.la-action-bar) {
-        background: #f1f5f9;
-        border: 1px solid #e2e8f0;
-        padding: 0.7rem 0.9rem;
-        border-radius: 12px;
-        margin: 0.6rem 0;
+        background: linear-gradient(180deg, rgba(236, 254, 255, 0.95), rgba(248, 250, 252, 0.95));
+        border: 1px solid #cfe3e2;
+        padding: 0.85rem 1rem;
+        border-radius: 18px;
+        margin: 0.8rem 0 0.2rem;
       }
       div.la-action-bar {
         display: none;
+      }
+
+      div[data-testid="stTabs"] button[data-baseweb="tab"] {
+        border-radius: 999px;
+        padding: 0.55rem 1rem;
+        background: rgba(255, 255, 255, 0.72);
+      }
+      div[data-testid="stTabs"] button[aria-selected="true"] {
+        background: #ffffff;
+        color: var(--accent-strong);
       }
 
       /* App header visuals */
@@ -166,42 +248,123 @@ st.markdown(
         display: flex;
         align-items: center;
         gap: 1rem;
-        padding: 1rem 1.25rem;
-        border-radius: 18px;
-        background: linear-gradient(135deg, var(--accent), #6d28d9);
+        padding: 1.15rem 1.35rem;
+        border-radius: 24px;
+        background:
+          radial-gradient(circle at top right, rgba(245, 158, 11, 0.32), transparent 24%),
+          linear-gradient(135deg, #0f766e, #164e63 72%);
         color: #fff;
         margin-bottom: 1.5rem;
-        box-shadow: 0 10px 25px rgba(79, 70, 229, 0.25);
+        box-shadow: 0 18px 38px rgba(15, 23, 42, 0.14);
       }
       .app-logo {
-        width: 48px;
-        height: 48px;
-        border-radius: 14px;
-        background: rgba(255, 255, 255, 0.2);
+        width: 54px;
+        height: 54px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.16);
         display: flex;
         align-items: center;
         justify-content: center;
         font-weight: 700;
-        font-size: 1.1rem;
-        letter-spacing: 0.5px;
+        font-size: 1.15rem;
+        letter-spacing: 0.08em;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+      }
+      .app-eyebrow {
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        opacity: 0.86;
+        margin-bottom: 0.2rem;
       }
       .app-title {
-        font-size: 1.6rem;
+        font-size: 1.8rem;
         font-weight: 700;
       }
       .app-subtitle {
-        font-size: 0.95rem;
-        opacity: 0.9;
+        font-size: 0.98rem;
+        opacity: 0.92;
+        max-width: 42rem;
+      }
+
+      .la-overview {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.85rem;
+        margin: 0.25rem 0 1.3rem;
+      }
+      .la-overview-card,
+      .la-step-card {
+        background: rgba(255, 255, 255, 0.82);
+        border: 1px solid #d9e6e6;
+        border-radius: 20px;
+        padding: 1rem 1.05rem;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+      }
+      .la-overview-label,
+      .la-step-number {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 2rem;
+        min-height: 2rem;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+        font-size: 0.82rem;
+        font-weight: 700;
+        margin-bottom: 0.65rem;
+        padding: 0 0.55rem;
+      }
+      .la-overview-title,
+      .la-step-title {
+        font-weight: 700;
+        font-size: 1rem;
+        margin-bottom: 0.35rem;
+      }
+      .la-overview-copy,
+      .la-step-copy {
+        color: var(--muted);
+        font-size: 0.94rem;
+        line-height: 1.45;
+        margin: 0;
+      }
+      .la-step-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 0.85rem;
+        margin: 0.35rem 0 1rem;
+      }
+      .la-inline-banner {
+        background: rgba(255, 255, 255, 0.78);
+        border: 1px solid #d6e3e3;
+        border-radius: 18px;
+        padding: 0.95rem 1rem;
+        margin: 0.4rem 0 1rem;
+      }
+      .la-inline-banner strong {
+        display: block;
+        margin-bottom: 0.25rem;
+      }
+
+      @media (max-width: 720px) {
+        .app-header {
+          align-items: flex-start;
+        }
+        div.block-container {
+          padding-top: 1rem;
+        }
       }
 
       /* Sticky bottom form area (keeps chat input visible) */
       div[data-testid="stForm"] {
         position: sticky;
         bottom: 0;
-        background: #ffffff;
-        border-top: 1px solid #e5e7eb;
-        padding-top: 0.5rem;
+        background: rgba(255, 255, 255, 0.96);
+        border-top: 1px solid #dce6e6;
+        padding-top: 0.55rem;
         z-index: 10;
+        backdrop-filter: blur(10px);
       }
       .chat-fade-top {
         height: 12px;
@@ -222,8 +385,9 @@ st.markdown(
     <div class="app-header">
       <div class="app-logo">LA</div>
       <div>
+        <div class="app-eyebrow">Study workflow</div>
         <div class="app-title">Learning Assistant</div>
-        <div class="app-subtitle">Turn lectures into actionable study sessions</div>
+        <div class="app-subtitle">Turn one lecture into a clean loop: understand it, test yourself, fix weak spots, and review later.</div>
       </div>
     </div>
     """,
@@ -259,6 +423,7 @@ Learning Enhancements:
 - **Transparent Retrieval** — see chunks used for answers.
 """
 )
+st.caption("This UI pass keeps the same backend behavior and study actions; it only improves layout and readability.")
 
 # ----------------------------
 # API mode toggle + token UI
@@ -294,10 +459,10 @@ with st.sidebar:
     )
 
 st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
-st.markdown("## 1️⃣ Setup your lecture")
+st.markdown("## 1. Setup your lecture")
 st.write(
-    "Upload a single lecture PDF on the left side bar and create embeddings for that lecture. "
-    "This is usually a one-time step per file — once embeddings are created you can use the Study tools below."
+    "Upload one lecture PDF from the sidebar, then create embeddings for it. "
+    "Once that is ready, every study tool below works off the same lecture."
 )
 
 # ----------------------------
@@ -323,6 +488,15 @@ if uploaded:
     index_path = Path(f"data/processed/{stem}_embeddings.index")
     st.session_state["current_stem"] = stem
     current_label = stem.replace("_", " ").title()
+    st.markdown(
+        """
+        <div class="la-inline-banner">
+          <strong>Setup checklist</strong>
+          Upload the PDF, confirm the preview looks right, create embeddings, and build the optional FAISS index only if you want faster retrieval on larger documents.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.info(f"📄 Current lecture: {current_label}")
     # Group embedding controls into a neat card-like area
@@ -383,18 +557,18 @@ if uploaded:
     # ----------------------------
     st.markdown("---")
     st.markdown('<a id="study-modes"></a>', unsafe_allow_html=True)
-    st.markdown("## 2️⃣ Study modes")
+    st.markdown("## 2. Study modes")
     st.write(
-        "Use the tabs below to explore the lecture: ask targeted questions, generate summaries, or chat conversationally. "
-        "Below the tabs you'll find Quiz and Review tools to test and retain what you learn."
+        "Use the tabs below to understand the lecture in the way that fits best right now. "
+        "The learning loop underneath turns that understanding into practice and review."
     )
 
     # Use slightly larger tabs with descriptions to improve discoverability
     tab1, tab2, tab3 = st.tabs(
         [
-            "Ask a Question — RAG",
-            "Generate Summary",
-            "Chat (conversational RAG)",
+            "Ask",
+            "Summary",
+            "Chat",
         ]
     )
 
@@ -609,14 +783,35 @@ if uploaded:
     # ----------------------------
     # Learning Loop: Quiz → Confused → SRS (UI-only grouping)
     # ----------------------------
-    st.markdown("## 🔁 Learning Loop — Test → Fix → Review")
+    st.markdown("## 3. Learning loop")
     st.write(
-        "A simple study workflow: 1) take a short quiz to test yourself, "
-        "2) review the concepts you repeatedly missed, and 3) add important items to your spaced repetition (SRS) for long-term retention."
+        "Work straight down the page: test yourself, fix the concepts that keep tripping you up, then move the important ones into spaced repetition."
+    )
+    st.markdown(
+        """
+        <div class="la-step-grid">
+          <div class="la-step-card">
+            <div class="la-step-number">1</div>
+            <div class="la-step-title">Quiz</div>
+            <p class="la-step-copy">Generate a short MCQ set and see where your understanding is strongest or weakest.</p>
+          </div>
+          <div class="la-step-card">
+            <div class="la-step-number">2</div>
+            <div class="la-step-title">Confused</div>
+            <p class="la-step-copy">Review the concepts you missed repeatedly and launch follow-up help without rewriting the prompt yourself.</p>
+          </div>
+          <div class="la-step-card">
+            <div class="la-step-number">3</div>
+            <div class="la-step-title">SRS</div>
+            <p class="la-step-copy">Save the concepts worth retaining and review them on a lighter, more predictable cadence.</p>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     # Step 1: Quiz (unchanged behavior — just a short intro)
-    st.markdown("### 1) Test yourself — Quiz")
+    st.markdown("### 3.1 Test yourself")
     st.write("Generate a quick set of multiple-choice questions from the lecture and check your understanding.")
     # Render quiz directly (removed outer expander)
     render_quiz(st=st, stem=stem, text=text, llm=llm, hist_key=hist_key)
@@ -624,8 +819,8 @@ if uploaded:
     st.markdown("---")
 
     # Step 2: Confused (prioritized list of things you missed)
-    st.markdown("### 2) Review what confused you")
-    st.write("These are concepts you missed multiple times. Click 'Explain simply' for a short explanation or add items to SRS.")
+    st.markdown("### 3.2 Review what confused you")
+    st.write("This section surfaces the concepts you missed repeatedly, with quick actions for explanation, chat follow-up, and SRS.")
     # Render confused directly (removed outer expander)
     render_confused(
         st=st,
@@ -639,7 +834,7 @@ if uploaded:
     st.markdown("---")
 
     # Step 3: Spaced Repetition (SRS)
-    st.markdown("### 3) Lock it in — Spaced Repetition (SRS)")
+    st.markdown("### 3.3 Lock it in with spaced repetition")
     st.write("Add items you want to retain and review due cards here. This helps move knowledge into long-term memory.")
     # Render SRS directly (removed outer expander)
     render_srs(st, stem=stem)
