@@ -72,7 +72,9 @@ class SRSManager:
         if card_id not in self._data:
             self._data[card_id] = {
                 "interval_index": 0,
+                "interval_days": INTERVALS[0],
                 "next_due": datetime.utcnow().isoformat(),
+                "last_reviewed": None,
                 "review_count": 0,
             }
             created = True
@@ -94,7 +96,9 @@ class SRSManager:
         existing = self._data.get(card_id, {})
         base = {
             "interval_index": 0,
+            "interval_days": INTERVALS[0],
             "next_due": datetime.utcnow().isoformat(),
+            "last_reviewed": None,
             "review_count": 0,
         }
         for key, value in existing.items():
@@ -104,15 +108,45 @@ class SRSManager:
         self._save()
 
     def mark_review(self, card_id: str, correct: bool):
+        """
+        Backward-compatible entry point:
+          - correct=False behaves like "hard"
+          - correct=True behaves like "good"
+        """
+        rating = "good" if bool(correct) else "hard"
+        self.mark_review_with_rating(card_id, rating)
+
+    def mark_review_with_rating(self, card_id: str, rating: str):
+        """
+        Update schedule with explicit SRS rating:
+          - hard: short interval (at least 1 day, no promotion)
+          - good: normal promotion (+1 step)
+          - easy: larger promotion (+2 steps)
+        """
         self.ensure_card(card_id)
         meta = self._data[card_id]
-        if correct:
-            meta["interval_index"] = min(meta["interval_index"] + 1, len(INTERVALS) - 1)
+        now = datetime.utcnow()
+
+        current_idx = int(meta.get("interval_index", 0))
+        current_idx = max(0, min(current_idx, len(INTERVALS) - 1))
+        r = str(rating or "").strip().lower()
+
+        if r == "hard":
+            next_idx = max(current_idx, 0)
+            interval_days = max(1.0, float(INTERVALS[next_idx]))
+        elif r == "easy":
+            next_idx = min(current_idx + 2, len(INTERVALS) - 1)
+            interval_days = float(INTERVALS[next_idx])
         else:
-            meta["interval_index"] = max(meta.get("interval_index", 0) - 1, 0)
-        days = INTERVALS[meta["interval_index"]]
-        meta["next_due"] = (datetime.utcnow() + timedelta(days=days)).isoformat()
-        meta["review_count"] = meta.get("review_count", 0) + 1
+            # Default and "good"
+            next_idx = min(current_idx + 1, len(INTERVALS) - 1)
+            interval_days = float(INTERVALS[next_idx])
+
+        meta["interval_index"] = next_idx
+        meta["interval_days"] = interval_days
+        meta["last_reviewed"] = now.isoformat()
+        meta["next_due"] = (now + timedelta(days=interval_days)).isoformat()
+        meta["review_count"] = int(meta.get("review_count", 0)) + 1
         self._save()
 
     def get_card_meta(self, card_id: str):

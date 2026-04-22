@@ -51,6 +51,14 @@ def init_llm():
         return None
 
 
+def _stable_quiz_item_id(stem: str, item: Dict[str, Any], idx: int) -> str:
+    question = " ".join(str(item.get("question") or "").split()).strip().lower()
+    if not question:
+        return f"{stem}_q{idx}"
+    digest = hashlib.sha1(question.encode("utf-8")).hexdigest()[:12]
+    return f"{stem}_q_{digest}"
+
+
 def create_embeddings_if_needed(text: str, embeddings_path: str, dim: int = EMBED_DIM, recreate: bool = False) -> int:
     """Create embeddings for given text, returning number of rows created."""
     if not recreate and os.path.exists(embeddings_path):
@@ -231,6 +239,7 @@ def record_quiz_result(
     is_correct: bool,
     stem: str = "",
     question_item: Optional[Dict[str, Any]] = None,
+    chosen_answer: str = "",
     doc_id: str = "",
 ) -> None:
     """
@@ -251,6 +260,8 @@ def record_quiz_result(
             concept=concept_label,
             concept_label=concept_label,
             concept_id=concept_id,
+            question_item=question_item or {},
+            chosen_answer=chosen_answer or "",
             doc_id=doc_id or "",
         )
     except Exception as e:
@@ -340,6 +351,9 @@ def perform_confusion_analysis(
             if not matches:
                 continue
         qtext = (p.get("question") or "").strip()
+        item_type = (p.get("item_type") or "").strip().lower()
+        origin = (p.get("origin") or "").strip().lower()
+        is_mcq = item_type == "mcq" or origin == "quiz_mcq" or bool(p.get("choices"))
         concept_id = (p.get("concept_id") or "").strip()
         concept_label = (p.get("concept_label") or p.get("concept") or "").strip()
         if concept_label.lower() == "unknown concept":
@@ -353,12 +367,20 @@ def perform_confusion_analysis(
         evidence = [{"type": "quiz", "qid": qid, "question": qtext, "meta": p}]
 
         real.append({
+            "item_type": "mcq" if is_mcq else "concept",
+            "origin": "quiz_mcq" if is_mcq else "concept",
+            "is_mcq": is_mcq,
+            "quiz_question_id": qid,
+            "original_question": qtext,
+            "choices": (p.get("choices") or {}) if isinstance(p.get("choices"), dict) else {},
+            "answer": (p.get("answer") or "").strip().upper(),
+            "explanation": (p.get("explanation") or "").strip(),
+            "last_is_correct": bool(p.get("last_is_correct", False)),
             "concept_id": concept_id,
             "concept_label": concept_label,
             "concept": display_concept,
             "concept_unlabeled": (not has_concept),
             "store_key": (p.get("store_key") or ""),
-            "original_question": qtext,
             "status": status,
             "reason": reason,
             "evidence": evidence,
@@ -391,6 +413,14 @@ def perform_confusion_analysis(
                 grouped[group_key]["concept"] = display_concept
             if not grouped[group_key].get("concept_label") and item.get("concept_label"):
                 grouped[group_key]["concept_label"] = item.get("concept_label")
+            if not grouped[group_key].get("original_question") and item.get("original_question"):
+                grouped[group_key]["original_question"] = item.get("original_question")
+            if (not grouped[group_key].get("choices")) and item.get("choices"):
+                grouped[group_key]["choices"] = item.get("choices")
+            if (not grouped[group_key].get("answer")) and item.get("answer"):
+                grouped[group_key]["answer"] = item.get("answer")
+            if (not grouped[group_key].get("quiz_question_id")) and item.get("quiz_question_id"):
+                grouped[group_key]["quiz_question_id"] = item.get("quiz_question_id")
 
     # Sort by signal_strength (wrong_count) desc
     try:
@@ -450,10 +480,9 @@ def generate_quiz(
         out = resp.json()
         quiz_items = out.get("quiz", []) or []
         latency = out.get("latency_s")
-        # ensure ids are prefixed with stem like original app
-        for itm in quiz_items:
-            if "id" in itm and not str(itm["id"]).startswith(f"{stem}_"):
-                itm["id"] = f"{stem}_{itm['id']}"
+        # Use stable IDs based on normalized question text to prevent duplicates in SRS.
+        for idx, itm in enumerate(quiz_items, start=1):
+            itm["id"] = _stable_quiz_item_id(stem, itm, idx)
         _ensure_concept_fields(quiz_items)
         return quiz_items, latency
     else:
@@ -478,13 +507,9 @@ def generate_quiz(
             quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call, concepts=concepts)
         except TypeError:
             quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call)
-        # prefix IDs to match expected pattern and ensure uniqueness
+        # Use stable IDs based on normalized question text to prevent duplicates in SRS.
         for idx, itm in enumerate(quiz_items, start=1):
-            if "id" in itm:
-                if not str(itm["id"]).startswith(f"{stem}_"):
-                    itm["id"] = f"{stem}_{itm['id']}"
-            else:
-                itm["id"] = f"{stem}_q{idx}"
+            itm["id"] = _stable_quiz_item_id(stem, itm, idx)
         _ensure_concept_fields(quiz_items)
         return quiz_items, None
 

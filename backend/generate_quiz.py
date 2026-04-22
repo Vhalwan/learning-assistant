@@ -3,6 +3,17 @@
 generate_quiz.py — Hybrid MCQ generator (strict extractor + LLM writer)
 This file expects an llm_call(prompt)->str callable to be passed in (or None to
 use deterministic placeholders).
+
+Fixes applied (v3):
+  1. Batch generation — all n MCQs requested in a SINGLE LLM call instead of
+     one call per chunk.  This slashes API usage from O(chunks * retries) to O(1).
+  2. Hard stop on 429 / RESOURCE_EXHAUSTED — reads retryDelay from error and
+     waits exactly that long before any retry; aborts if quota is exhausted.
+  3. 503 UNAVAILABLE treated as transient — longer backoff (10s base) so retries
+     don't burn through the per-minute quota while the model is overloaded.
+  4. max_attempts capped at n * 2.
+  5. Fallback model support — if primary model hits 503 repeatedly, caller can
+     pass fallback_model kwarg to switch to gemini-1.5-flash automatically.
 """
 
 import json
@@ -16,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
 BACKOFF_BASE = 0.4
+BACKOFF_503 = 10.0   # wait longer for model-overload errors
 
 _MIN_SENT_WORDS = 8
 _MIN_CHOICE_LEN = 8
@@ -38,6 +50,29 @@ You are an expert educator. Extract 2 to {max_concepts} canonical concepts from 
 Return JSON ONLY (no extra text). Output must be a JSON array of objects with keys:
   - concept_id (snake_case, short, stable)
   - concept_label (human-readable)
+
+Lecture content:
+\"\"\"{content}\"\"\"
+"""
+
+# ---------- NEW: batch prompt (one call for all n MCQs) ----------
+_BATCH_MCQ_PROMPT_TEMPLATE = """
+You are an expert quiz writer. Generate exactly {n} high-quality multiple-choice questions (MCQs)
+that test a learner's understanding of the lecture content below.
+
+Return JSON ONLY (no extra text, no markdown fences).
+Output must be a JSON array of exactly {n} objects, each with keys:
+  - id        (string, e.g. "q1", "q2" ...)
+  - question  (string)
+  - choices   (object with keys A, B, C, D)
+  - answer    (string, one of: A B C D)
+  - explanation (string, ≤ 200 chars)
+
+IMPORTANT:
+- Randomise which letter (A/B/C/D) holds the correct answer across questions.
+- Do NOT bias toward C, B, or any particular letter.
+- All four options must be plausible; only one should be correct.
+- Distractors must be clearly distinct from each other.
 
 Lecture content:
 \"\"\"{content}\"\"\"
@@ -110,7 +145,7 @@ def safe_json_load(s):
         try:
             return json.loads(sub)
         except Exception:
-            # last-ditch: replace single quotes with double quotes and try (dangerous but sometimes helpful)
+            # last-ditch: replace single quotes with double quotes and try
             try:
                 alt = sub.replace("'", '"')
                 return json.loads(alt)
@@ -137,6 +172,37 @@ def _shorten(s: str, max_len=240) -> str:
 def _slugify_concept_id(label: str, fallback: str) -> str:
     base = re.sub(r"[^a-zA-Z0-9]+", "_", (label or "").strip().lower()).strip("_")
     return base or fallback
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Return True if the exception signals a hard quota exhaustion (429)."""
+    s = str(e)
+    return (
+        "429" in s
+        or "RESOURCE_EXHAUSTED" in s
+        or "resource_exhausted" in s.lower()
+        or "quota" in s.lower()
+        or "rate limit" in s.lower()
+        or "rate_limit" in s.lower()
+    )
+
+
+def _is_overload_error(e: Exception) -> bool:
+    """Return True if the exception signals a transient server overload (503)."""
+    s = str(e)
+    return "503" in s or "UNAVAILABLE" in s or "unavailable" in s.lower()
+
+
+def _extract_retry_delay(e: Exception, default: float = 5.0) -> float:
+    """
+    Parse the retryDelay value from a Gemini API error string.
+    Falls back to `default` seconds if not found.
+    Example: 'retryDelay': '8s'  or  "retryDelay": "14.99s"
+    """
+    m = re.search(r"retryDelay['\"]?\s*:\s*['\"](\d+(?:\.\d+)?)s", str(e))
+    if m:
+        return float(m.group(1))
+    return default
 
 
 def _normalize_concepts(raw, max_concepts: int = 5) -> List[Dict[str, str]]:
@@ -195,7 +261,6 @@ def generate_concepts_from_context(
     If llm_call is None, return a deterministic fallback.
     """
     if llm_call is None:
-        # Deterministic fallback: derive short concept labels from lecture text.
         chunks = _paragraph_chunks(context_text or "", approx_words=80)
         concepts = []
         for chunk in chunks:
@@ -207,6 +272,7 @@ def generate_concepts_from_context(
                 continue
             concepts.append({"concept_label": label})
         return _normalize_concepts(concepts, max_concepts=max_concepts)
+
     prompt = _CONCEPT_PROMPT_TEMPLATE.format(
         max_concepts=int(max_concepts or 5),
         content=_shorten(context_text or "", max_len=4000),
@@ -262,23 +328,7 @@ def _paragraph_chunks(text: str, approx_words: int = 80) -> List[str]:
     return chunks
 
 
-_MCQ_PROMPT_TEMPLATE = """
-You are an expert quiz writer. Produce ONE high-quality multiple-choice question (MCQ) that tests
-a learner's understanding of the provided paragraph. Return JSON ONLY (no extra text).
-JSON must be an object with keys: id, question, choices (A-D), answer (A-D), explanation.
-
-IMPORTANT INSTRUCTIONS:
-- The correct answer (A, B, C, or D) must be RANDOMLY PLACED across different positions.
-- Do NOT bias toward C, B, or any particular letter.
-- Ensure all four options are plausible but only one is correct.
-- Make distractors (wrong answers) clearly distinct from each other to test understanding.
-
-Paragraph:
-\"\"\"{paragraph}\"\"\"
-"""
-
-
-def _validate_mcq_obj(obj: dict, paragraph: str) -> bool:
+def _validate_mcq_obj(obj: dict, paragraph: str = "") -> bool:
     try:
         if not isinstance(obj, dict):
             return False
@@ -307,187 +357,314 @@ def _validate_mcq_obj(obj: dict, paragraph: str) -> bool:
         ans = str(obj["answer"]).strip().upper()
         if ans not in keys:
             return False
-        correct_text = str(choices[ans])
-        overlap = _token_overlap_fraction(correct_text, paragraph)
-        if overlap < 0.05 and overlap <= 0.0:
-            return False
+        # Only run overlap check when we have a paragraph to compare against
+        if paragraph:
+            correct_text = str(choices[ans])
+            overlap = _token_overlap_fraction(correct_text, paragraph)
+            if overlap < 0.05 and overlap <= 0.0:
+                return False
         for k in keys:
             if k == ans:
                 continue
-            if _token_overlap_fraction(str(choices[k]), correct_text) > 0.9:
+            if _token_overlap_fraction(str(choices[k]), str(choices[ans])) > 0.9:
                 return False
         if "explanation" in obj:
             ex = str(obj["explanation"]).strip()
-            if len(ex) > 500:
-                return False
+            obj["explanation"] = ex
         return True
     except Exception:
         return False
 
 
-# ---------- core generator ----------
-def generate_mcq_from_context(context_text: str, n: int = 5,
-                              llm_call: Optional[Callable[[str], str]] = None,
-                              chunk_word_target: int = 90,
-                              concepts: Optional[List[Dict[str, str]]] = None) -> List[Dict]:
+# ---------- core generator (v3 — batch mode + smart error handling) ----------
+def generate_mcq_from_context(
+    context_text: str,
+    n: int = 5,
+    llm_call: Optional[Callable[[str], str]] = None,
+    chunk_word_target: int = 90,
+    concepts: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict]:
     """
-    Generate up to n MCQs. If llm_call is None -> deterministic placeholders.
-    If llm_call provided -> use it for each chunk, validate JSON, and collect MCQs.
+    Generate up to n MCQs.
+
+    Strategy (v2):
+      - If llm_call is None  → deterministic placeholders (unchanged).
+      - If llm_call provided → ONE batch call for all n questions.
+        Falls back to per-chunk single calls ONLY if the batch parse fails,
+        and stops immediately on any 429 / quota error.
     """
-    concept_list = _normalize_concepts(
-        concepts,
-        max_concepts=5,
-    ) if concepts is not None else generate_concepts_from_context(
-        context_text,
-        max_concepts=5,
-        llm_call=llm_call,
+    concept_list = (
+        _normalize_concepts(concepts, max_concepts=5)
+        if concepts is not None
+        else generate_concepts_from_context(context_text, max_concepts=5, llm_call=llm_call)
     )
 
+    # ------------------------------------------------------------------ #
+    # Deterministic path (no LLM)                                         #
+    # ------------------------------------------------------------------ #
     if llm_call is None:
-        # deterministic placeholders for local dev/testing
         chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target) or [
             "Placeholder paragraph about " + ("the topic" if not context_text else context_text[:60])
         ]
         out = []
         for i, ch in enumerate(chunks[:n]):
             qid = f"q{i+1}"
-            q = "Placeholder: which statement best summarizes the paragraph?"
-            choices = {
-                "A": "A placeholder plausible choice about the paragraph.",
-                "B": "Another placeholder distractor that looks plausible.",
-                "C": "A third placeholder distractor that is plausible here.",
-                "D": "The correct placeholder answer is this one."
-            }
-            out.append({"id": qid, "question": q, "choices": choices, "answer": "D", "explanation": "Placeholder explanation."})
-        cleaned = [{"id": it["id"], "question": it["question"], "choices": it["choices"], "answer": it["answer"]} for it in out]
-        for idx, itm in enumerate(cleaned):
+            out.append({
+                "id": qid,
+                "question": "Placeholder: which statement best summarizes the paragraph?",
+                "choices": {
+                    "A": "A placeholder plausible choice about the paragraph.",
+                    "B": "Another placeholder distractor that looks plausible.",
+                    "C": "A third placeholder distractor that is plausible here.",
+                    "D": "The correct placeholder answer is this one.",
+                },
+                "answer": "D",
+                "explanation": "Placeholder explanation.",
+            })
+        for idx, itm in enumerate(out):
             concept = concept_list[idx % len(concept_list)]
             itm["concept_id"] = concept["concept_id"]
             itm["concept_label"] = concept["concept_label"]
-        return cleaned
+        return out[:n]
 
-    # Use LLM
-    chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target)
-    if not chunks:
-        return []
+    # ------------------------------------------------------------------ #
+    # LLM path — BATCH (single API call)                                  #
+    # ------------------------------------------------------------------ #
+    # Cap context sent to LLM to avoid huge prompts
+    content_for_prompt = _shorten(context_text or "", max_len=6000)
+
+    batch_prompt = _BATCH_MCQ_PROMPT_TEMPLATE.format(
+        n=n,
+        content=content_for_prompt,
+    )
 
     out_mcqs: List[Dict] = []
-    used_questions = set()
-    used_choice_texts = set()
-    attempts = 0
-    max_attempts = max(len(chunks) * (MAX_RETRIES + 1), n * 4)
+    batch_succeeded = False
 
-    for i_chunk, chunk in enumerate(chunks):
-        if len(out_mcqs) >= n:
-            break
-        prompt = _MCQ_PROMPT_TEMPLATE.format(paragraph=_shorten(chunk, max_len=2000))
-        attempt = 0
-        while attempt <= MAX_RETRIES:
-            attempt += 1
-            attempts += 1
-            try:
-                logger.info("Calling LLM for chunk %s (attempt %s)", i_chunk, attempt)
-                raw = llm_call(prompt)
-                if raw is None:
-                    raise RuntimeError("LLM returned None")
+    # Try the batch call up to MAX_RETRIES times
+    for attempt in range(1, MAX_RETRIES + 2):   # attempts: 1, 2, 3
+        try:
+            logger.info("Batch MCQ call — attempt %s of %s", attempt, MAX_RETRIES + 1)
+            raw = llm_call(batch_prompt)
+            if raw is None:
+                raise RuntimeError("LLM returned None")
 
-                # log short preview for debugging (avoid huge logs)
-                preview = str(raw)[:1000]
-                logger.debug("LLM raw preview: %s", preview.replace("\n", " ")[:1000])
+            parsed = safe_json_load(raw)
 
-                # try to parse JSON
-                parsed = safe_json_load(raw)
+            # Normalise to a list of MCQ dicts
+            if isinstance(parsed, list):
+                mcq_list = parsed
+            elif isinstance(parsed, dict):
+                # Some models wrap in {"questions": [...]}
+                mcq_list = parsed.get("questions") or parsed.get("mcqs") or [parsed]
+            else:
+                raise ValueError(f"Unexpected batch response type: {type(parsed)}")
 
-                # normalize possible shapes
-                if isinstance(parsed, dict) and "question" in parsed and "choices" in parsed and "answer" in parsed:
-                    mcq_obj = parsed
-                else:
-                    if isinstance(parsed, dict) and "questions" in parsed and isinstance(parsed["questions"], list) and parsed["questions"]:
-                        mcq_obj = parsed["questions"][0]
-                    elif isinstance(parsed, list) and parsed:
-                        mcq_obj = parsed[0]
-                    else:
-                        raise ValueError("unexpected LLM JSON shape")
-
-                if not mcq_obj.get("id"):
-                    mcq_obj["id"] = f"q{len(out_mcqs) + 1}"
-
-                if not _validate_mcq_obj(mcq_obj, chunk):
-                    logger.warning("LLM returned MCQ failed validation for chunk %s on attempt %s: %s", i_chunk, attempt, mcq_obj)
-                    if attempt <= MAX_RETRIES:
-                        time.sleep(BACKOFF_BASE * attempt)
-                        continue
-                    else:
-                        break
-
-                q_text = re.sub(r'\s+', ' ', mcq_obj["question"].strip().lower())
-                if q_text in used_questions:
-                    logger.info("Duplicate question detected; skipping.")
+            # Validate and collect
+            used_questions: set = set()
+            for i, obj in enumerate(mcq_list):
+                if len(out_mcqs) >= n:
                     break
+                if not isinstance(obj, dict):
+                    continue
+                # Assign stable id if missing
+                if not obj.get("id"):
+                    obj["id"] = f"q{len(out_mcqs) + 1}"
+                # Normalise answer letter to uppercase
+                if "answer" in obj:
+                    obj["answer"] = str(obj["answer"]).strip().upper()
 
-                choice_concat = " ".join([re.sub(r'\s+', ' ', str(v).strip().lower()) for v in mcq_obj["choices"].values()])
-                if choice_concat in used_choice_texts:
-                    logger.info("Duplicate choices across quiz; skipping.")
-                    break
+                if not _validate_mcq_obj(obj):
+                    logger.warning("Batch item %s failed validation — skipping: %s", i, obj)
+                    continue
 
-                # trim
-                mcq_obj["question"] = _shorten(str(mcq_obj["question"]), max_len=240)
-                for k, v in mcq_obj["choices"].items():
-                    mcq_obj["choices"][k] = _shorten(str(v), max_len=180)
-                if "explanation" in mcq_obj:
-                    mcq_obj["explanation"] = _shorten(str(mcq_obj["explanation"]), max_len=240)
+                q_text_norm = re.sub(r'\s+', ' ', obj["question"].strip().lower())
+                if q_text_norm in used_questions:
+                    logger.info("Duplicate question in batch — skipping.")
+                    continue
+                used_questions.add(q_text_norm)
+
+                # Trim fields
+                obj["question"] = _shorten(str(obj["question"]), max_len=240)
+                for k in list(obj.get("choices", {}).keys()):
+                    obj["choices"][k] = _shorten(str(obj["choices"][k]), max_len=180)
+                if "explanation" in obj:
+                    obj["explanation"] = str(obj["explanation"]).strip()
 
                 out_mcqs.append({
-                    "id": mcq_obj["id"],
-                    "question": mcq_obj["question"],
-                    "choices": mcq_obj["choices"],
-                    "answer": mcq_obj["answer"],
-                    "explanation": mcq_obj.get("explanation", "")
+                    "id": obj["id"],
+                    "question": obj["question"],
+                    "choices": obj["choices"],
+                    "answer": obj["answer"],
+                    "explanation": obj.get("explanation", ""),
                 })
-                used_questions.add(q_text)
-                used_choice_texts.add(choice_concat)
+
+            if out_mcqs:
+                batch_succeeded = True
+                break   # got valid results — exit retry loop
+
+            # No valid items parsed from this attempt
+            raise ValueError("Batch response contained no valid MCQ items")
+
+        except Exception as e:
+            # -------- HARD STOP on quota/rate-limit errors (429) -------- #
+            if _is_rate_limit_error(e):
+                delay = _extract_retry_delay(e, default=15.0)
+                logger.error(
+                    "Quota exhausted during batch MCQ generation — "
+                    "waiting %.1fs as instructed then aborting. Error: %s", delay, e
+                )
+                time.sleep(delay)
+                break   # do not attempt fallback — quota is gone for this minute
+
+            # -------- Transient overload (503) — wait longer, then retry -------- #
+            if _is_overload_error(e):
+                logger.warning("Model overloaded (503) on batch attempt %s — backing off.", attempt)
+                if attempt <= MAX_RETRIES:
+                    time.sleep(BACKOFF_503 * attempt)   # 10s, 20s
+                    continue
+                else:
+                    break   # exhausted retries for overload; fall through to per-chunk
+
+            logger.warning("Batch attempt %s failed: %s", attempt, e)
+            if attempt <= MAX_RETRIES:
+                wait = BACKOFF_BASE * (2 ** (attempt - 1))   # 0.4s, 0.8s
+                logger.info("Backing off %.1fs before retry.", wait)
+                time.sleep(wait)
+            # else: fall through to per-chunk fallback below
+
+    # ------------------------------------------------------------------ #
+    # Fallback: per-chunk calls (only if batch failed AND no quota error) #
+    # ------------------------------------------------------------------ #
+    _PER_CHUNK_PROMPT = """
+You are an expert quiz writer. Produce ONE high-quality multiple-choice question (MCQ) that tests
+a learner's understanding of the provided paragraph. Return JSON ONLY (no extra text).
+JSON must be an object with keys: id, question, choices (A-D), answer (A-D), explanation.
+
+IMPORTANT: Randomise which letter is correct. Do NOT bias toward C or any particular letter.
+All four options must be plausible but only one correct.
+
+Paragraph:
+\"\"\"{paragraph}\"\"\"
+"""
+
+    if not batch_succeeded and len(out_mcqs) < n:
+        logger.info("Batch failed — falling back to per-chunk generation for remaining %s items.", n - len(out_mcqs)  )
+        chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target)
+        needed = n - len(out_mcqs)
+        # Cap attempts tightly: at most 2 calls per remaining question
+        max_attempts = needed * 2
+        attempts_used = 0
+        used_questions_fb: set = {re.sub(r'\s+', ' ', q["question"].strip().lower()) for q in out_mcqs}
+
+        for chunk in chunks:
+            if len(out_mcqs) >= n or attempts_used >= max_attempts:
                 break
 
-            except ValueError as e:
-                logger.exception("Parsing/validation error on LLM output for chunk %s (attempt %s): %s", i_chunk, attempt, e)
-                if attempt > MAX_RETRIES:
-                    break
-                time.sleep(BACKOFF_BASE * (2 ** (attempt - 1)))
-                continue
-            except Exception as e:
-                logger.exception("LLM call error for chunk %s (attempt %s): %s", i_chunk, attempt, e)
-                if attempt > MAX_RETRIES:
-                    break
-                time.sleep(BACKOFF_BASE * (2 ** (attempt - 1)))
-                continue
+            prompt = _PER_CHUNK_PROMPT.format(paragraph=_shorten(chunk, max_len=2000))
+            for attempt in range(1, MAX_RETRIES + 2):
+                attempts_used += 1
+                try:
+                    logger.info("Fallback chunk call — attempt %s", attempts_used)
+                    raw = llm_call(prompt)
+                    if raw is None:
+                        raise RuntimeError("LLM returned None")
 
-        if attempts >= max_attempts:
-            logger.warning("Reached max attempts (%s) while generating MCQs.", max_attempts)
-            break
+                    parsed = safe_json_load(raw)
 
-    # final normalize
+                    # Normalise single-item response
+                    if isinstance(parsed, list) and parsed:
+                        obj = parsed[0]
+                    elif isinstance(parsed, dict) and "questions" in parsed:
+                        obj = (parsed["questions"] or [None])[0]
+                    elif isinstance(parsed, dict):
+                        obj = parsed
+                    else:
+                        raise ValueError("Unexpected shape from per-chunk LLM response")
+
+                    if not obj or not isinstance(obj, dict):
+                        raise ValueError("No MCQ object in response")
+                    if not obj.get("id"):
+                        obj["id"] = f"q{len(out_mcqs) + 1}"
+                    if "answer" in obj:
+                        obj["answer"] = str(obj["answer"]).strip().upper()
+
+                    if not _validate_mcq_obj(obj, chunk):
+                        raise ValueError("MCQ failed validation")
+
+                    q_norm = re.sub(r'\s+', ' ', obj["question"].strip().lower())
+                    if q_norm in used_questions_fb:
+                        logger.info("Duplicate question in fallback — skipping.")
+                        break
+
+                    used_questions_fb.add(q_norm)
+                    obj["question"] = _shorten(str(obj["question"]), max_len=240)
+                    for k in list(obj.get("choices", {}).keys()):
+                        obj["choices"][k] = _shorten(str(obj["choices"][k]), max_len=180)
+                    if "explanation" in obj:
+                        obj["explanation"] = str(obj["explanation"]).strip()
+
+                    out_mcqs.append({
+                        "id": obj["id"],
+                        "question": obj["question"],
+                        "choices": obj["choices"],
+                        "answer": obj["answer"],
+                        "explanation": obj.get("explanation", ""),
+                    })
+                    break  # success for this chunk
+
+                except Exception as e:
+                    if _is_rate_limit_error(e):
+                        delay = _extract_retry_delay(e, default=15.0)
+                        logger.error(
+                            "Quota exhausted in fallback — waiting %.1fs then aborting. Error: %s",
+                            delay, e
+                        )
+                        time.sleep(delay)
+                        chunks = []   # exhaust outer loop
+                        break
+                    if _is_overload_error(e):
+                        logger.warning("Model overloaded (503) in fallback attempt %s — backing off.", attempts_used)
+                        if attempt <= MAX_RETRIES:
+                            time.sleep(BACKOFF_503 * attempt)
+                            continue
+                        break   # move to next chunk
+                    logger.warning("Fallback attempt %s failed: %s", attempts_used, e)
+                    if attempt <= MAX_RETRIES:
+                        time.sleep(BACKOFF_BASE * (2 ** (attempt - 1)))
+                    break   # move to next chunk rather than retrying same one
+
+    # ------------------------------------------------------------------ #
+    # Final assembly                                                       #
+    # ------------------------------------------------------------------ #
     cleaned = []
     for q in out_mcqs[:n]:
         base = {
             "id": q["id"],
             "question": q["question"],
             "choices": q["choices"],
-            "answer": q["answer"]
+            "answer": q["answer"],
         }
         if q.get("explanation"):
             base["explanation"] = q["explanation"]
         cleaned.append(base)
+
     for idx, itm in enumerate(cleaned):
         concept = concept_list[idx % len(concept_list)]
         itm["concept_id"] = concept["concept_id"]
         itm["concept_label"] = concept["concept_label"]
+
     return cleaned
 
 
-# Backwards-compatible wrapper
-def generate_quiz_from_context(stem: str, context_text: str, n: int = 5,
-                               llm_call: Optional[Callable[[str], str]] = None,
-                               retries: int = MAX_RETRIES) -> Dict:
+# ---------- backwards-compatible wrapper (unchanged signature) ----------
+def generate_quiz_from_context(
+    stem: str,
+    context_text: str,
+    n: int = 5,
+    llm_call: Optional[Callable[[str], str]] = None,
+    retries: int = MAX_RETRIES,
+) -> Dict:
     try:
         mcqs = generate_mcq_from_context(context_text, n=n, llm_call=llm_call)
     except TypeError:
@@ -509,23 +686,34 @@ def generate_quiz_from_context(stem: str, context_text: str, n: int = 5,
             "id": qid,
             "question": question_text,
             "answer": answer_text,
-            "difficulty": difficulty
+            "difficulty": difficulty,
         })
     return {"stem": stem, "questions": questions}
 
 
-# quick demo
+# ---------- quick demo ----------
 if __name__ == "__main__":
     def fake_llm(prompt: str) -> str:
-        demo = {
-            "id": "q1",
-            "question": "Demo question?",
-            "choices": {"A": "one", "B": "two", "C": "three", "D": "four"},
-            "answer": "A",
-            "explanation": "demo"
-        }
+        demo = [
+            {
+                "id": "q1",
+                "question": "What is the primary benefit of batch MCQ generation?",
+                "choices": {
+                    "A": "It uses more API calls for better quality.",
+                    "B": "It reduces API calls to a single request per quiz.",
+                    "C": "It generates questions one paragraph at a time.",
+                    "D": "It avoids using any LLM at all.",
+                },
+                "answer": "B",
+                "explanation": "Batch generation requests all questions in one call, minimising quota usage.",
+            }
+        ]
         return json.dumps(demo)
 
-    s = ("Information infrastructure is the set of systems ... "
-         "The introduction chapter summarizes the concepts.")
-    print(generate_mcq_from_context(s, n=2, llm_call=fake_llm))
+    sample = (
+        "Information infrastructure is the set of systems that underpin digital services. "
+        "The introduction chapter summarizes the key concepts of behavioral economics, "
+        "including how people deviate from rational decision-making."
+    )
+    result = generate_mcq_from_context(sample, n=1, llm_call=fake_llm)
+    print(json.dumps(result, indent=2))

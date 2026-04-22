@@ -35,6 +35,23 @@ def _deterministic_confusion_id(stem: str, concept_text: str) -> str:
     return f"{stem}_{safe}"
 
 
+def _build_mcq_from_item(item: dict, selected_mcq: dict) -> dict:
+    selected_q = (selected_mcq.get("question") or "").strip() if isinstance(selected_mcq, dict) else ""
+    base_q = (item.get("original_question") or item.get("question") or "").strip()
+    question = selected_q or base_q
+    choices = item.get("choices", {}) if isinstance(item.get("choices"), dict) else {}
+    answer = (item.get("answer") or "").strip().upper()
+    explanation = (item.get("explanation") or "").strip()
+    qid = (selected_mcq.get("id") or item.get("quiz_question_id") or "").strip() if isinstance(selected_mcq, dict) else ""
+    return {
+        "id": qid or None,
+        "question": question,
+        "choices": choices,
+        "answer": answer,
+        "explanation": explanation,
+    }
+
+
 def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm):
     """
     Render the 'Confused? Quick prioritized list' UI for the given document (stem).
@@ -51,6 +68,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     # session/state keys that were used inline in app.py
     hist_key = f"chat_history_{stem}"
     quiz_state_key = f"quiz_items_{stem}"
+    quiz_generation_key = f"{quiz_state_key}_generation"
     doc_id_key = f"doc_id_{stem}"
     doc_id = st.session_state.get(doc_id_key, "")
     followup_notice_key = f"conf_followup_notice_{stem}"
@@ -68,9 +86,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     quiz_items_session = st.session_state.get(quiz_state_key, []) or []
 
     quiz_submissions = []
+    generation_token = int(st.session_state.get(quiz_generation_key, 0))
     for q in quiz_items_session:
         qid = q.get("id")
-        submit_key = f"{quiz_state_key}_sub_{qid}"
+        submit_key = f"{quiz_state_key}_sub_{generation_token}_{qid}"
         sub = st.session_state.get(submit_key)
         if sub:
             quiz_submissions.append({
@@ -157,6 +176,8 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     st.metric("Signals", strength)
                 evidence = item.get("evidence", []) or []
                 evidence_quiz_rows = []
+                item_type = (item.get("item_type") or ("mcq" if item.get("is_mcq") else "concept")).strip().lower()
+                is_mcq_item = item_type == "mcq"
 
                 # Build a deduplicated list of candidate original MCQs from evidence
                 mcq_candidates = []
@@ -179,6 +200,16 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                         label = f"{preview} [id=<no-id>]"
                     mcq_candidates.append({"id": stable_id or None, "question": question, "label": label})
 
+                if is_mcq_item:
+                    mcq_payload = _build_mcq_from_item(item, {"id": item.get("quiz_question_id"), "question": item.get("original_question")})
+                    if mcq_payload.get("question"):
+                        fallback_id = mcq_payload.get("id") or ""
+                        preview = _shorten(mcq_payload.get("question"), 100)
+                        fallback_label = f"{preview} [id={fallback_id or '<no-id>'}]"
+                        candidate = {"id": fallback_id or None, "question": mcq_payload.get("question"), "label": fallback_label}
+                        if (candidate["id"], candidate["question"]) not in seen_mcq:
+                            mcq_candidates.insert(0, candidate)
+
                 fallback_label = "No original MCQ available"
                 if not mcq_candidates:
                     mcq_candidates = [{"id": None, "question": "", "label": fallback_label}]
@@ -195,6 +226,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     (c for c in mcq_candidates if c["label"] == selected_mcq_label),
                     mcq_candidates[0],
                 )
+                st.caption("Type: MCQ confusion item" if is_mcq_item else "Type: Concept confusion item")
 
                 if evidence:
                     with st.expander("Why this concept was flagged"):
@@ -294,10 +326,8 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 "The user struggled with this concept in recent quizzes. Explain it clearly, give simple examples, and highlight key points that might cause confusion."
                             )
                             st.session_state[f"chat_pending_input_{stem}"] = follow_prompt
-                            st.session_state[followup_notice_key] = {
-                                "card_id": deterministic_fallback_id,
-                                "message": f"Follow-up prompt queued for '{extracted_concept}'. Open the Chat tab to review or send it.",
-                            }
+                            st.session_state[f"open_chat_tab_{stem}"] = True
+                            st.session_state[f"chat_focus_input_{stem}"] = True
                             try:
                                 st.rerun()
                             except Exception:
@@ -323,17 +353,58 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                                     question_text = question_text or concept
 
-                                mgr.ensure_card(card_id, meta={"question": question_text or "", "stem": stem, "source_reason": "Added from Confused review"})
+                                if is_mcq_item:
+                                    mcq_payload = _build_mcq_from_item(item, selected_mcq)
+                                    card_id = card_id or mcq_payload.get("id") or deterministic_fallback_id
+                                    question_text = mcq_payload.get("question") or question_text
+                                    card_meta = {
+                                        "item_type": "mcq",
+                                        "origin": "confused_mcq",
+                                        "quiz_question_id": mcq_payload.get("id") or "",
+                                        "question": question_text or "",
+                                        "choices": mcq_payload.get("choices") or {},
+                                        "answer": mcq_payload.get("answer") or "",
+                                        "explanation": mcq_payload.get("explanation") or "",
+                                        "stem": stem,
+                                        "source_reason": "Added from Confused review",
+                                    }
+                                else:
+                                    card_meta = {
+                                        "item_type": "concept",
+                                        "origin": "confused_concept",
+                                        "question": question_text or "",
+                                        "stem": stem,
+                                        "source_reason": "Added from Confused review",
+                                    }
+                                mgr.ensure_card(card_id, meta=card_meta)
                                 if "srs_quiz_items_cache" not in st.session_state:
                                     st.session_state["srs_quiz_items_cache"] = {}
-                                st.session_state["srs_quiz_items_cache"][card_id] = {
-                                    "id": card_id,
-                                    "question": question_text or "",
-                                    "choices": {},
-                                    "answer": "",
-                                    "explanation": "",
-                                }
+                                if is_mcq_item:
+                                    st.session_state["srs_quiz_items_cache"][card_id] = {
+                                        "id": card_id,
+                                        "question": card_meta.get("question", ""),
+                                        "choices": card_meta.get("choices", {}) or {},
+                                        "answer": card_meta.get("answer", ""),
+                                        "explanation": card_meta.get("explanation", ""),
+                                        "item_type": "mcq",
+                                    }
+                                else:
+                                    st.session_state["srs_quiz_items_cache"][card_id] = {
+                                        "id": card_id,
+                                        "question": card_meta.get("question", ""),
+                                        "choices": {},
+                                        "answer": "",
+                                        "explanation": "",
+                                        "item_type": "concept",
+                                    }
                                 st.success(f"Added to SRS: {card_id}")
+                                try:
+                                    st.rerun()
+                                except Exception:
+                                    try:
+                                        st.experimental_rerun()
+                                    except Exception:
+                                        pass
                             except Exception as e:
                                 st.error("Failed to add to SRS.")
                                 st.exception(e)

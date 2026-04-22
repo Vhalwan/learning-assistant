@@ -35,7 +35,7 @@ def _card_stem(card_id: str, meta: Dict | None) -> str:
     if meta and meta.get("stem"):
         return str(meta.get("stem"))
     if card_id and "_" in card_id:
-        return card_id.split("_", 1)[0]
+        return card_id.rsplit("_", 1)[0]
     return ""
 
 
@@ -84,10 +84,38 @@ def _pretty_date_delta(iso_ts: str) -> str:
         # fallback to short iso prefix
         return iso_ts[:10] if iso_ts else "N/A"
 
+
+def _format_interval(card_meta: Dict | None) -> str:
+    meta = card_meta or {}
+    interval_days = meta.get("interval_days")
+    if interval_days is not None:
+        try:
+            days = float(interval_days)
+            if days < 1:
+                minutes = max(1, int(round(days * 1440)))
+                return f"{minutes} min"
+            day_text = int(days) if float(days).is_integer() else round(days, 2)
+            return f"{day_text} day(s)"
+        except Exception:
+            pass
+    interval_idx = int(meta.get("interval_index", 0) or 0)
+    interval_idx = max(0, min(interval_idx, len(INTERVALS) - 1))
+    return f"{INTERVALS[interval_idx]} day(s)"
+
 def _card_doc_name(card_id: str) -> str:
     if "_" not in card_id:
         return "Unknown"
     return card_id.rsplit("_", 1)[0]
+
+
+def _is_mcq_card(quiz_item: Dict | None, card_meta: Dict | None) -> bool:
+    quiz_item = quiz_item or {}
+    card_meta = card_meta or {}
+    explicit_type = (quiz_item.get("item_type") or card_meta.get("item_type") or "").strip().lower()
+    if explicit_type:
+        return explicit_type == "mcq"
+    choices = quiz_item.get("choices") if isinstance(quiz_item.get("choices"), dict) else card_meta.get("choices")
+    return isinstance(choices, dict) and any(str(choices.get(k, "")).strip() for k in ["A", "B", "C", "D"])
 
 
 def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
@@ -292,7 +320,7 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
                             col_correct, col_incorrect = st.columns(2)
                             with col_correct:
                                 if st.button(f"✅ Yes, I remember this", key=f"srs_correct_{card_id}", type="primary", use_container_width=True):
-                                    srs_mgr.mark_review(card_id, correct=True)
+                                    srs_mgr.mark_review_with_rating(card_id, "good")
                                     reviewed_this_session.add(card_id)
                                     st.session_state["srs_reviewed_this_session"] = reviewed_this_session
                                     st.success("🎉 Excellent! This card will be scheduled for review in a longer interval.")
@@ -301,20 +329,20 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
 
                             with col_incorrect:
                                 if st.button(f"❌ No, I need to review", key=f"srs_incorrect_{card_id}", use_container_width=True):
-                                    srs_mgr.mark_review(card_id, correct=False)
+                                    srs_mgr.mark_review_with_rating(card_id, "hard")
                                     reviewed_this_session.add(card_id)
                                     st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                    st.info("📚 No problem! This card will come up again soon to help strengthen your memory.")
+                                    st.info("📚 No problem! This card will come back sooner so you can reinforce it.")
                                     st.rerun()
 
                             if card_meta:
                                 review_count = card_meta.get("review_count", 0)
-                                interval_idx = card_meta.get("interval_index", 0)
                                 next_due = card_meta.get("next_due", "")
                                 pretty = _pretty_date_delta(next_due)
+                                interval_label = _format_interval(card_meta)
                                 st.markdown("**Progress / Review stats**")
                                 st.caption(
-                                    f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} day(s) | {pretty}"
+                                    f"📊 Reviewed {review_count} time(s) | Interval: {interval_label} | {pretty}"
                                 )
 
                             st.markdown("---")
@@ -328,9 +356,12 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
                             source_reason = (card_meta or {}).get("source_reason", "")
                             if source_reason:
                                 st.caption(f"Why this card exists: {source_reason}")
-                            choices = quiz_item.get("choices", {}) or {}
-                            answer_letter = quiz_item.get("answer", None)
-                            explanation = quiz_item.get("explanation", "")
+                            choices = quiz_item.get("choices", {}) if isinstance(quiz_item.get("choices"), dict) else {}
+                            if not choices:
+                                choices = (card_meta or {}).get("choices", {}) if isinstance((card_meta or {}).get("choices"), dict) else {}
+                            answer_letter = quiz_item.get("answer", None) or (card_meta or {}).get("answer", None)
+                            explanation = quiz_item.get("explanation", "") or (card_meta or {}).get("explanation", "")
+                            is_mcq_card = _is_mcq_card(quiz_item, card_meta)
 
                             # Question area with graceful handling for long text
                             st.markdown("**Question**")
@@ -342,8 +373,8 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
                             else:
                                 st.info("Question text unavailable for this card. Upload the lecture and regenerate quiz history to restore full text.")
 
-                            # Show choices in a compact list for scanning
-                            if choices:
+                            # Show choices in a compact list for scanning (MCQ only)
+                            if is_mcq_card and choices:
                                 st.markdown("**Answer Choices**")
                                 for label in ["A", "B", "C", "D"]:
                                     if label in choices:
@@ -358,20 +389,37 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
                             if not st.session_state[show_answer_key]:
                                 st.markdown("**Front**")
                                 st.info(_shorten(q_text or stored_question or card_id, 140))
-                                st.caption("Try recalling the answer before revealing it.")
+                                st.caption("Type: MCQ card" if is_mcq_card else "Type: Concept card")
                                 st.caption("🗑️ Remove card deletes only this SRS card, not the original quiz question.")
-                                cfront1, cfront2 = st.columns(2)
-                                with cfront1:
-                                    if st.button("Show answer", key=f"show_{card_id}", type="primary", use_container_width=True):
+                                if is_mcq_card:
+                                    placeholder = "Select an answer"
+                                    options = [placeholder] + [
+                                        f"{label}. {choices.get(label, '')}" for label in ["A", "B", "C", "D"] if choices.get(label, "")
+                                    ]
+                                    select_key = f"srs_select_{card_id}"
+                                    selected = st.selectbox(
+                                        "Choose your answer",
+                                        options=options,
+                                        key=select_key,
+                                    )
+                                    check_disabled = (selected == placeholder)
+                                    if st.button("Check answer", key=f"srs_check_{card_id}", disabled=check_disabled, type="primary", use_container_width=True):
                                         st.session_state[show_answer_key] = True
+                                        st.session_state[f"srs_checked_choice_{card_id}"] = selected.split(".", 1)[0].strip() if "." in selected else ""
                                         st.rerun()
-                                with cfront2:
-                                    if st.button("I don't remember", key=f"forget_{card_id}", use_container_width=True):
-                                        srs_mgr.mark_review(card_id, correct=False)
-                                        reviewed_this_session.add(card_id)
-                                        st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                        st.session_state[show_answer_key] = False
-                                        st.rerun()
+                                else:
+                                    cfront1, cfront2 = st.columns(2)
+                                    with cfront1:
+                                        if st.button("Show answer", key=f"show_{card_id}", type="primary", use_container_width=True):
+                                            st.session_state[show_answer_key] = True
+                                            st.rerun()
+                                    with cfront2:
+                                        if st.button("I don't remember", key=f"forget_{card_id}", use_container_width=True):
+                                            srs_mgr.mark_review_with_rating(card_id, "hard")
+                                            reviewed_this_session.add(card_id)
+                                            st.session_state["srs_reviewed_this_session"] = reviewed_this_session
+                                            st.session_state[show_answer_key] = False
+                                            st.rerun()
                                 if st.button("🗑️ Remove card", key=f"remove_{card_id}"):
                                     try:
                                         srs_mgr.delete_card(card_id)
@@ -381,39 +429,45 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
                                         st.error(f"Failed to remove card: {e}")
                             else:
                                 st.markdown("**Back**")
-                                if answer_letter and choices.get(answer_letter):
-                                    st.success(f"**{answer_letter}.** {choices[answer_letter]}")
-                                elif answer_letter:
-                                    st.success(f"{answer_letter}")
+                                if is_mcq_card:
+                                    checked = st.session_state.get(f"srs_checked_choice_{card_id}", "")
+                                    if checked and answer_letter:
+                                        if checked == str(answer_letter).strip().upper():
+                                            st.success(f"✅ Correct: **{answer_letter}.** {choices.get(answer_letter, '')}")
+                                        else:
+                                            st.error(f"❌ Incorrect. You chose **{checked}**.")
+                                            st.success(f"Correct answer: **{answer_letter}.** {choices.get(answer_letter, '')}")
+                                    elif answer_letter and choices.get(answer_letter):
+                                        st.success(f"**{answer_letter}.** {choices[answer_letter]}")
+                                    else:
+                                        st.info("Answer choices aren't available for this card.")
                                 else:
-                                    st.info("Answer choices aren't available for this card.")
+                                    if explanation:
+                                        st.success(explanation)
+                                    else:
+                                        st.info(q_text or stored_question or "No answer available.")
                                 if explanation:
                                     st.markdown("**Generated explanation**")
                                     st.write(explanation)
                                 with st.expander("Evidence chunk"):
                                     st.write(_shorten(q_text or stored_question or card_id, 300))
 
-                                rating_cols = st.columns(4)
-                                if rating_cols[0].button("Again", key=f"rate_again_{card_id}", use_container_width=True):
-                                    srs_mgr.mark_review(card_id, correct=False)
+                                st.markdown("**How difficult was this problem?**")
+                                rating_cols = st.columns(3)
+                                if rating_cols[0].button("Hard", key=f"rate_hard_{card_id}", use_container_width=True):
+                                    srs_mgr.mark_review_with_rating(card_id, "hard")
                                     reviewed_this_session.add(card_id)
                                     st.session_state["srs_reviewed_this_session"] = reviewed_this_session
                                     st.session_state[show_answer_key] = False
                                     st.rerun()
-                                if rating_cols[1].button("Hard", key=f"rate_hard_{card_id}", use_container_width=True):
-                                    srs_mgr.mark_review(card_id, correct=True)
+                                if rating_cols[1].button("Good", key=f"rate_good_{card_id}", type="primary", use_container_width=True):
+                                    srs_mgr.mark_review_with_rating(card_id, "good")
                                     reviewed_this_session.add(card_id)
                                     st.session_state["srs_reviewed_this_session"] = reviewed_this_session
                                     st.session_state[show_answer_key] = False
                                     st.rerun()
-                                if rating_cols[2].button("Good", key=f"rate_good_{card_id}", type="primary", use_container_width=True):
-                                    srs_mgr.mark_review(card_id, correct=True)
-                                    reviewed_this_session.add(card_id)
-                                    st.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                                    st.session_state[show_answer_key] = False
-                                    st.rerun()
-                                if rating_cols[3].button("Easy", key=f"rate_easy_{card_id}", use_container_width=True):
-                                    srs_mgr.mark_review(card_id, correct=True)
+                                if rating_cols[2].button("Easy", key=f"rate_easy_{card_id}", use_container_width=True):
+                                    srs_mgr.mark_review_with_rating(card_id, "easy")
                                     reviewed_this_session.add(card_id)
                                     st.session_state["srs_reviewed_this_session"] = reviewed_this_session
                                     st.session_state[show_answer_key] = False
@@ -422,12 +476,12 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
                                 # Show progress info (next due)
                                 if card_meta:
                                     review_count = card_meta.get("review_count", 0)
-                                    interval_idx = card_meta.get("interval_index", 0)
                                     next_due = card_meta.get("next_due", "")
                                     pretty = _pretty_date_delta(next_due)
+                                    interval_label = _format_interval(card_meta)
                                     st.markdown("**Progress / Review stats**")
                                     st.caption(
-                                        f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} day(s) | {pretty}"
+                                        f"📊 Reviewed {review_count} time(s) | Interval: {interval_label} | {pretty}"
                                     )
 
                                 st.markdown("---")
@@ -489,7 +543,7 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
 
                     next_due = meta.get("next_due", "") if meta else ""
                     review_count = meta.get("review_count", 0) if meta else 0
-                    interval_idx = meta.get("interval_index", 0) if meta else 0
+                    interval_label = _format_interval(meta)
 
                     # Render card header inline
                     if quiz_item:
@@ -500,7 +554,7 @@ def render(st: Any, stem: str | None = None, scope_mode: str = "all"):
                     st.markdown(f"#### {status_icon} 📄 {card_title} — {status_text}")
                     st.write(question_preview)
                     pretty = _pretty_date_delta(next_due)
-                    st.caption(f"📊 Reviewed {review_count} time(s) | Interval: {INTERVALS[interval_idx]} day(s) | {pretty}")
+                    st.caption(f"📊 Reviewed {review_count} time(s) | Interval: {interval_label} | {pretty}")
                     # Optionally show full text if available
                     full_question = quiz_item.get("question", "") if quiz_item else stored_question
                     if full_question:

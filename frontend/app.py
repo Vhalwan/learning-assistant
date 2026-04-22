@@ -452,8 +452,8 @@ with st.sidebar:
         - [Setup](#setup-your-lecture)
         - [Study modes](#study-modes)
         - [Quiz](#study-quiz-mcq-v1)
-        - [SRS](#spaced-repetition-review)
         - [Confused?](#confused-quick-prioritized-list)
+        - [SRS](#spaced-repetition-review)
         """,
         unsafe_allow_html=True,
     )
@@ -571,6 +571,23 @@ if uploaded:
             "Chat",
         ]
     )
+    if st.session_state.pop(f"open_chat_tab_{stem}", False):
+        components.html(
+            """
+            <script>
+            const clickChatTab = () => {
+              const tabs = Array.from(parent.document.querySelectorAll('button[data-baseweb="tab"]'));
+              const chatTab = tabs.find((btn) => (btn.innerText || "").trim().toLowerCase() === "chat");
+              if (chatTab) {
+                chatTab.click();
+              }
+            };
+            setTimeout(clickChatTab, 0);
+            setTimeout(clickChatTab, 120);
+            </script>
+            """,
+            height=0,
+        )
 
     # Hidden defaults: keep top-k fixed for QA and Chat (3), and summary default 0
     if "qa_k" not in st.session_state:

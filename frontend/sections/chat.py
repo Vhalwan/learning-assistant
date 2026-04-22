@@ -280,6 +280,7 @@ def render(st: Any, stem: str, llm):
     if pending_input:
         st.session_state[f"chat_input_{stem}"] = pending_input
         st.session_state[f"chat_force_question_{stem}"] = True
+        st.session_state[f"chat_focus_input_{stem}"] = True
         pending_loaded = True
         st.success("Follow-up prompt loaded. Review it and send below.")
 
@@ -299,6 +300,25 @@ def render(st: Any, stem: str, llm):
             placeholder="Type your message here...",
             height=100,
         )
+        if st.session_state.pop(f"chat_focus_input_{stem}", False):
+            components.html(
+                """
+                <script>
+                const focusChat = () => {
+                  const nodes = parent.document.querySelectorAll('textarea');
+                  const target = Array.from(nodes).find((el) => (el.getAttribute('aria-label') || '').toLowerCase().includes('message to assistant'));
+                  if (target) {
+                    target.focus();
+                    target.selectionStart = target.value.length;
+                    target.selectionEnd = target.value.length;
+                  }
+                };
+                setTimeout(focusChat, 0);
+                setTimeout(focusChat, 120);
+                </script>
+                """,
+                height=0,
+            )
         send_pressed = st.form_submit_button("Send")
 
         if send_pressed:

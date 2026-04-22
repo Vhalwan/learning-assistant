@@ -37,13 +37,13 @@ def _infer_stem_from_qid(qid: str) -> str:
         return ""
     # Common qid formats use underscore as separator (e.g. "lecture1_Q1").
     # Some generators may use spaces or hyphens in stems (e.g. "lecture 3_P1_Q1").
-    # Be tolerant: split on first underscore, else first space, else first hyphen.
+    # Be tolerant: split from the right on known suffix separators.
     if "_" in qid:
-        return qid.split("_", 1)[0]
+        return qid.rsplit("_", 1)[0]
     if " " in qid:
-        return qid.split(" ", 1)[0]
+        return qid.rsplit(" ", 1)[0]
     if "-" in qid:
-        return qid.split("-", 1)[0]
+        return qid.rsplit("-", 1)[0]
     return qid
 
 
@@ -55,6 +55,8 @@ def record_quiz_result(
     concept: str = "",
     concept_id: str = "",
     concept_label: str = "",
+    question_item: Optional[Dict[str, Any]] = None,
+    chosen_answer: str = "",
     doc_id: str = "",
     path: Optional[Path] = None,
 ) -> None:
@@ -96,6 +98,30 @@ def record_quiz_result(
     entry["concept"] = resolved_label
     entry["concept_label"] = resolved_label
     entry["concept_id"] = resolved_id
+    entry["item_type"] = "mcq"
+    entry["origin"] = "quiz_mcq"
+    entry["quiz_question_id"] = qid
+    entry["last_is_correct"] = bool(is_correct)
+    if chosen_answer:
+        entry["last_chosen_answer"] = str(chosen_answer).strip().upper()
+    mcq_source = question_item if isinstance(question_item, dict) else {}
+    question_text = (question or mcq_source.get("question") or "").strip()
+    choices = mcq_source.get("choices", {}) if isinstance(mcq_source.get("choices"), dict) else {}
+    answer = (mcq_source.get("answer") or "").strip().upper() if isinstance(mcq_source, dict) else ""
+    explanation = (mcq_source.get("explanation") or "").strip() if isinstance(mcq_source, dict) else ""
+    if question_text:
+        entry["question"] = question_text
+    if choices:
+        entry["choices"] = {
+            "A": str(choices.get("A", "")),
+            "B": str(choices.get("B", "")),
+            "C": str(choices.get("C", "")),
+            "D": str(choices.get("D", "")),
+        }
+    if answer:
+        entry["answer"] = answer
+    if explanation:
+        entry["explanation"] = explanation
     if doc_id:
         entry["doc_id"] = doc_id
     entry["stem"] = inferred_stem or entry.get("stem", "")
