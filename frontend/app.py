@@ -406,24 +406,23 @@ st.markdown(
     """
 **Upload a lecture PDF and study it interactively.**  
 
-Controls:
-- Toggle SAFE vs REAL embeddings.
-- (Re)create embeddings file.
-- Build FAISS index (optional).
-- Toggle FAISS vs NumPy search.
+Options:
+- SAFE embeddings are used by default.
+- Recreate embeddings or build FAISS only when needed.
 
-Primary study modes:
-1. **Ask a Question (RAG)** — targeted answers using retrieved chunks.  
-2. **Generate Summary** — quick lecture overview.  
-3. **Chat** — conversational mode with history.
+Study modes:
+- **Ask** for focused lecture questions.
+- **Summary** for quick overviews.
+- **Chat** for back-and-forth understanding.
 
-Learning Enhancements:
-- **Quiz Generation (MCQs)** — self-test knowledge.
-- **Spaced Repetition (SRS)** — review cards efficiently.
-- **Transparent Retrieval** — see chunks used for answers.
+Learning tools:
+- **Quiz** to test understanding.
+- **Confused** to review weak concepts.
+
+Review tools:
+- **SRS** to revisit important items over time.
 """
 )
-st.caption("This UI pass keeps the same backend behavior and study actions; it only improves layout and readability.")
 
 # ----------------------------
 # API mode toggle + token UI
@@ -451,7 +450,7 @@ with st.sidebar:
         """
         - [Setup](#setup-your-lecture)
         - [Study modes](#study-modes)
-        - [Quiz](#study-quiz-mcq-v1)
+        - [Quiz](#study-quiz)
         - [Confused?](#confused-quick-prioritized-list)
         - [SRS](#spaced-repetition-review)
         """,
@@ -491,51 +490,53 @@ if uploaded:
     st.markdown(
         """
         <div class="la-inline-banner">
-          <strong>Setup checklist</strong>
-          Upload the PDF, confirm the preview looks right, create embeddings, and build the optional FAISS index only if you want faster retrieval on larger documents.
+          <strong>Upload lecture</strong>
+          Your lecture is uploaded and processing happens automatically with SAFE embeddings.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     st.info(f"📄 Current lecture: {current_label}")
-    # Group embedding controls into a neat card-like area
-    with st.container():
-        st.markdown("#### Embeddings & Indexing")
-        col1, col2, col3 = st.columns([2, 1, 1])
-        with col1:
-            use_safe_toggle = st.checkbox(
-                "Use SAFE embeddings (filter sensitive or risky outputs)",
-                value=os.getenv("USE_SAFE_EMBEDDINGS", "1").lower() in ("1", "true", "yes"),
-            )
-        with col2:
-            recreate_btn = st.button("Recreate embeddings")
-        with col3:
-            build_index_btn = st.button("Build FAISS index")
-        use_faiss_search = st.checkbox("Use FAISS for retrieval (faster retrieval for large documents)",
-                                       value=False)
 
-    os.environ["USE_SAFE_EMBEDDINGS"] = "1" if use_safe_toggle else "0"
+    # SAFE is the default behavior; keep it as a status, not a user choice.
+    os.environ["USE_SAFE_EMBEDDINGS"] = "1"
+    recreate_btn = False
+    build_index_btn = False
+
+    # Keep FAISS as the only optional performance choice.
+    use_faiss_search = st.checkbox(
+        "Enable fast search (FAISS) for larger lectures",
+        value=bool(st.session_state.get("use_faiss_search", False)),
+        help="Optional performance boost for retrieval. Regular search still works without this.",
+    )
     st.session_state["use_faiss_search"] = use_faiss_search
     # Create embeddings when missing or when they are requested
     if (not embeddings_path.exists()) or recreate_btn:
         try:
             with st.spinner("Creating embeddings..."):
-                rows = create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
-                st.success(f"Embeddings created: {embeddings_path} ({len(rows)} chunks)")
+                create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
         except Exception as e:
             st.error("Failed to create embeddings.")
             st.exception(e)
 
-    # Show embeddings status
+    # Show a single completion status when setup is ready.
     try:
         ids, texts, vecs = load_embeddings(str(embeddings_path))
-        st.info(
-            f"Embeddings file: {embeddings_path} — {len(ids)} chunks — Mode: {'SAFE' if os.environ.get('USE_SAFE_EMBEDDINGS','1') in ('1','true') else 'REAL'}"
-        )
+        if len(ids) > 0:
+            st.success("Lecture is ready to study")
     except Exception:
         ids, texts, vecs = [], [], np.array([])
-        st.warning("Embeddings file not found. Click (Re)create embeddings.")
+        st.warning("Processing not ready yet. Open Advanced reset tools if you need to recreate embeddings.")
+
+    # Advanced/reset tools are hidden from the default setup flow.
+    with st.expander("Advanced reset tools"):
+        st.caption("Use these only when troubleshooting or resetting processed data.")
+        adv_col1, adv_col2 = st.columns([1, 1])
+        with adv_col1:
+            recreate_btn = st.button("Recreate embeddings")
+        with adv_col2:
+            build_index_btn = st.button("Build FAISS index")
 
     # Build FAISS index if requested
     if build_index_btn:
@@ -607,7 +608,7 @@ if uploaded:
         # hide top-k input from users; keep value in session_state
         k = st.session_state.get("qa_k", 3)
 
-        if st.button("Ask (RAG)"):
+        if st.button("Ask"):
             if len(ids) == 0:
                 st.error("Embeddings not loaded. Create embeddings first.")
             elif not question or not question.strip():

@@ -66,8 +66,8 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000") if "os" in globals() else "http://localhost:8000"
 
     st.markdown("---")
-    st.markdown('<a id="study-quiz-mcq-v1"></a>', unsafe_allow_html=True)
-    st.subheader("📝 Study / Quiz (MCQ v1)")
+    st.markdown('<a id="study-quiz"></a>', unsafe_allow_html=True)
+    st.subheader("📝 Study / Quiz")
     st.markdown(
         "Generate short multiple-choice quizzes from your lecture. "
         "Read each card, select an answer, then **Check answer**. "
@@ -175,6 +175,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
     # Render each question as a clean "card" with clear spacing & buttons
     seen_qids: Dict[str, int] = {}
+    quiz_render_items: List[Dict[str, Any]] = []
     for idx, q in enumerate(quiz_items, start=1):
         with st.container():
             st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
@@ -193,6 +194,14 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
             exp_key = f"{quiz_state_key}_expander_{generation_token}_{key_suffix}"
             if exp_key not in st.session_state:
                 st.session_state[exp_key] = False
+            quiz_render_items.append(
+                {
+                    "question": q,
+                    "qid": qid,
+                    "key_suffix": key_suffix,
+                    "submit_key": submit_key,
+                }
+            )
 
             # Determine submission state early (unchanged logic)
             already_submitted = bool(st.session_state.get(submit_key))
@@ -361,9 +370,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                     # Success box with explanation (if provided)
                     if effective_explanation:
                         st.success("✅ Correct — well done!")
-                        # explanation area shown inline
-                        st.markdown("**Explanation**")
-                        st.text_area("", value=effective_explanation, height=180, disabled=True)
+                        st.markdown(f"**Explanation:** {effective_explanation}")
                     else:
                         st.success("✅ Correct")
                 else:
@@ -378,64 +385,72 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                     else:
                         st.error(f"❌ Incorrect.\n\n**Correct:** {correct_display}")
 
-                    # show explanation if available, inline
-                    st.markdown("**Explanation**")
-                    st.text_area("", value=effective_explanation, height=180, disabled=True)
-                    if st.button("Try again", key=f"{quiz_state_key}_retry_{generation_token}_{key_suffix}", use_container_width=True):
-                        try:
-                            del st.session_state[submit_key]
-                        except Exception:
-                            st.session_state[submit_key] = None
-                        st.session_state[selection_key] = placeholder
-                        st.session_state[f"{selection_key}_made"] = False
-                        st.rerun()
+                    st.markdown(f"**Explanation:** {effective_explanation}")
 
             # Optionally show a small divider between questions
             st.markdown("---")
     total_answered = 0
     total_wrong = 0
-    for q in quiz_items:
-        qid = q.get("id", "")
-        submit_key = f"{quiz_state_key}_sub_{generation_token}_{qid}"
-        submitted = st.session_state.get(submit_key)
+    for render_item in quiz_render_items:
+        submitted = st.session_state.get(render_item["submit_key"])
         if submitted:
             total_answered += 1
             if not submitted.get("is_correct", False):
                 total_wrong += 1
 
-    if total_answered:
+    if total_answered and total_wrong > 0:
         st.markdown("### 🔁 Next step recommendations")
-        st.info(f"You answered {total_answered} question(s). Missed: {total_wrong}.")
-        if total_wrong > 0:
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Add missed concepts to SRS", key=f"quiz_push_missed_{stem}", use_container_width=True):
-                    try:
-                        mgr = SRSManager()
-                        added = 0
-                        for q in quiz_items:
-                            qid = q.get("id", "")
-                            submit_key = f"{quiz_state_key}_sub_{generation_token}_{qid}"
-                            sub = st.session_state.get(submit_key)
-                            if sub and not sub.get("is_correct", False):
-                                mgr.ensure_card(
-                                    qid,
-                                    meta={
-                                        "question": q.get("question", ""),
-                                        "choices": q.get("choices", {}) or {},
-                                        "answer": q.get("answer", None),
-                                        "explanation": q.get("explanation", "") or "",
-                                        "stem": stem,
-                                        "source_reason": "Added because you missed this in quiz",
-                                    },
-                                )
-                                added += 1
-                        st.success(f"Added {added} missed concept(s) to SRS.")
-                    except Exception as e:
-                        st.error(f"Could not add missed concepts: {e}")
-            with c2:
-                if st.button("Review top confused concepts", key=f"quiz_focus_confused_{stem}", use_container_width=True):
-                    st.session_state[f"focus_confused_{stem}"] = True
-                    st.success("Jump to Confused section below.")
+        st.markdown(f"You answered {total_answered} question(s). Missed: {total_wrong}.")
+        if st.button("Add missed concepts to SRS", key=f"quiz_push_missed_{stem}", use_container_width=True):
+            try:
+                mgr = SRSManager()
+                added = 0
+                seen_card_ids = set()
+                if "srs_quiz_items_cache" not in st.session_state:
+                    st.session_state["srs_quiz_items_cache"] = {}
+                for render_item in quiz_render_items:
+                    sub = st.session_state.get(render_item["submit_key"])
+                    if not sub or sub.get("is_correct", False):
+                        continue
+
+                    q = render_item["question"]
+                    base_qid = render_item["qid"] or ""
+                    key_suffix = render_item["key_suffix"]
+                    card_id = f"{base_qid}_{generation_token}_{key_suffix}" if base_qid else f"missed_{generation_token}_{key_suffix}"
+                    if card_id in seen_card_ids:
+                        continue
+                    seen_card_ids.add(card_id)
+                    mgr.ensure_card(
+                        card_id,
+                        meta={
+                            "question": q.get("question", ""),
+                            "choices": q.get("choices", {}) or {},
+                            "answer": q.get("answer", None),
+                            "explanation": q.get("explanation", "") or "",
+                            "stem": stem,
+                            "item_type": "mcq",
+                            "origin": "quiz_mcq",
+                            "quiz_question_id": base_qid or card_id,
+                            "source_reason": "Added because you missed this in quiz session",
+                        },
+                    )
+                    st.session_state["srs_quiz_items_cache"][card_id] = {
+                        "id": card_id,
+                        "question": q.get("question", ""),
+                        "choices": q.get("choices", {}) or {},
+                        "answer": q.get("answer", None),
+                        "explanation": q.get("explanation", "") or "",
+                        "item_type": "mcq",
+                        "origin": "quiz_mcq",
+                    }
+                    added += 1
+                st.success(f"Added {added} missed concept(s) to SRS.")
+                st.markdown("Jump to Confused section below.")
+            except Exception as e:
+                st.error(f"Could not add missed concepts: {e}")
+    elif total_answered and total_wrong == 0:
+        st.markdown("### 🔁 Next step recommendations")
+        st.markdown(f"You answered {total_answered} question(s). Missed: 0.")
+        st.markdown("Great job. You can generate more MCQs for extra practice.")
 
     # End loop over quiz items — UI improved but all keys + behavior preserved.
