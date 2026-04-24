@@ -311,6 +311,10 @@ def post_summarize(body: SummarizeRequest, _auth: Any = Depends(check_token)) ->
         logger.warning("Summarize failed: %s", e)
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        detail = str(e)
+        if any(token in detail for token in ("503", "UNAVAILABLE", "unavailable", "429", "RESOURCE_EXHAUSTED", "timeout", "timed out")):
+            logger.warning("Summarize temporarily unavailable: %s", e)
+            raise HTTPException(status_code=503, detail=f"Summarize temporarily unavailable: {detail}")
         logger.exception("Summarize failed unexpectedly: %s", e)
         raise HTTPException(status_code=500, detail=f"Summarize failed: {e}")
 

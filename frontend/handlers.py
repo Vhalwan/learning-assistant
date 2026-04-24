@@ -33,7 +33,7 @@ except Exception:
     _faiss_builder_available = False
 
 # local helper api wrappers
-from frontend.ui_helpers import (
+from frontend.runtime_ui_helpers import (
     call_query_api, call_summarize_api, call_chat_api
 )
 

@@ -5,6 +5,7 @@ import json
 import hashlib
 import logging
 import re
+import time
 from collections import OrderedDict
 from typing import Tuple, List, Optional, Callable, Any, Dict
 
@@ -12,9 +13,10 @@ import numpy as np
 from dotenv import load_dotenv
 
 # Use the generator helper and summarizer
-from backend.summarize_file import summarize_with_gemini, generate_with_gemini
+from backend.summarize_file import generate_with_gemini
 from backend.create_embeddings import load_embeddings  # returns ids, texts, vecs
 from backend.embeddings_provider import get_embedding_provider, deterministic_vector
+from backend.llm_client import get_llm_call
 
 # faiss helpers (optional)
 try:
@@ -28,6 +30,8 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 DEFAULT_EMBED_FILE = "data/processed/lecture1_embeddings.json"
+SUMMARY_TRANSIENT_RETRIES = 3
+SUMMARY_AUTO_CAPS = {"brief": 120, "detailed": 160}
 
 # LRU cache
 class _LRUCache:
@@ -120,6 +124,172 @@ def _simple_query_expand(question: str, use_safe: bool, llm_call: Optional[Calla
     if not words:
         return []
     return words[-2:][-2:]
+
+
+def _is_transient_summary_error(exc: Exception) -> bool:
+    msg = str(exc or "")
+    markers = (
+        "503",
+        "UNAVAILABLE",
+        "unavailable",
+        "429",
+        "RESOURCE_EXHAUSTED",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+    )
+    return any(marker in msg for marker in markers)
+
+
+def _call_summary_model(prompt: str, llm_call: Optional[Callable[[str], str]] = None, label: str = "summary") -> str:
+    caller = llm_call or get_llm_call()
+    if caller is None:
+        out = generate_with_gemini(prompt)
+        return out if isinstance(out, str) else str(out)
+
+    last_exc = None
+    for attempt in range(1, SUMMARY_TRANSIENT_RETRIES + 1):
+        try:
+            out = caller(prompt)
+            if isinstance(out, dict):
+                out = out.get("summary") or out.get("text") or json.dumps(out)
+            return out if isinstance(out, str) else str(out)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= SUMMARY_TRANSIENT_RETRIES or not _is_transient_summary_error(exc):
+                raise
+            delay = 8.0 * attempt if "503" in str(exc) or "UNAVAILABLE" in str(exc).upper() else 2.5 * attempt
+            logger.warning(
+                "Transient LLM error during %s attempt %s/%s; retrying in %.1fs: %s",
+                label,
+                attempt,
+                SUMMARY_TRANSIENT_RETRIES,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Failed to generate {label}")
+
+
+def _select_summary_chunk_indices(total_chunks: int, top_k: Optional[int], summary_type: str) -> List[int]:
+    if total_chunks <= 0:
+        return []
+
+    normalized_type = (summary_type or "brief").strip().lower()
+    auto_cap = SUMMARY_AUTO_CAPS.get(normalized_type, SUMMARY_AUTO_CAPS["brief"])
+
+    if top_k is None or int(top_k or 0) <= 0:
+        if total_chunks <= auto_cap:
+            return list(range(total_chunks))
+        top_k = auto_cap
+    else:
+        top_k = min(int(top_k), total_chunks)
+        if total_chunks > auto_cap:
+            top_k = min(top_k, auto_cap)
+
+    if top_k >= total_chunks:
+        return list(range(total_chunks))
+    if top_k <= 1:
+        return [0]
+
+    step = (total_chunks - 1) / float(top_k - 1)
+    idxs: List[int] = []
+    for i in range(top_k):
+        idx = int(round(i * step))
+        if idxs and idx <= idxs[-1]:
+            idx = min(total_chunks - 1, idxs[-1] + 1)
+        idxs.append(idx)
+    return idxs[:top_k]
+
+
+def _build_summary_instruction(summary_type: str) -> str:
+    normalized_type = (summary_type or "brief").strip().lower()
+    if normalized_type == "detailed":
+        return (
+            "Write a DETAILED, structured summary of the following lecture. "
+            "Use short section headings and bullet-pointed takeaways. "
+            "Keep it faithful to the text and do not hallucinate facts. "
+            "Do not add a top-level title like 'Summary'. "
+            "End with one final line exactly in this format: "
+            "Key concepts: concept 1, concept 2, concept 3"
+        )
+    return (
+        "Write a BRIEF summary (3-6 sentences) capturing the main ideas and key takeaways of the following lecture. "
+        "Be concise and factual. "
+        "Do not add a top-level title like 'Summary'. "
+        "End with one final line exactly in this format: "
+        "Key concepts: concept 1, concept 2, concept 3"
+    )
+
+
+def _split_summary_and_key_concepts(text: str) -> Tuple[str, List[str]]:
+    if not isinstance(text, str):
+        text = str(text)
+    cleaned = text.strip()
+    pattern = re.compile(
+        r"(?:\n|\r\n?)+\s*(?:\d+\s+)?Key\s+concepts?(?:\s*/\s*highlights)?\s*:\s*(.+)$",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(cleaned)
+    if not match:
+        return cleaned, []
+
+    raw_concepts = match.group(1).strip()
+    summary_only = cleaned[:match.start()].strip()
+    parts = [
+        re.sub(r"^[\-\*\u2022\s]+", "", p).strip()
+        for p in re.split(r"[,\n;]+", raw_concepts)
+        if str(p).strip()
+    ]
+    return summary_only, parts[:16]
+
+
+def _fallback_key_concepts_from_summary(summary: str) -> List[str]:
+    if not isinstance(summary, str):
+        summary = str(summary)
+
+    candidates: List[str] = []
+    for match in re.findall(r"\*\*([^*\n]{3,80})\*\*", summary):
+        candidates.append(match)
+
+    for raw_line in summary.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        plain = re.sub(r"^[#>\-\*\u2022\s]+", "", line)
+        plain = re.sub(r"^\d+\.\s*", "", plain).strip().rstrip(":")
+        if not plain:
+            continue
+        if line.lstrip().startswith(("-", "*", "•")) or raw_line.strip().endswith(":"):
+            candidates.append(plain)
+
+    out: List[str] = []
+    seen = set()
+    generic = {
+        "summary",
+        "overview",
+        "key concepts",
+        "highlights",
+        "takeaways",
+        "main ideas",
+        "detailed summary",
+        "brief summary",
+    }
+    for item in candidates:
+        normalized = " ".join(str(item).split()).strip(" -*#:")
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen or key in generic:
+            continue
+        seen.add(key)
+        out.append(normalized)
+        if len(out) >= 8:
+            break
+    return out
 
 def _embed_texts_for_provenance(texts: List[str], use_safe: bool, dim: Optional[int],
                                  embed_call: Optional[Callable[[List[str], Optional[int]], List[List[float]]]] = None) -> List[np.ndarray]:
@@ -299,11 +469,10 @@ def rag_answer_from_embeddings(
     # Build prompt
     context_parts = []
     for ch in retrieved_chunks:
-        context_parts.append(f"[chunk:pos={ch.get('pos')} id={ch.get('id')} score={ch.get('score'):.4f}]\n{ch.get('text')}")
+        context_parts.append(f"Context snippet:\n{ch.get('text')}")
     prompt_context = "\n\n".join(context_parts)
     prompt = (
         "Answer the question using ONLY the following context. "
-        "Cite each sentence in your answer by referring to the chunk id in square brackets, e.g. [chunk:id]. "
         "If the answer cannot be determined, say 'Not enough information.'\n\n"
         f"Context:\n{prompt_context}\n\nQuestion:\n{question}\n\nAnswer:"
     )
@@ -496,12 +665,12 @@ def rag_chat_answer(
     # Build prompt: include trimmed conversation, retrieved chunks, and new question.
     context_parts = []
     for ch in retrieved_chunks:
-        context_parts.append(f"[chunk:pos={ch.get('pos')} id={ch.get('id')} score={ch.get('score'):.4f}]\n{ch.get('text')}")
+        context_parts.append(f"Context snippet:\n{ch.get('text')}")
     prompt_context = "\n\n".join(context_parts)
 
     # Compose multi-part conversational prompt
     prompt_lines = []
-    prompt_lines.append("You are an assistant answering questions about the document. Use ONLY the provided context when answering and cite sources by chunk id like [chunk:id].")
+    prompt_lines.append("You are an assistant answering questions about the document. Use ONLY the provided context when answering.")
     if convo_text:
         prompt_lines.append("\nConversation history (most recent first):\n" + convo_text)
     if prompt_context:
@@ -608,58 +777,28 @@ def rag_generate_summary_from_embeddings(
     if len(ids) == 0:
         raise RuntimeError("Embeddings file contained no rows")
 
-    # choose chunks: default = all (in order). If top_k is provided, choose first top_k
-    if top_k is None or top_k <= 0 or top_k >= len(texts):
-        chosen_idxs = list(range(len(texts)))
-    else:
-        chosen_idxs = list(range(min(top_k, len(texts))))
+    summary_type = (summary_type or "brief").strip().lower()
+
+    # choose chunks: use a capped, evenly spaced selection on large documents to reduce overloads
+    chosen_idxs = _select_summary_chunk_indices(len(texts), top_k, summary_type)
 
     # compose context (keeping chunk separators and ids for traceability)
     context_parts = []
     used_chunks = []
     for i in chosen_idxs:
         used_chunks.append({"id": ids[i], "pos": i, "text": texts[i]})
-        context_parts.append(f"[chunk:pos={i} id={ids[i]}]\n{texts[i]}")
+        context_parts.append(texts[i])
 
     prompt_context = "\n\n".join(context_parts)
 
     # build summary prompt
-    if summary_type == "detailed":
-        instruct = "Write a DETAILED, structured summary of the following lecture. Include section headings, key concepts, and bullet-pointed takeaways. Keep it faithful to the text and do not hallucinate facts."
-    else:
-        instruct = "Write a BRIEF summary (3-6 sentences) capturing the main ideas and key takeaways of the following lecture. Be concise and factual."
-
+    instruct = _build_summary_instruction(summary_type)
     prompt = f"{instruct}\n\nContext:\n{prompt_context}\n\nSummary:"
 
-    # LLM call (summary helper intentionally uses the summarizer that asks for key concepts)
-    if llm_call is None:
-        summary = summarize_with_gemini(prompt_context if False else prompt)
-    else:
-        summary = llm_call(prompt)
-        if isinstance(summary, dict):
-            summary = summary.get("summary") or json.dumps(summary)
-
-    if not isinstance(summary, str):
-        summary = str(summary)
-
-    # Extract variable-length key concepts using the LLM
-    key_concepts: List[str] = []
-    try:
-        kc_prompt = (
-            "Extract short key concepts / phrases from the summary below. "
-            "Return them as a comma-separated list. Aim for a concise set (typically 3-8 items), but return however many are appropriate.\n\nSummary:\n" + summary
-        )
-        if llm_call is None:
-            kc_resp = summarize_with_gemini(kc_prompt)
-        else:
-            kc_resp = llm_call(kc_prompt)
-        if isinstance(kc_resp, dict):
-            kc_resp = str(kc_resp)
-        if isinstance(kc_resp, str):
-            parts = [p.strip() for p in re.split(r'[,\n;]+', kc_resp) if p.strip()]
-            key_concepts = parts[:16]  # allow up to a sensible cap
-    except Exception:
-        logger.debug("Key concepts extraction failed; continuing without them")
+    summary_raw = _call_summary_model(prompt, llm_call=llm_call, label="summary")
+    summary, key_concepts = _split_summary_and_key_concepts(summary_raw)
+    if not key_concepts:
+        key_concepts = _fallback_key_concepts_from_summary(summary)
 
     out = {"summary": summary.strip(), "key_concepts": key_concepts}
 

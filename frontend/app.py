@@ -30,11 +30,14 @@ from frontend.sections.chat import render as render_chat
 # ------------------------
 # New imports (refactored)
 # ------------------------
-from frontend.ui_helpers import (
+from frontend.runtime_ui_helpers import (
     strip_key_concepts_from_answer,
+    strip_retrieval_artifacts,
     clean_summary_text,
-    trim_history_to_max_turns,
-    render_assistant_html,
+	clean_key_concepts_list,
+	derive_key_concepts_from_summary_text,
+	trim_history_to_max_turns,
+	render_assistant_html,
 )
 from frontend.handlers import (
     init_llm,
@@ -600,11 +603,9 @@ if uploaded:
     # Tab: Ask a Question
     # -------------------
     with tab1:
-        st.subheader("Ask a question (Retrieval-Augmented)")
-        st.markdown("Type a focused question about the uploaded lecture. The assistant will retrieve supporting chunks.")
-        qa_col1, qa_col2 = st.columns([4, 1])
-        with qa_col1:
-            question = st.text_input("Your question (based on uploaded lecture)", key="qa_question")
+        st.subheader("Ask a question")
+        st.markdown("Type a focused question about the uploaded lecture.")
+        question = st.text_input("Your question (based on uploaded lecture)", key="qa_question")
         # hide top-k input from users; keep value in session_state
         k = st.session_state.get("qa_k", 3)
 
@@ -615,7 +616,7 @@ if uploaded:
                 st.warning("Please enter a question.")
             else:
                 candidate_index_path = str(index_path) if index_path.exists() else None
-                with st.spinner("Retrieving relevant chunks and asking Gemini..."):
+                with st.spinner("Searching and preparing answer..."):
                     try:
                         if st.session_state.use_api_mode:
                             resp = perform_query(
@@ -642,41 +643,23 @@ if uploaded:
 
                         ans = resp.get("answer")
                         retrieved_chunks = resp.get("retrieved", [])
-                        prompt_used = resp.get("prompt")
-                        provenance = resp.get("provenance")
                         latency = resp.get("latency", None)
 
-                        display_answer = strip_key_concepts_from_answer(ans or "")
+                        display_answer = strip_retrieval_artifacts(strip_key_concepts_from_answer(ans or ""))
 
-                        # Show retrieval + answer in two-column layout for clarity
-                        out_col_left, out_col_right = st.columns([2, 3])
-                        with out_col_left:
-                            st.subheader("Top retrieved chunks")
+                        st.subheader("Answer")
+                        st.write(display_answer or "")
+                        if latency is not None:
+                            st.caption(f"Latency: {latency:.3f}s")
+
+                        with st.expander("Sources"):
                             if not retrieved_chunks:
-                                st.info("No chunks retrieved.")
+                                st.info("No supporting context was retrieved.")
                             else:
                                 for i, chunk in enumerate(retrieved_chunks, start=1):
-                                    score = chunk.get("score", 0.0)
-                                    cid = chunk.get("id")
-                                    pos = chunk.get("pos")
-                                    with st.expander(f"{i}. chunk — id={cid} pos={pos} score={score:.4f}"):
-                                        st.write(chunk.get("text", "")[:2000] + ("..." if len(chunk.get("text", "")) > 2000 else ""))
-                        with out_col_right:
-                            st.subheader("Answer")
-                            st.write(display_answer or "")
-                            if latency is not None:
-                                st.caption(f"Latency: {latency:.3f}s")
-                            st.subheader("Provenance (sentence → chunk)")
-                            if provenance and provenance.get("sentences"):
-                                for s in provenance.get("sentences", []):
-                                    st.write(f"- \"{s['sentence']}\" → chunk_id={s.get('chunk_id')} (score={s.get('score'):.3f})")
-                            else:
-                                st.info("No provenance available.")
-                            with st.expander("Prompt used (debug)"):
-                                if prompt_used:
-                                    st.code(prompt_used[:4000])
-                                else:
-                                    st.info("No prompt captured.")
+                                    snippet = strip_retrieval_artifacts((chunk.get("text") or "").strip())
+                                    if snippet:
+                                        st.write(f"{i}. {snippet[:260]}{'...' if len(snippet) > 260 else ''}")
 
                     except requests.HTTPError as he:
                         try:
@@ -697,8 +680,7 @@ if uploaded:
     # Tab: Generate Summary
     # -----------------------
     with tab2:
-        st.subheader("Generate document-level summary (explicit)")
-        st.markdown("Choose summary length and optionally limit the chunks used.")
+        st.subheader("Generate document-level summary")
         s_col1, s_col2 = st.columns([2, 1])
         with s_col1:
             summary_type = st.selectbox("Summary detail level", ["brief", "detailed"], index=0)
@@ -747,20 +729,22 @@ if uploaded:
                             )
 
                         summary = resp.get("summary", "")
-                        key_concepts = resp.get("key_concepts", []) or []
+                        summary_display = clean_summary_text(summary, summary_type=summary_type)
+                        key_concepts = clean_key_concepts_list(resp.get("key_concepts", []) or [], summary_type=summary_type)
+                        if not key_concepts:
+                            key_concepts = derive_key_concepts_from_summary_text(summary_display, summary_type=summary_type)
                         used_chunks = resp.get("used_chunks", []) or []
-                        summary_display = clean_summary_text(summary)
 
                         st.subheader("Summary")
                         if summary_display:
-                            st.write(summary_display)
+                            st.markdown(summary_display)
                         else:
                             st.info("No summary returned.")
                         st.subheader("Key concepts / highlights")
                         if key_concepts:
-                            st.write(f"{len(key_concepts)} items — " + ", ".join(key_concepts))
+                            st.markdown("\n".join(f"- {item}" for item in key_concepts))
                         else:
-                            st.info("No key concepts extracted.")
+                            st.caption("The detailed summary above already includes the main concepts.")
 
                         with st.expander("Show used chunks (preview)"):
                             if not used_chunks:

@@ -52,6 +52,50 @@ def _build_mcq_from_item(item: dict, selected_mcq: dict) -> dict:
     }
 
 
+def _choice_with_text(letter: str, choices: dict) -> str:
+    clean_letter = str(letter or "").strip().upper()
+    if not clean_letter:
+        return ""
+    option_text = ""
+    if isinstance(choices, dict):
+        option_text = " ".join(str(choices.get(clean_letter, "") or "").split())
+    return f"{clean_letter}. {option_text}" if option_text else clean_letter
+
+
+def _format_flagged_reason(evidence_entry: dict) -> str:
+    meta = evidence_entry.get("meta", {}) or {}
+    question = " ".join(str(meta.get("question") or evidence_entry.get("question") or "").split())
+    try:
+        wrong_count = int(meta.get("wrong_count", 0) or 0)
+    except Exception:
+        wrong_count = 0
+    chosen = str(meta.get("last_chosen_answer") or "").strip().upper()
+    correct = str(meta.get("answer") or "").strip().upper()
+    choices = meta.get("choices", {}) if isinstance(meta.get("choices"), dict) else {}
+    explanation = " ".join(str(meta.get("explanation") or "").split())
+
+    reason_parts = []
+    if wrong_count > 1:
+        reason_parts.append(f"missed {wrong_count} times")
+    else:
+        reason_parts.append("answered incorrectly")
+
+    if chosen and correct and chosen != correct:
+        reason_parts.append(f"you chose {_choice_with_text(chosen, choices)}")
+        reason_parts.append(f"the correct answer was {_choice_with_text(correct, choices)}")
+    elif correct:
+        reason_parts.append(f"the correct answer was {_choice_with_text(correct, choices)}")
+
+    if explanation:
+        reason_parts.append(explanation.rstrip("."))
+
+    if question and reason_parts:
+        return f"{question} - " + "; ".join(reason_parts) + "."
+    if question:
+        return question
+    return "Repeated incorrect quiz answers for this concept."
+
+
 def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm):
     """
     Render the 'Confused? Quick prioritized list' UI for the given document (stem).
@@ -161,10 +205,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     first_evidence = (item.get("evidence") or [{}])[0]
                     meta = first_evidence.get("meta", {}) or {}
                     qid = meta.get("qid") or first_evidence.get("qid") or ""
-                    if qid:
-                        concept = f"Unlabeled concept ({qid})"
-                    else:
-                        concept = "Unlabeled concept"
+                    concept = "Unlabeled concept"
                 strength = int(item.get("signal_strength", 0))
                 header_cols = st.columns([3.2, 1.2])
                 with header_cols[0]:
@@ -193,19 +234,14 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     seen_mcq.add(dedupe_key)
                     if not stable_id and not question:
                         continue
-                    preview = _shorten(question or "(question text unavailable)", 100)
-                    if stable_id:
-                        label = f"{preview} [id={stable_id}]"
-                    else:
-                        label = f"{preview} [id=<no-id>]"
+                    label = question or "(question text unavailable)"
                     mcq_candidates.append({"id": stable_id or None, "question": question, "label": label})
 
                 if is_mcq_item:
                     mcq_payload = _build_mcq_from_item(item, {"id": item.get("quiz_question_id"), "question": item.get("original_question")})
                     if mcq_payload.get("question"):
                         fallback_id = mcq_payload.get("id") or ""
-                        preview = _shorten(mcq_payload.get("question"), 100)
-                        fallback_label = f"{preview} [id={fallback_id or '<no-id>'}]"
+                        fallback_label = mcq_payload.get("question")
                         candidate = {"id": fallback_id or None, "question": mcq_payload.get("question"), "label": fallback_label}
                         if (candidate["id"], candidate["question"]) not in seen_mcq:
                             mcq_candidates.insert(0, candidate)
@@ -226,24 +262,35 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     (c for c in mcq_candidates if c["label"] == selected_mcq_label),
                     mcq_candidates[0],
                 )
+                if selected_mcq.get("question"):
+                    st.caption(selected_mcq.get("question"))
                 st.caption("Type: MCQ confusion item" if is_mcq_item else "Type: Concept confusion item")
 
                 if evidence:
                     with st.expander("Why this concept was flagged"):
+                        seen_q = set()
+                        reason_rows = []
                         for e in evidence:
                             if e.get("type") in ("quiz", "persisted"):
                                 meta = e.get("meta", {}) or {}
-                                qid = meta.get("qid") or e.get("qid") or "<no-id>"
-                                qtext = (meta.get("question") or e.get("question") or "")[:400]
-                                if qid and qid != "<no-id>" and qtext:
-                                    evidence_quiz_rows.append({"qid": str(qid), "question": qtext})
-                                ctext = meta.get("concept_label") or meta.get("concept") or ""
-                                if ctext:
-                                    st.write(f"- Quiz: id={qid} — concept: {ctext}")
+                                qtext = " ".join(str(meta.get("question") or e.get("question") or "").split())
+                                qid = str(meta.get("qid") or e.get("qid") or "").strip()
                                 if qtext:
-                                    st.write(f"  - original question: {qtext}")
+                                    dedupe_key = (qid, qtext.strip().lower())
+                                    if dedupe_key not in seen_q:
+                                        seen_q.add(dedupe_key)
+                                        reason_rows.append(_format_flagged_reason(e))
+                                if qid and qtext:
+                                    evidence_quiz_rows.append({"qid": qid, "question": qtext})
                             else:
-                                st.write(f"- {str(e)[:400]}")
+                                extra = " ".join(str(e).split())
+                                if extra:
+                                    reason_rows.append(extra)
+                        if reason_rows:
+                            for row in reason_rows[:5]:
+                                st.write(f"- {row}")
+                        else:
+                            st.write("- Repeated incorrect quiz answers for this concept.")
 
                 delete_keys = []
                 for e in evidence:

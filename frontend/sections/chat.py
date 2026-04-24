@@ -12,6 +12,7 @@ This file preserves all logic, call signatures, and session_state keys exactly.
 import os
 import uuid
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Dict, Tuple
 
@@ -20,8 +21,9 @@ import streamlit.components.v1 as components
 
 # handlers + ui helpers (same as used previously in app.py)
 from frontend.handlers import perform_chat, perform_query
-from frontend.ui_helpers import (
+from frontend.runtime_ui_helpers import (
     strip_key_concepts_from_answer,
+    strip_retrieval_artifacts,
     trim_history_to_max_turns,
     build_chat_html,
 )
@@ -121,6 +123,32 @@ def _fallback_quiz_question(retrieved: List[Dict[str, Any]]) -> str:
     return "What is one key idea discussed in the lecture?"
 
 
+def _format_saved_timestamp(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(value))
+        return dt.strftime("%b %d, %Y %I:%M %p")
+    except Exception:
+        return str(value)
+
+
+def _derive_default_chat_title(history: List[Dict[str, Any]], fallback_index: int) -> str:
+    first_user = ""
+    for turn in history or []:
+        if str(turn.get("role", "")).lower().startswith("user"):
+            first_user = (turn.get("content") or "").strip()
+            break
+    first_user = re.sub(r"\s+", " ", first_user).strip()
+    if first_user:
+        words = first_user.split()
+        short = " ".join(words[:7]).strip()
+        if len(words) > 7:
+            short += "..."
+        return short
+    return f"Saved chat {fallback_index}"
+
+
 def render(st: Any, stem: str, llm):
     """
     Render the Chat / conversational RAG UI for the given document stem.
@@ -155,13 +183,20 @@ def render(st: Any, stem: str, llm):
         st.session_state[f"chat_mod_new_{stem}"] = False
         st.session_state[f"chat_mod_example_{stem}"] = False
         st.session_state[f"chat_mod_quiz_{stem}"] = False
-    mod_cols = st.columns(3)
-    with mod_cols[0]:
-        explain_new = st.checkbox("Explain like I'm new to this", key=f"chat_mod_new_{stem}")
-    with mod_cols[1]:
-        include_example = st.checkbox("Give me an example", key=f"chat_mod_example_{stem}")
-    with mod_cols[2]:
-        turn_quiz = st.checkbox("Add knowledge check", key=f"chat_mod_quiz_{stem}")
+    response_style = st.selectbox(
+        "Response style",
+        [
+            "Standard",
+            "Beginner friendly",
+            "Include a practical example",
+            "Beginner friendly + knowledge check",
+        ],
+        key=f"chat_style_{stem}",
+        help="Choose how the assistant structures its reply.",
+    )
+    explain_new = response_style in ("Beginner friendly", "Beginner friendly + knowledge check")
+    include_example = response_style == "Include a practical example"
+    turn_quiz = response_style == "Beginner friendly + knowledge check"
 
     # --------------------------
     # Top controls: save, history buttons, clear
@@ -176,35 +211,35 @@ def render(st: Any, stem: str, llm):
     save_title_key = f"save_title_{stem}"
     st.text_input("Save conversation as (optional)", key=save_title_key, placeholder="Title (optional)")
 
-    # Better layout for the action buttons: grouped with icons and compact descriptions
-    action_cols = st.columns([1.5, 1, 1, 1])
+    # Cleaner action row: save, history toggle, clear
+    action_cols = st.columns(3)
     # Save current conversation
     with action_cols[0]:
-        if st.button("💾 Save conversation", key=f"save_conv_{stem}"):
+        if st.button("💾 Save conversation", key=f"save_conv_{stem}", use_container_width=True):
             current = st.session_state.get(hist_key, []) or []
             if not current:
                 st.warning("Nothing to save — conversation is empty.")
             else:
+                title_raw = (st.session_state.get(save_title_key) or "").strip()
+                inferred_title = _derive_default_chat_title(current, fallback_index=len(st.session_state[saved_chats_key]) + 1)
                 new_item = {
                     "id": str(uuid.uuid4()),
-                    "title": st.session_state.get(save_title_key) or f"Chat {st.session_state.get('save_title_time', '') or ''}{uuid.uuid4()}",
+                    "title": title_raw or inferred_title,
                     "history": current,
-                    "created": __import__("datetime").datetime.utcnow().isoformat(),
+                    "created": datetime.utcnow().isoformat(),
                 }
                 st.session_state[saved_chats_key].insert(0, new_item)
                 st.success("Conversation saved.")
 
-    # Show / Hide history buttons (stable behavior)
+    # Single history toggle button
     with action_cols[1]:
-        if st.button("📚 Show history", key=f"show_history_btn_{stem}"):
-            st.session_state[history_toggle_key] = True
-    with action_cols[2]:
-        if st.button("🗂️ Hide history", key=f"hide_history_btn_{stem}"):
-            st.session_state[history_toggle_key] = False
+        history_open = bool(st.session_state.get(history_toggle_key, False))
+        if st.button("📚 Open history" if not history_open else "📚 Close history", key=f"toggle_history_btn_{stem}", use_container_width=True):
+            st.session_state[history_toggle_key] = not history_open
 
     # Clear chat
-    with action_cols[3]:
-        if st.button("🧹 Clear chat", key=f"clear_chat_{stem}"):
+    with action_cols[2]:
+        if st.button("🧹 Clear chat", key=f"clear_chat_{stem}", use_container_width=True):
             st.session_state[hist_key] = []
             st.success("Chat cleared.")
 
@@ -215,6 +250,12 @@ def render(st: Any, stem: str, llm):
     # --------------------------
     if st.session_state.get(history_toggle_key):
         st.markdown("## Saved conversations (this document)")
+        if st.button("Back to active chat", key=f"history_back_to_chat_{stem}", use_container_width=True):
+            st.session_state[history_toggle_key] = False
+            try:
+                st.rerun()
+            except Exception:
+                pass
         saved = st.session_state.get(saved_chats_key, []) or []
         if not saved:
             st.info("No saved conversations for this document yet.")
@@ -222,8 +263,8 @@ def render(st: Any, stem: str, llm):
             # Render saved conversations with improved spacing and clear buttons
             for idx, item in enumerate(saved):
                 title = item.get("title", f"Saved chat {idx+1}")
-                created = item.get("created", "")
-                with st.expander(f"{title} — saved {created}", expanded=False):
+                created = _format_saved_timestamp(item.get("created", ""))
+                with st.expander(f"{title}" + (f" · {created}" if created else ""), expanded=False):
                     preview = item.get("history", []) or []
                     if not preview:
                         st.write("_(empty conversation)_")
@@ -237,25 +278,27 @@ def render(st: Any, stem: str, llm):
                             else:
                                 st.markdown(f"**You:**  \n{content}")
 
-                    btns = st.columns([1, 1, 1])
-                    # Load (replace) and return to chat view
-                    if btns[0].button("Load (replace) → open chat", key=f"load_saved_{stem}_{idx}"):
+                    btns = st.columns(2)
+                    # Load and return to chat view
+                    if btns[0].button("Load in Chat", key=f"load_saved_{stem}_{idx}", use_container_width=True):
                         st.session_state[hist_key] = item.get("history", []) or []
                         st.session_state[history_toggle_key] = False
-                        st.success(f"Loaded: {item.get('title')} — switching to chat view.")
-                    # Append and return to chat view
-                    if btns[1].button("Append → open chat", key=f"append_saved_{stem}_{idx}"):
-                        st.session_state[hist_key].extend(item.get("history", []) or [])
-                        st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
-                        st.session_state[history_toggle_key] = False
-                        st.success(f"Appended: {item.get('title')} — switching to chat view.")
+                        st.success(f"Loaded: {item.get('title')}")
+                        try:
+                            st.rerun()
+                        except Exception:
+                            pass
                     # Delete
-                    if btns[2].button("Delete", key=f"del_saved_{stem}_{idx}"):
+                    if btns[1].button("Delete", key=f"del_saved_{stem}_{idx}", use_container_width=True):
                         st.session_state[saved_chats_key].pop(idx)
                         st.success("Deleted saved conversation.")
+                        try:
+                            st.rerun()
+                        except Exception:
+                            pass
 
         st.markdown("---")
-        st.info("History mode: select 'Load' or 'Append' to return to chat mode with that conversation loaded.")
+        st.info("History mode: select 'Load in Chat' to return to chat mode with that conversation loaded.")
         # Skip rendering the main chat & input while in history mode
         return
 
@@ -264,15 +307,6 @@ def render(st: Any, stem: str, llm):
     # --------------------------
     chat_container = st.container()
 
-    # Optional UI-only control: collapse older messages (doesn't modify stored history)
-    collapse_key = f"chat_collapse_{stem}"
-    if collapse_key not in st.session_state:
-        st.session_state[collapse_key] = False
-    col_collapse = st.columns([4, 1])
-    with col_collapse[1]:
-        if st.button("Toggle collapse old", key=f"{collapse_key}_btn"):
-            st.session_state[collapse_key] = not st.session_state[collapse_key]
-    
     # Check for pending input from Confused section
     pending_input_key = f"chat_pending_input_{stem}"
     pending_input = st.session_state.pop(pending_input_key, None)
@@ -391,7 +425,7 @@ def render(st: Any, stem: str, llm):
                 # decide use_faiss_search from session (app.py must set this before calling render)
                 use_faiss_search = bool(st.session_state.get("use_faiss_search", False))
 
-                with st.spinner("Running conversational RAG..."):
+                with st.spinner("Searching and generating response..."):
                     try:
                         if st.session_state.get("use_api_mode", False):
                             resp = perform_chat(
@@ -423,7 +457,7 @@ def render(st: Any, stem: str, llm):
                         retrieved = resp.get("retrieved", []) or []
                         prompt_used = resp.get("prompt")
                         provenance = resp.get("provenance")
-                        display_answer = strip_key_concepts_from_answer(ans or "")
+                        display_answer = strip_retrieval_artifacts(strip_key_concepts_from_answer(ans or ""))
 
                         # Ensure a quiz question exists if requested (fallback if missing)
                         quiz_question = ""
@@ -496,14 +530,13 @@ def render(st: Any, stem: str, llm):
     # Render the chat AFTER handling the form so latest reply is visible immediately
     chat_history = st.session_state.get(hist_key, []) or []
 
-    # If collapse toggle is active, show only the last N messages for readability
-    if st.session_state.get(collapse_key, False) and len(chat_history) > 10:
-        display_history = chat_history[-10:]
-        # add a small notice
-        with chat_container:
-            st.info("Older messages collapsed for readability — toggle to show more.")
-    else:
-        display_history = chat_history
+    display_history = []
+    for turn in chat_history:
+        role = turn.get("role", "user")
+        content = turn.get("content", "") or ""
+        if str(role).lower().startswith("assistant"):
+            content = strip_retrieval_artifacts(content)
+        display_history.append({"role": role, "content": content})
 
     # use a taller max height so chat uses more vertical space
     chat_html, chat_height = build_chat_html(display_history, max_height=720)
