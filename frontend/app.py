@@ -24,7 +24,7 @@ import numpy as np
 import requests
 from frontend.sections.confused import render as render_confused
 from frontend.sections.quiz import render as render_quiz
-from frontend.sections.srs import render as render_srs
+from frontend.sections.srs import render_srs_section
 from frontend.sections.chat import render as render_chat
 
 # ------------------------
@@ -836,10 +836,9 @@ if uploaded:
     st.markdown("---")
 
     # Step 3: Spaced Repetition (SRS)
-    st.markdown("### 3.3 Lock it in with spaced repetition")
-    st.write("Add items you want to retain and review due cards here. This helps move knowledge into long-term memory.")
-    # Render SRS directly (removed outer expander)
-    render_srs(st, stem=stem)
+    st.markdown("### 3.3 Spaced repetition")
+    st.write("Review due cards to move knowledge into long-term memory, or switch to Browse to view and manage all saved cards.")
+    render_srs_section(st, stem=stem)
 
     st.markdown("---")
     st.caption("Tip: For reproducible tests set USE_SAFE_EMBEDDINGS=1 and build FAISS index to compare results with NumPy search.")

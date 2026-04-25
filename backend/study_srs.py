@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
 DEFAULT_PROGRESS_PATH = "data/processed/study_progress.json"
-INTERVALS = [1, 3, 7, 14, 30]
+INTERVALS = [1, 3, 7, 14, 30, 60, 120]
 
 class SRSManager:
     def __init__(self, path: str = DEFAULT_PROGRESS_PATH):
@@ -119,7 +119,7 @@ class SRSManager:
     def mark_review_with_rating(self, card_id: str, rating: str):
         """
         Update schedule with explicit SRS rating:
-          - hard: short interval (at least 1 day, no promotion)
+          - hard: pull the card back into active rotation
           - good: normal promotion (+1 step)
           - easy: larger promotion (+2 steps)
         """
@@ -132,7 +132,7 @@ class SRSManager:
         r = str(rating or "").strip().lower()
 
         if r == "hard":
-            next_idx = max(current_idx, 0)
+            next_idx = max(current_idx - 2, 0)
             interval_days = max(1.0, float(INTERVALS[next_idx]))
         elif r == "easy":
             next_idx = min(current_idx + 2, len(INTERVALS) - 1)

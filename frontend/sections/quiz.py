@@ -333,6 +333,9 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                                     "answer": answer_letter,
                                     "explanation": explanation_text or "",
                                     "stem": stem,
+                                    "item_type": "mcq",
+                                    "origin": "quiz_mcq",
+                                    "quiz_question_id": qid,
                                     "source_reason": "Added from quiz review",
                                 },
                             )
@@ -344,6 +347,8 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                                 "choices": choices or {},
                                 "answer": answer_letter,
                                 "explanation": explanation_text or "",
+                                "item_type": "mcq",
+                                "origin": "quiz_mcq",
                             }
                             st.session_state[f"{srs_key}_done"] = True
                             st.info("Added to SRS.")
