@@ -204,10 +204,6 @@ def _render_review_card_fallback(
         card_title = _shorten(stored_question or card_id, 80) or card_id
         st_module.markdown(f"### Card {card_index}: {card_title}")
 
-        source_reason = (card_meta or {}).get("source_reason", "")
-        if source_reason:
-            st_module.caption(f"Why this card exists: {source_reason}")
-
         st_module.markdown("**Question**")
         if stored_question:
             if "\n" in stored_question or len(stored_question) > 300:
@@ -278,10 +274,6 @@ def _render_review_card(
         card_title = _shorten(q_text or card_id, 80) or card_id
         st_module.markdown(f"### Card {card_index}: {card_title}")
 
-        source_reason = (card_meta or {}).get("source_reason", "")
-        if source_reason:
-            st_module.caption(f"Why this card exists: {source_reason}")
-
         st_module.markdown("**Question**")
         if q_text:
             if "\n" in q_text or len(q_text) > 300:
@@ -306,8 +298,6 @@ def _render_review_card(
         st_module.markdown("---")
 
         if not st_module.session_state[show_answer_key]:
-            st_module.markdown("**Front**")
-            st_module.info(_shorten(q_text or card_id, 140))
             st_module.caption("Type: MCQ card" if is_mcq_card else "Type: Concept card")
 
             if is_mcq_card:
@@ -583,10 +573,6 @@ def _render_browse_tab(st_module: Any, stem: str | None):
                 st_module.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
                 status_text = "Due now" if card_id in due_cards else _pretty_date_delta((meta or {}).get("next_due", ""))
                 st_module.markdown(f"### {_shorten(question_text, 90)}")
-
-                source_reason = (meta or {}).get("source_reason", "")
-                if source_reason:
-                    st_module.caption(f"Why this card exists: {source_reason}")
 
                 review_count = (meta or {}).get("review_count", 0)
                 interval_label = _format_interval(meta)

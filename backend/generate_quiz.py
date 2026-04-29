@@ -2,14 +2,41 @@
 """
 generate_quiz.py — Hybrid MCQ generator (strict extractor + LLM writer)
 
-Changes vs v3:
-  - _BATCH_MCQ_PROMPT_TEMPLATE now requests two explanation fields:
-      brief_explanation  : 1-2 sentence plain summary (shown inline after answer)
-      detailed_explanation: {why_correct, why_wrong: {A,B,C,D}, source_chunk}
-  - _PER_CHUNK_PROMPT (fallback) mirrors the same new fields.
-  - source_chunk is tracked per-item through the batch and fallback paths.
-  - Final assembly preserves all new fields.
-  - All other logic (retry, validation, quota handling) is unchanged.
+v6 changes vs v5  (goal: v4 speed + reliability, v5 diversity):
+  ─────────────────────────────────────────────────────────────────
+  SPEED / 503 FIXES
+  ─────────────────────────────────────────────────────────────────
+  1. Concept extraction max_concepts capped at 5 again (was max(n,5) in v5 —
+     asking for 10 concepts for a 10-question quiz caused much larger LLM calls).
+
+  2. BACKOFF_503 reduced from 10 s → 4 s, and the multiplier is now capped:
+       wait = min(BACKOFF_503 * attempt, BACKOFF_503_MAX)   (max 12 s)
+     v5 could wait 10 s, 20 s, 30 s — that killed perceived latency.
+
+  3. Question-plan block in the batch prompt is now compact (one line per row,
+     no extra whitespace) to reduce prompt token count.
+
+  4. Concept extraction is skipped entirely when concepts are passed in by
+     the caller (was already the case but now explicitly fast-pathed).
+
+  5. Per-chunk fallback: plan_idx calculation was off-by-one in v5 (used
+     len(out_mcqs) twice); fixed to use a simple counter.
+
+  ─────────────────────────────────────────────────────────────────
+  DIVERSITY KEPT FROM v5
+  ─────────────────────────────────────────────────────────────────
+  - _build_question_plan() unchanged.
+  - _QUESTION_TYPES unchanged.
+  - batch prompt still receives the question_plan block.
+  - per-chunk fallback still receives concept + type guidance.
+  - question_type field preserved on every output item.
+
+  ─────────────────────────────────────────────────────────────────
+  EVERYTHING ELSE UNCHANGED
+  ─────────────────────────────────────────────────────────────────
+  - All explanation fields (brief_explanation, detailed_explanation).
+  - Validation logic.
+  - generate_quiz_from_context() backwards-compatible wrapper.
 """
 
 import json
@@ -23,7 +50,8 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
 BACKOFF_BASE = 0.4
-BACKOFF_503 = 10.0
+BACKOFF_503 = 4.0        # FIX v6: was 10.0 — smaller base keeps 503 retries fast
+BACKOFF_503_MAX = 12.0   # FIX v6: cap so wait never exceeds 12 s (v5 could hit 30 s)
 
 _MIN_SENT_WORDS = 8
 _MIN_CHOICE_LEN = 8
@@ -41,6 +69,18 @@ _DEFAULT_CONCEPTS = [
     }
 ]
 
+# ── Question types for diversity rotation (unchanged from v5) ─────────────────
+_QUESTION_TYPES = [
+    ("definition",   "Ask what something IS or means (definition / identification)"),
+    ("mechanism",    "Ask HOW something works or WHY it happens (mechanism / reasoning)"),
+    ("application",  "Present a real-world scenario or example and ask what concept it illustrates"),
+    ("not_true",     "Ask which of the four options is FALSE or NOT a feature of something"),
+    ("comparison",   "Ask how two concepts differ or which statement correctly distinguishes them"),
+    ("consequence",  "Ask what the result or implication of something is"),
+    ("criticism",    "Ask about a limitation, flaw, or critique of a model/idea"),
+    ("property",     "Ask about a specific property, characteristic, or requirement of something"),
+]
+
 _CONCEPT_PROMPT_TEMPLATE = """
 You are an expert educator. Extract 2 to {max_concepts} canonical concepts from the lecture content when possible.
 Return JSON ONLY (no extra text). Output must be a JSON array of objects with keys:
@@ -51,10 +91,15 @@ Lecture content:
 \"\"\"{content}\"\"\"
 """
 
-# ── CHANGED: batch prompt now requests brief + detailed explanation fields ──
+# FIX v6: question_plan block is now formatted compactly (fewer tokens)
 _BATCH_MCQ_PROMPT_TEMPLATE = """
 You are an expert quiz writer. Generate exactly {n} high-quality multiple-choice questions (MCQs)
 that test a learner's understanding of the lecture content below.
+
+QUESTION PLAN (follow exactly, one row per question):
+{question_plan}
+
+Each row: concept = topic to focus on | type = cognitive structure to use.
 
 Return JSON ONLY (no extra text, no markdown fences).
 Output must be a JSON array of exactly {n} objects, each with keys:
@@ -76,15 +121,20 @@ IMPORTANT:
 - Do NOT bias toward C, B, or any particular letter.
 - All four options must be plausible; only one should be correct.
 - Distractors must be clearly distinct from each other.
+- Every question must cover a DIFFERENT concept from the others.
 
 Lecture content:
 \"\"\"{content}\"\"\"
 """
 
-# ── CHANGED: per-chunk fallback prompt mirrors new fields ──
 _PER_CHUNK_PROMPT_TEMPLATE = """
 You are an expert quiz writer. Produce ONE high-quality multiple-choice question (MCQ) that tests
 a learner's understanding of the provided paragraph. Return JSON ONLY (no extra text).
+
+Question requirements:
+  • Concept to focus on : {concept_label}
+  • Question type       : {type_instruction}
+
 JSON must be an object with keys:
   - id
   - question
@@ -102,6 +152,90 @@ All four options must be plausible but only one correct.
 Paragraph:
 \"\"\"{paragraph}\"\"\"
 """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diversity plan builder  (unchanged from v5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_question_plan(concepts: List[Dict[str, str]], n: int) -> List[Dict[str, str]]:
+    """
+    Build a list of n dicts, each specifying:
+      concept_id, concept_label, type_id, type_instruction
+
+    Rules:
+    1. Every question gets a DIFFERENT concept (cycle if n > len(concepts),
+       never repeat the same concept back-to-back).
+    2. Question types are shuffled and rotated — no two adjacent questions
+       share a type, full set spread before repeating.
+    3. Deterministic-random (shuffled each call) so reruns differ.
+    """
+    if not concepts:
+        concepts = list(_DEFAULT_CONCEPTS)
+
+    shuffled_concepts = concepts[:]
+    random.shuffle(shuffled_concepts)
+
+    concept_seq: List[Dict] = []
+    last_id = None
+    pool = shuffled_concepts[:]
+    while len(concept_seq) < n:
+        candidates = [c for c in pool if c["concept_id"] != last_id]
+        if not candidates:
+            pool = shuffled_concepts[:]
+            random.shuffle(pool)
+            candidates = [c for c in pool if c["concept_id"] != last_id] or pool
+        chosen = candidates[0]
+        concept_seq.append(chosen)
+        pool.remove(chosen)
+        last_id = chosen["concept_id"]
+        if not pool:
+            pool = shuffled_concepts[:]
+            random.shuffle(pool)
+
+    type_pool = _QUESTION_TYPES[:]
+    random.shuffle(type_pool)
+    type_seq: List[tuple] = []
+    last_type = None
+    pool_t = type_pool[:]
+    while len(type_seq) < n:
+        candidates_t = [t for t in pool_t if t[0] != last_type]
+        if not candidates_t:
+            pool_t = type_pool[:]
+            random.shuffle(pool_t)
+            candidates_t = [t for t in pool_t if t[0] != last_type] or pool_t
+        chosen_t = candidates_t[0]
+        type_seq.append(chosen_t)
+        pool_t.remove(chosen_t)
+        last_type = chosen_t[0]
+        if not pool_t:
+            pool_t = type_pool[:]
+            random.shuffle(pool_t)
+
+    plan = []
+    for i in range(n):
+        concept = concept_seq[i]
+        qtype = type_seq[i]
+        plan.append({
+            "concept_id": concept["concept_id"],
+            "concept_label": concept["concept_label"],
+            "type_id": qtype[0],
+            "type_instruction": qtype[1],
+        })
+    return plan
+
+
+def _format_question_plan(plan: List[Dict[str, str]]) -> str:
+    """
+    FIX v6: compact one-liner per row (fewer tokens than v5's multi-field format).
+    Example:  Q1: concept='Homo Economicus' | type=definition
+    """
+    lines = []
+    for i, row in enumerate(plan, start=1):
+        lines.append(
+            f"Q{i}: concept='{row['concept_label']}' | type={row['type_id']} — {row['type_instruction']}"
+        )
+    return "\n".join(lines)
 
 
 # ── unchanged helpers ──────────────────────────────────────────────────────
@@ -379,13 +513,7 @@ def _validate_mcq_obj(obj: dict, paragraph: str = "") -> bool:
         return False
 
 
-# ── NEW: helper to normalise the detailed_explanation block from the LLM ──
 def _normalise_detailed_explanation(raw_detail, answer_letter: str) -> Dict:
-    """
-    Coerce whatever the LLM returned for detailed_explanation into a clean dict:
-      {why_correct, why_wrong: {A,B,C,D}, source_chunk}
-    Gracefully handles missing / malformed values.
-    """
     empty = {
         "why_correct": "",
         "why_wrong": {"A": "", "B": "", "C": "", "D": ""},
@@ -401,7 +529,7 @@ def _normalise_detailed_explanation(raw_detail, answer_letter: str) -> Dict:
     why_wrong: Dict[str, str] = {}
     for letter in ["A", "B", "C", "D"]:
         if letter == (answer_letter or "").upper():
-            why_wrong[letter] = ""   # correct letter — no "why wrong" needed
+            why_wrong[letter] = ""
         else:
             why_wrong[letter] = str(raw_ww.get(letter) or "").strip()
 
@@ -412,26 +540,12 @@ def _normalise_detailed_explanation(raw_detail, answer_letter: str) -> Dict:
     }
 
 
-# ── NEW: helper to extract & clean all explanation fields from one MCQ obj ──
 def _extract_explanation_fields(obj: dict, answer_letter: str) -> Dict:
-    """
-    Returns dict with:
-      brief_explanation    : str  (falls back to legacy 'explanation' key)
-      detailed_explanation : dict (normalised)
-    """
-    # brief — prefer new key, fall back to legacy 'explanation'
     brief = (
         str(obj.get("brief_explanation") or obj.get("explanation") or "").strip()
     )
-    # detailed
     raw_detail = obj.get("detailed_explanation")
     detailed = _normalise_detailed_explanation(raw_detail, answer_letter)
-
-    # NOTE: do NOT promote brief into why_correct.
-    # brief_explanation is shown inline (outside the expander).
-    # detailed_explanation lives exclusively inside the expander.
-    # Keeping them separate enforces the strict outside/inside boundary.
-
     return {
         "brief_explanation": brief,
         "detailed_explanation": detailed,
@@ -439,7 +553,7 @@ def _extract_explanation_fields(obj: dict, answer_letter: str) -> Dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core generator  (v4 — new explanation fields, otherwise identical to v3)
+# Core generator  (v6 — v4 speed + v5 diversity)
 # ─────────────────────────────────────────────────────────────────────────────
 def generate_mcq_from_context(
     context_text: str,
@@ -448,11 +562,20 @@ def generate_mcq_from_context(
     chunk_word_target: int = 90,
     concepts: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict]:
+
+    # ── 1. Extract concepts ──────────────────────────────────────────────
+    # FIX v6: always cap at 5, regardless of n (v5 used max(n,5) which
+    # caused much larger concept-extraction calls for big quizzes).
     concept_list = (
         _normalize_concepts(concepts, max_concepts=5)
         if concepts is not None
-        else generate_concepts_from_context(context_text, max_concepts=5, llm_call=llm_call)
+        else generate_concepts_from_context(
+            context_text, max_concepts=5, llm_call=llm_call
+        )
     )
+
+    # ── 2. Build diversity plan BEFORE prompting ─────────────────────────
+    plan = _build_question_plan(concept_list, n)
 
     # ── Deterministic path (no LLM) ─────────────────────────────────────
     if llm_call is None:
@@ -461,10 +584,11 @@ def generate_mcq_from_context(
         ]
         out = []
         for i, ch in enumerate(chunks[:n]):
+            row = plan[i]
             qid = f"q{i+1}"
             out.append({
                 "id": qid,
-                "question": "Placeholder: which statement best summarizes the paragraph?",
+                "question": f"Placeholder ({row['type_id']}): question about {row['concept_label']}?",
                 "choices": {
                     "A": "A placeholder plausible choice about the paragraph.",
                     "B": "Another placeholder distractor that looks plausible.",
@@ -472,7 +596,6 @@ def generate_mcq_from_context(
                     "D": "The correct placeholder answer is this one.",
                 },
                 "answer": "D",
-                # ── new fields with placeholder content ──
                 "brief_explanation": "Placeholder brief explanation.",
                 "detailed_explanation": {
                     "why_correct": "Placeholder: D is correct because it best matches the paragraph.",
@@ -484,16 +607,20 @@ def generate_mcq_from_context(
                     },
                     "source_chunk": ch[:300],
                 },
+                "concept_id": row["concept_id"],
+                "concept_label": row["concept_label"],
+                "question_type": row["type_id"],
             })
-        for idx, itm in enumerate(out):
-            concept = concept_list[idx % len(concept_list)]
-            itm["concept_id"] = concept["concept_id"]
-            itm["concept_label"] = concept["concept_label"]
         return out[:n]
 
     # ── LLM path — BATCH ────────────────────────────────────────────────
     content_for_prompt = _shorten(context_text or "", max_len=6000)
-    batch_prompt = _BATCH_MCQ_PROMPT_TEMPLATE.format(n=n, content=content_for_prompt)
+    question_plan_str = _format_question_plan(plan)
+    batch_prompt = _BATCH_MCQ_PROMPT_TEMPLATE.format(
+        n=n,
+        question_plan=question_plan_str,
+        content=content_for_prompt,
+    )
 
     out_mcqs: List[Dict] = []
     batch_succeeded = False
@@ -538,15 +665,19 @@ def generate_mcq_from_context(
                 for k in list(obj.get("choices", {}).keys()):
                     obj["choices"][k] = _shorten(str(obj["choices"][k]), max_len=180)
 
-                # ── extract new explanation fields ──
                 expl_fields = _extract_explanation_fields(obj, obj["answer"])
+
+                plan_row = plan[len(out_mcqs)] if len(out_mcqs) < len(plan) else plan[-1]
 
                 out_mcqs.append({
                     "id": obj["id"],
                     "question": obj["question"],
                     "choices": obj["choices"],
                     "answer": obj["answer"],
-                    **expl_fields,   # brief_explanation + detailed_explanation
+                    **expl_fields,
+                    "concept_id": plan_row["concept_id"],
+                    "concept_label": plan_row["concept_label"],
+                    "question_type": plan_row["type_id"],
                 })
 
             if out_mcqs:
@@ -563,9 +694,11 @@ def generate_mcq_from_context(
                 break
 
             if _is_overload_error(e):
-                logger.warning("Model overloaded (503) on batch attempt %s — backing off.", attempt)
+                # FIX v6: cap the 503 wait so it never snowballs (was * attempt with no cap)
+                wait = min(BACKOFF_503 * attempt, BACKOFF_503_MAX)
+                logger.warning("Model overloaded (503) on batch attempt %s — backing off %.1fs.", attempt, wait)
                 if attempt <= MAX_RETRIES:
-                    time.sleep(BACKOFF_503 * attempt)
+                    time.sleep(wait)
                     continue
                 else:
                     break
@@ -585,11 +718,21 @@ def generate_mcq_from_context(
         attempts_used = 0
         used_questions_fb: set = {re.sub(r'\s+', ' ', q["question"].strip().lower()) for q in out_mcqs}
 
+        # FIX v6: track fallback question index separately to avoid the off-by-one
+        # bug in v5 where plan_idx was computed from len(out_mcqs) twice.
+        fallback_q_index = len(out_mcqs)
+
         for chunk in chunks:
             if len(out_mcqs) >= n or attempts_used >= max_attempts:
                 break
 
-            prompt = _PER_CHUNK_PROMPT_TEMPLATE.format(paragraph=_shorten(chunk, max_len=2000))
+            plan_row = plan[min(fallback_q_index, len(plan) - 1)]
+
+            prompt = _PER_CHUNK_PROMPT_TEMPLATE.format(
+                paragraph=_shorten(chunk, max_len=2000),
+                concept_label=plan_row["concept_label"],
+                type_instruction=plan_row["type_instruction"],
+            )
             for attempt in range(1, MAX_RETRIES + 2):
                 attempts_used += 1
                 try:
@@ -628,7 +771,6 @@ def generate_mcq_from_context(
                     for k in list(obj.get("choices", {}).keys()):
                         obj["choices"][k] = _shorten(str(obj["choices"][k]), max_len=180)
 
-                    # ── extract new explanation fields ──
                     expl_fields = _extract_explanation_fields(obj, obj["answer"])
 
                     out_mcqs.append({
@@ -637,7 +779,11 @@ def generate_mcq_from_context(
                         "choices": obj["choices"],
                         "answer": obj["answer"],
                         **expl_fields,
+                        "concept_id": plan_row["concept_id"],
+                        "concept_label": plan_row["concept_label"],
+                        "question_type": plan_row["type_id"],
                     })
+                    fallback_q_index += 1  # FIX v6: advance index only on success
                     break
 
                 except Exception as e:
@@ -648,9 +794,11 @@ def generate_mcq_from_context(
                         chunks = []
                         break
                     if _is_overload_error(e):
-                        logger.warning("Model overloaded (503) in fallback attempt %s.", attempts_used)
+                        # FIX v6: same capped backoff in fallback path
+                        wait = min(BACKOFF_503 * attempt, BACKOFF_503_MAX)
+                        logger.warning("Model overloaded (503) in fallback attempt %s — waiting %.1fs.", attempts_used, wait)
                         if attempt <= MAX_RETRIES:
-                            time.sleep(BACKOFF_503 * attempt)
+                            time.sleep(wait)
                             continue
                         break
                     logger.warning("Fallback attempt %s failed: %s", attempts_used, e)
@@ -672,13 +820,11 @@ def generate_mcq_from_context(
                 "why_wrong": {"A": "", "B": "", "C": "", "D": ""},
                 "source_chunk": "",
             }),
+            "concept_id": q.get("concept_id", ""),
+            "concept_label": q.get("concept_label", ""),
+            "question_type": q.get("question_type", ""),
         }
         cleaned.append(base)
-
-    for idx, itm in enumerate(cleaned):
-        concept = concept_list[idx % len(concept_list)]
-        itm["concept_id"] = concept["concept_id"]
-        itm["concept_label"] = concept["concept_label"]
 
     return cleaned
 
@@ -714,37 +860,79 @@ def generate_quiz_from_context(
 
 
 if __name__ == "__main__":
+    import json
+
     def fake_llm(prompt: str) -> str:
+        if "canonical concepts" in prompt:
+            return json.dumps([
+                {"concept_id": "field_definition",    "concept_label": "Definition of Psychology & Economics"},
+                {"concept_id": "homo_economicus",     "concept_label": "Homo Economicus assumptions"},
+                {"concept_id": "rationality_critique","concept_label": "Critique of rationality"},
+                {"concept_id": "real_world_examples", "concept_label": "Real-world examples (GlowCaps)"},
+                {"concept_id": "model_properties",    "concept_label": "Properties of a good model"},
+            ])
         demo = [
             {
-                "id": "q1",
-                "question": "What is the primary benefit of batch MCQ generation?",
-                "choices": {
-                    "A": "It uses more API calls for better quality.",
-                    "B": "It reduces API calls to a single request per quiz.",
-                    "C": "It generates questions one paragraph at a time.",
-                    "D": "It avoids using any LLM at all.",
-                },
+                "id": "q1", "question": "What is the primary goal of Psychology and Economics?",
+                "choices": {"A": "To replace economics with psychology.", "B": "To use insights from other fields to improve economic models.", "C": "To study only psychological factors.", "D": "To prove rationality is always correct."},
                 "answer": "B",
-                "brief_explanation": "Batch generation sends one prompt for all questions, cutting API usage dramatically.",
-                "detailed_explanation": {
-                    "why_correct": "Option B is correct because the batch prompt requests all n questions in a single LLM call, reducing quota consumption from O(n) to O(1).",
-                    "why_wrong": {
-                        "A": "A is wrong — more API calls would increase, not reduce, quota usage.",
-                        "B": "",
-                        "C": "C describes the old per-chunk fallback strategy, not the primary batch approach.",
-                        "D": "D is wrong — the batch path still uses the LLM; it just uses it once.",
-                    },
-                    "source_chunk": "all n MCQs requested in a SINGLE LLM call instead of one call per chunk.",
-                },
-            }
+                "brief_explanation": "The field combines both disciplines to improve predictive power.",
+                "detailed_explanation": {"why_correct": "B is correct.", "why_wrong": {"A": "Wrong.", "B": "", "C": "Wrong.", "D": "Wrong."}, "source_chunk": "use insights from other fields"},
+            },
+            {
+                "id": "q2", "question": "Which assumption does Homo Economicus NOT make?",
+                "choices": {"A": "Maximises expected utility.", "B": "Processes info as a Bayesian.", "C": "Is driven by preferences over changes.", "D": "Is perfectly selfless."},
+                "answer": "D",
+                "brief_explanation": "Homo Economicus is self-interested, not selfless.",
+                "detailed_explanation": {"why_correct": "D is correct.", "why_wrong": {"A": "Wrong.", "B": "Wrong.", "C": "Wrong.", "D": ""}, "source_chunk": "self-interested"},
+            },
+            {
+                "id": "q3", "question": "GlowCaps medication reminders illustrate a challenge to which assumption?",
+                "choices": {"A": "Self-interest.", "B": "Optimal information processing.", "C": "Perfect willpower.", "D": "Stable preferences."},
+                "answer": "C",
+                "brief_explanation": "GlowCaps exist because people lack perfect self-control.",
+                "detailed_explanation": {"why_correct": "C is correct.", "why_wrong": {"A": "Wrong.", "B": "Wrong.", "C": "", "D": "Wrong."}, "source_chunk": "willpower"},
+            },
+            {
+                "id": "q4", "question": "Why do researchers consider the classical economic model too extreme?",
+                "choices": {"A": "It assumes people are too selfless.", "B": "It overestimates rationality.", "C": "It ignores economic incentives.", "D": "It focuses on sociology."},
+                "answer": "B",
+                "brief_explanation": "People make predictable mistakes that the model ignores.",
+                "detailed_explanation": {"why_correct": "B is correct.", "why_wrong": {"A": "Wrong.", "B": "", "C": "Wrong.", "D": "Wrong."}, "source_chunk": "predictable mistakes"},
+            },
+            {
+                "id": "q5", "question": "What property of a good model does Gabaix and Laibson (2008) emphasise?",
+                "choices": {"A": "Complexity.", "B": "Exact replication of reality.", "C": "Exclusive use of psychology.", "D": "Parsimony."},
+                "answer": "D",
+                "brief_explanation": "A good model is parsimonious — simple yet powerful.",
+                "detailed_explanation": {"why_correct": "D is correct.", "why_wrong": {"A": "Wrong.", "B": "Wrong.", "C": "Wrong.", "D": ""}, "source_chunk": "parsimony"},
+            },
         ]
         return json.dumps(demo)
 
     sample = (
-        "Information infrastructure is the set of systems that underpin digital services. "
-        "The introduction chapter summarizes the key concepts of behavioral economics, "
-        "including how people deviate from rational decision-making."
+        "Psychology and Economics is the field that studies the joint influence of psychological "
+        "and economic factors on behaviour. Its goal is to use insights from other fields to make "
+        "economic models more realistic. The classical model assumes Homo Economicus: a perfectly "
+        "rational, self-interested agent who maximises expected utility. Critics argue this is too "
+        "extreme because real people make predictable mistakes. GlowCaps remind users to take "
+        "medication, illustrating imperfect willpower. Gabaix and Laibson (2008) argue good models "
+        "require parsimony."
     )
-    result = generate_mcq_from_context(sample, n=1, llm_call=fake_llm)
-    print(json.dumps(result, indent=2))
+
+    print("=== Diversity plan ===")
+    concepts = [
+        {"concept_id": "field_definition",    "concept_label": "Definition of Psychology & Economics"},
+        {"concept_id": "homo_economicus",     "concept_label": "Homo Economicus assumptions"},
+        {"concept_id": "rationality_critique","concept_label": "Critique of rationality"},
+        {"concept_id": "real_world_examples", "concept_label": "Real-world examples (GlowCaps)"},
+        {"concept_id": "model_properties",    "concept_label": "Properties of a good model"},
+    ]
+    plan = _build_question_plan(concepts, n=5)
+    for i, row in enumerate(plan, 1):
+        print(f"  Q{i}: [{row['type_id']:12s}] {row['concept_label']}")
+
+    print("\n=== Generated MCQs ===")
+    result = generate_mcq_from_context(sample, n=5, llm_call=fake_llm)
+    for q in result:
+        print(f"  {q['id']} [{q.get('question_type','?'):12s}] ({q.get('concept_label','?')}) — {q['question'][:70]}")
