@@ -10,6 +10,7 @@ This module mirrors the UI and behavior originally in app.py without changes.
 
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +97,17 @@ def _format_flagged_reason(evidence_entry: dict) -> str:
     return "Repeated incorrect quiz answers for this concept."
 
 
+def _format_timestamp(value: str) -> str:
+    raw = " ".join(str(value or "").split()).strip()
+    if not raw:
+        return ""
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return raw
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
 def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm):
     """
     Render the 'Confused? Quick prioritized list' UI for the given document (stem).
@@ -161,60 +173,44 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
     # require positive signal_strength (wrong_count) — safety filter
     real_confusions = [r for r in results if int(r.get("signal_strength", 0)) > 0]
-    merged = {}
-    for r in real_confusions:
-        concept_id = (r.get("concept_id") or "").strip()
-        concept_label = (r.get("concept_label") or r.get("concept") or "").strip()
-        if r.get("concept_unlabeled"):
-            concept_label = ""
-        if concept_id:
-            key = f"id:{concept_id}"
-        else:
-            label_key = re.sub(r"[^a-z0-9 ]+", "", concept_label.lower())
-            label_key = " ".join(label_key.split())
-            if label_key:
-                key = f"label:{label_key}"
-            else:
-                evidence = r.get("evidence", []) or []
-                first = evidence[0] if evidence else {}
-                meta = first.get("meta", {}) or {}
-                qid = meta.get("qid") or first.get("qid") or ""
-                key = f"qid:{qid}" if qid else f"idx:{len(merged)}"
-        if key not in merged:
-            merged[key] = r
-        else:
-            merged[key]["signal_strength"] = int(merged[key].get("signal_strength", 0)) + int(r.get("signal_strength", 0))
-            merged[key]["evidence"] = (merged[key].get("evidence", []) or []) + (r.get("evidence", []) or [])
-            if not merged[key].get("concept_label") and concept_label:
-                merged[key]["concept_label"] = concept_label
-            if not merged[key].get("concept_id") and concept_id:
-                merged[key]["concept_id"] = concept_id
-    real_confusions = list(merged.values())
-    real_confusions.sort(key=lambda r: -int(r.get("signal_strength", 0)))
+    real_confusions.sort(
+        key=lambda r: (
+            float(r.get("final_score", 0.0)),
+            int(r.get("wrong_attempts", 0)),
+            int(r.get("total_attempts", 0)),
+            str(r.get("last_seen") or ""),
+        ),
+        reverse=True,
+    )
 
     # When empty, show one calm line only (no cards/icons)
     if not real_confusions:
-        st.success("No repeated quiz mistakes yet. This section will fill in after the same concept is missed more than once.")
+        st.success("No wrong quiz answers are recorded for this lecture yet. When you miss a question, the matching weak area will appear here and stable chunk-based cards will rise to the top.")
     else:
         preview_limit = min(len(real_confusions), 5)
         for idx, item in enumerate(real_confusions[:preview_limit], start=1):
             with st.container():
                 st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
-                concept = item.get("concept_label") or item.get("concept") or ""
-                if not concept:
-                    first_evidence = (item.get("evidence") or [{}])[0]
-                    meta = first_evidence.get("meta", {}) or {}
-                    qid = meta.get("qid") or first_evidence.get("qid") or ""
-                    concept = "Unlabeled concept"
+                concept = item.get("title") or item.get("concept") or item.get("concept_label") or "Unlabeled chunk"
                 strength = int(item.get("signal_strength", 0))
-                header_cols = st.columns([3.2, 1.2])
+                total_attempts = int(item.get("total_attempts", 0) or 0)
+                error_rate = float(item.get("error_rate", 0.0) or 0.0)
+                last_seen = _format_timestamp(item.get("last_seen", ""))
+                header_cols = st.columns([3.0, 1.0, 1.0])
                 with header_cols[0]:
                     st.markdown(f"### {idx}. {concept}")
-                    st.write("This concept showed up as a repeated weak spot in your recent quiz answers.")
+                    if strength > 1:
+                        st.write("You have missed multiple quiz questions tied to this chunk.")
+                    else:
+                        st.write("You missed a quiz question tied to this chunk.")
                     if item.get("reason"):
                         st.caption(item.get("reason"))
+                    if last_seen:
+                        st.caption(f"Last seen: {last_seen}")
                 with header_cols[1]:
-                    st.metric("Signals", strength)
+                    st.metric("Error rate", f"{error_rate:.0%}")
+                with header_cols[2]:
+                    st.metric("Attempts", total_attempts)
                 evidence = item.get("evidence", []) or []
                 evidence_quiz_rows = []
                 item_type = (item.get("item_type") or ("mcq" if item.get("is_mcq") else "concept")).strip().lower()
@@ -267,7 +263,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 st.caption("Type: MCQ confusion item" if is_mcq_item else "Type: Concept confusion item")
 
                 if evidence:
-                    with st.expander("Why this concept was flagged"):
+                    with st.expander("Why this weak area was flagged"):
                         seen_q = set()
                         reason_rows = []
                         for e in evidence:
@@ -290,7 +286,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             for row in reason_rows[:5]:
                                 st.write(f"- {row}")
                         else:
-                            st.write("- Repeated incorrect quiz answers for this concept.")
+                            st.write("- Repeated incorrect quiz answers for this chunk.")
 
                 delete_keys = []
                 for e in evidence:
@@ -310,7 +306,12 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                 # Centralized action input resolution for this card
                 extracted_concept = item.get("concept_label") or item.get("concept") or concept
-                deterministic_fallback_id = _deterministic_confusion_id(stem, extracted_concept)
+                deterministic_fallback_id = (
+                    item.get("store_key")
+                    or item.get("card_id")
+                    or item.get("chunk_id")
+                    or _deterministic_confusion_id(stem, extracted_concept)
+                )
 
                 if (
                     not notice_rendered
@@ -457,12 +458,12 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 st.exception(e)
                     with secondary_action_cols[1]:
                         delete_key = f"conf_delete_{stem}_{idx}"
-                        if st.button("Delete this card", key=delete_key, use_container_width=True):
+                        if st.button("Reset", key=delete_key, use_container_width=True):
                             if not delete_keys:
                                 st.warning("No persisted entries found to delete.")
                             else:
                                 removed = delete_confusion_entries(delete_keys)
-                                st.success(f"Deleted {removed} confusion item(s).")
+                                st.success(f"Reset {removed} confusion card(s).")
                                 try:
                                     st.rerun()
                                 except Exception:

@@ -1,6 +1,7 @@
 # frontend/handlers.py
 import os
 import hashlib
+import math
 from typing import Optional, List, Dict, Any, Tuple
 import requests
 # backend imports (same as the original app.py used)
@@ -269,9 +270,14 @@ def record_quiz_result(
         print(f"[confusion_store] failed to record quiz result: {e}")
 
 
-def load_persisted_confusions(limit: int = 10):
+def load_persisted_confusions(
+    limit: Optional[int] = 10,
+    stem: str = "",
+    doc_id: str = "",
+    only_wrong: bool = False,
+):
     try:
-        return _get_top_confusions(limit)
+        return _get_top_confusions(limit=limit, stem=stem, doc_id=doc_id, only_wrong=only_wrong)
     except Exception as e:
         print(f"[confusion_store] failed to load confusions: {e}")
         return []
@@ -295,18 +301,15 @@ def perform_confusion_analysis(
     llm_call = None,
 ) -> List[Dict[str, Any]]:
     """
-    Return a prioritized list of *persisted* quiz confusions only (no chat-derived placeholders).
-    Rules enforced here:
-      - Only include persisted entries coming from record_quiz_result (backend/confusion_store).
-      - Exclude any persisted entry with wrong_count <= 0.
-      - Map persisted entries into the UI-friendly schema:
-          { concept, status, reason, evidence, signal_strength }
-      - Sort by wrong_count desc and return up to top_n items (default 5).
-    This ensures the Confused UI shows *only* real quiz mistakes and never shows the "clear/0" placeholders.
+    Return persisted chunk-based confusion cards ranked by their normalized score.
     """
     try:
-        # Prefer persisted store as the single source of truth for "real confusion"
-        persisted = load_persisted_confusions(limit=top_n * 2) or []
+        persisted = load_persisted_confusions(
+            limit=None,
+            stem=stem,
+            doc_id=doc_id,
+            only_wrong=True,
+        ) or []
     except Exception as e:
         print(f"[confusion_analysis] failed to load persisted confusions: {e}")
         persisted = []
@@ -317,123 +320,159 @@ def perform_confusion_analysis(
     except Exception:
         pass
 
-    # Filter to only real confusion items from quizzes (wrong_count > 0)
-    real = []
+    real: List[Dict[str, Any]] = []
     for p in persisted:
-        try:
-            wrong_count = int(p.get("wrong_count", 0))
-        except Exception:
-            wrong_count = 0
-        if wrong_count <= 0:
-            # do not include zero-count placeholders
+        wrong_attempts = int(p.get("wrong_attempts", p.get("wrong_count", 0)) or 0)
+        total_attempts = int(
+            p.get(
+                "total_attempts",
+                wrong_attempts + int(p.get("correct_attempts", p.get("correct_count", 0)) or 0),
+            )
+            or 0
+        )
+        total_attempts = max(total_attempts, wrong_attempts)
+        if wrong_attempts <= 0:
             continue
 
-        qid = p.get("qid") or ""
-        entry_stem = (p.get("stem") or "").strip()
-        entry_doc_id = (p.get("doc_id") or "").strip()
-        if doc_id:
-            # When doc_id is available, prefer entries that have the same doc id.
-            # But do NOT exclude entries that lack a doc_id (backwards compatibility
-            # with older records). Only skip when an entry has a doc_id and it
-            # doesn't match the current lecture.
-            if entry_doc_id and entry_doc_id != doc_id:
-                continue
-        if stem:
-            matches = False
-            s = (stem or "").strip()
-            s_alt = s.replace(" ", "_")
-            # exact stem match
-            if entry_stem and (entry_stem == s or entry_stem == s_alt):
-                matches = True
-            # qid prefix match using either space or underscore variants
-            elif qid and (qid.startswith(f"{s}_") or qid.startswith(f"{s_alt}_")):
-                matches = True
-            if not matches:
-                continue
-        qtext = (p.get("question") or "").strip()
-        item_type = (p.get("item_type") or "").strip().lower()
-        origin = (p.get("origin") or "").strip().lower()
-        is_mcq = item_type == "mcq" or origin == "quiz_mcq" or bool(p.get("choices"))
+        error_rate = float(
+            p.get("error_rate", (wrong_attempts / total_attempts) if total_attempts else 0.0)
+        )
+        score = float(p.get("score", (wrong_attempts + 1.0) / (total_attempts + 2.0)))
+        final_score = float(
+            p.get("final_score", score * math.log(1 + total_attempts) if total_attempts > 0 else 0.0)
+        )
+
+        chunk_id = (p.get("chunk_id") or p.get("source_chunk_id") or "").strip()
         concept_id = (p.get("concept_id") or "").strip()
-        concept_label = (p.get("concept_label") or p.get("concept") or "").strip()
-        if concept_label.lower() == "unknown concept":
-            concept_label = ""
-        has_concept = bool(concept_id or concept_label)
-        display_concept = concept_label if concept_label else ""
+        concept_label = (p.get("concept_label") or "").strip()
+        source_chunk_preview = (p.get("source_chunk_preview") or p.get("source_chunk") or "").strip()
+        display_title = (
+            (p.get("title") or "").strip()
+            or concept_label
+            or source_chunk_preview
+            or chunk_id
+            or "Unlabeled chunk"
+        )
+        store_key = (p.get("store_key") or p.get("card_id") or "").strip()
+        last_seen = (p.get("last_seen") or p.get("last_updated") or p.get("last_wrong") or p.get("last_correct") or "").strip()
+        last_question = (p.get("question") or p.get("last_question") or "").strip()
+        last_qid = (p.get("quiz_question_id") or p.get("last_mcq_id") or "").strip()
 
-        status = "confused" if wrong_count > 1 else "shaky"
-        reason = f"Persisted incorrect answers (count={wrong_count})"
+        evidence: List[Dict[str, Any]] = []
+        history_ids = [str(mcq_id or "").strip() for mcq_id in (p.get("mcq_history") or []) if str(mcq_id or "").strip()]
+        seen_qids = set()
+        for mcq_id in reversed(history_ids):
+            if mcq_id in seen_qids:
+                continue
+            seen_qids.add(mcq_id)
+            quiz_item = load_quiz_item_by_id(mcq_id) or {}
+            evidence_question = (
+                (quiz_item.get("question") or "").strip()
+                or (last_question if mcq_id == last_qid else "")
+            )
+            evidence_choices = (
+                quiz_item.get("choices")
+                if isinstance(quiz_item.get("choices"), dict)
+                else (p.get("choices") if mcq_id == last_qid and isinstance(p.get("choices"), dict) else {})
+            )
+            evidence_answer = (
+                (quiz_item.get("answer") or "").strip().upper()
+                or ((p.get("answer") or "").strip().upper() if mcq_id == last_qid else "")
+            )
+            evidence_explanation = (
+                (quiz_item.get("explanation") or quiz_item.get("brief_explanation") or "").strip()
+                or ((p.get("explanation") or "").strip() if mcq_id == last_qid else "")
+            )
+            evidence_meta = {
+                "store_key": store_key,
+                "qid": mcq_id,
+                "question": evidence_question,
+                "choices": evidence_choices,
+                "answer": evidence_answer,
+                "explanation": evidence_explanation,
+                "last_chosen_answer": (p.get("last_chosen_answer") or "").strip().upper(),
+                "wrong_count": wrong_attempts,
+            }
+            evidence.append({
+                "type": "quiz",
+                "qid": mcq_id,
+                "question": evidence_question,
+                "meta": evidence_meta,
+            })
+            if len(evidence) >= 5:
+                break
 
-        evidence = [{"type": "quiz", "qid": qid, "question": qtext, "meta": p}]
+        if not evidence:
+            evidence.append({
+                "type": "quiz",
+                "qid": last_qid,
+                "question": last_question,
+                "meta": {
+                    "store_key": store_key,
+                    "qid": last_qid,
+                    "question": last_question,
+                    "choices": (p.get("choices") or {}) if isinstance(p.get("choices"), dict) else {},
+                    "answer": (p.get("answer") or "").strip().upper(),
+                    "explanation": (p.get("explanation") or "").strip(),
+                    "last_chosen_answer": (p.get("last_chosen_answer") or "").strip().upper(),
+                    "wrong_count": wrong_attempts,
+                },
+            })
 
         real.append({
-            "item_type": "mcq" if is_mcq else "concept",
-            "origin": "quiz_mcq" if is_mcq else "concept",
-            "is_mcq": is_mcq,
-            "quiz_question_id": qid,
-            "original_question": qtext,
+            "item_type": "mcq",
+            "origin": "quiz_mcq",
+            "is_mcq": True,
+            "card_id": (p.get("card_id") or store_key),
+            "store_key": store_key,
+            "chunk_id": chunk_id,
+            "quiz_question_id": last_qid,
+            "original_question": last_question,
             "choices": (p.get("choices") or {}) if isinstance(p.get("choices"), dict) else {},
             "answer": (p.get("answer") or "").strip().upper(),
             "explanation": (p.get("explanation") or "").strip(),
             "last_is_correct": bool(p.get("last_is_correct", False)),
             "concept_id": concept_id,
             "concept_label": concept_label,
-            "concept": display_concept,
-            "concept_unlabeled": (not has_concept),
-            "store_key": (p.get("store_key") or ""),
-            "status": status,
-            "reason": reason,
+            "source_chunk_id": chunk_id,
+            "source_chunk_preview": source_chunk_preview,
+            "concept_bucket_key": (p.get("card_id") or store_key),
+            "concept": display_title,
+            "title": display_title,
+            "concept_unlabeled": False,
+            "last_seen": last_seen,
+            "error_count": wrong_attempts,
+            "wrong_attempts": wrong_attempts,
+            "total_attempts": total_attempts,
+            "error_rate": error_rate,
+            "score": score,
+            "final_score": final_score,
+            "status": "confused" if wrong_attempts > 1 else "shaky",
+            "reason": f"Error rate {error_rate:.0%} across {total_attempts} attempt(s).",
             "evidence": evidence,
-            "signal_strength": wrong_count,
+            "signal_strength": wrong_attempts,
+            "mcq_history": history_ids,
         })
 
-    # Group strictly by concept_id for deterministic grouping.
-    grouped: Dict[str, Dict[str, Any]] = {}
-    for item in real:
-        evidence = item.get("evidence", []) or []
-        group_key = str(item.get("concept_id") or "").strip()
-        if not group_key:
-            group_key = (item.get("store_key") or "").strip() or (item.get("original_question") or "").strip()
-            if group_key:
-                group_key = f"qid:{group_key}"
-            else:
-                group_key = f"idx:{len(grouped)}"
-        display_concept = (item.get("concept_label") or item.get("concept") or "").strip()
-        if group_key not in grouped:
-            grouped[group_key] = {
-                **item,
-                "concept": display_concept,
-                "signal_strength": int(item.get("signal_strength", 0)),
-                "evidence": list(evidence),
-            }
-        else:
-            grouped[group_key]["signal_strength"] += int(item.get("signal_strength", 0))
-            grouped[group_key]["evidence"] = (grouped[group_key].get("evidence", []) or []) + list(evidence)
-            if not grouped[group_key].get("concept") and display_concept:
-                grouped[group_key]["concept"] = display_concept
-            if not grouped[group_key].get("concept_label") and item.get("concept_label"):
-                grouped[group_key]["concept_label"] = item.get("concept_label")
-            if not grouped[group_key].get("original_question") and item.get("original_question"):
-                grouped[group_key]["original_question"] = item.get("original_question")
-            if (not grouped[group_key].get("choices")) and item.get("choices"):
-                grouped[group_key]["choices"] = item.get("choices")
-            if (not grouped[group_key].get("answer")) and item.get("answer"):
-                grouped[group_key]["answer"] = item.get("answer")
-            if (not grouped[group_key].get("quiz_question_id")) and item.get("quiz_question_id"):
-                grouped[group_key]["quiz_question_id"] = item.get("quiz_question_id")
-
-    # Sort by signal_strength (wrong_count) desc
     try:
-        real_sorted = sorted(grouped.values(), key=lambda r: -int(r.get("signal_strength", 0)))
+        real_sorted = sorted(
+            real,
+            key=lambda r: (
+                float(r.get("final_score", 0.0)),
+                int(r.get("wrong_attempts", 0)),
+                int(r.get("total_attempts", 0)),
+                str(r.get("last_seen") or ""),
+            ),
+            reverse=True,
+        )
     except Exception:
-        real_sorted = list(grouped.values())
+        real_sorted = list(real)
 
     try:
-        print(f"[confusion_analysis] filtered_real={len(real)} grouped={len(grouped)} returning={len(real_sorted[:int(top_n or 5)])}")
+        print(f"[confusion_analysis] cards={len(real)} returning={len(real_sorted[:int(top_n or 5)])}")
     except Exception:
         pass
 
-    # Enforce UI cap: at most top_n (recommended 3-5; callers may pass 5)
     return real_sorted[:int(top_n or 5)]
 
 

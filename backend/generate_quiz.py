@@ -40,11 +40,15 @@ v6 changes vs v5  (goal: v4 speed + reliability, v5 diversity):
 """
 
 import json
+import hashlib
 import random
 import re
 import time
 import logging
 from typing import Callable, Dict, List, Optional
+
+from backend.concept_policy import canonicalize_chunk_id, derive_source_chunk_id
+from backend.helpers import chunk_text as build_embedding_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +470,112 @@ def _paragraph_chunks(text: str, approx_words: int = 80) -> List[str]:
     return chunks
 
 
+def _clean_ws(value: str) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _context_doc_id(context_text: str) -> str:
+    return hashlib.sha1((context_text or "").encode("utf-8")).hexdigest()[:12]
+
+
+def _build_context_chunk_rows(context_text: str) -> List[Dict[str, str]]:
+    doc_id = _context_doc_id(context_text)
+    raw_chunks = build_embedding_chunks(context_text or "", max_chars=2000, overlap=200)
+    rows: List[Dict[str, str]] = []
+    for idx, raw_chunk in enumerate(raw_chunks):
+        chunk_value = _clean_ws(raw_chunk)
+        if not chunk_value:
+            continue
+        rows.append({
+            "doc_id": doc_id,
+            "chunk_id": f"{doc_id}:uploaded_chunk_{idx}",
+            "embedding_chunk_id": f"uploaded_chunk_{idx}",
+            "chunk_text": chunk_value,
+        })
+    if not rows:
+        fallback_chunk = _clean_ws(context_text)
+        if fallback_chunk:
+            rows.append({
+                "doc_id": doc_id,
+                "chunk_id": f"{doc_id}:uploaded_chunk_0",
+                "embedding_chunk_id": "uploaded_chunk_0",
+                "chunk_text": fallback_chunk,
+            })
+    return rows
+
+
+def _find_matching_context_chunk(anchor_text: str, chunk_rows: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    anchor = _clean_ws(anchor_text)
+    if not chunk_rows:
+        return None
+    if len(chunk_rows) == 1:
+        return chunk_rows[0]
+    if not anchor:
+        return None
+
+    anchor_low = anchor.lower()
+    best_row: Optional[Dict[str, str]] = None
+    best_score = -1.0
+    for row in chunk_rows:
+        chunk_value = row.get("chunk_text", "")
+        chunk_low = chunk_value.lower()
+        if anchor_low and anchor_low in chunk_low:
+            return row
+        if chunk_low and chunk_low in anchor_low:
+            score = 0.95
+        else:
+            score = _token_overlap_fraction(anchor_low, chunk_low)
+        if score > best_score:
+            best_score = score
+            best_row = row
+    if best_score >= 0.08:
+        return best_row
+    return None
+
+
+def _attach_chunk_metadata(item: Dict, context_chunk_rows: List[Dict[str, str]]) -> Dict:
+    enriched = dict(item or {})
+    detailed = enriched.get("detailed_explanation") or {}
+    if not isinstance(detailed, dict):
+        detailed = {}
+
+    raw_chunk_id = _clean_ws(enriched.get("chunk_id") or enriched.get("source_chunk_id"))
+    source_chunk = _clean_ws(detailed.get("source_chunk") or enriched.get("source_chunk"))
+    chunk_hint = _clean_ws(enriched.get("_chunk_text_hint"))
+
+    matched_row = None
+    if raw_chunk_id:
+        for row in context_chunk_rows:
+            if raw_chunk_id in (row.get("chunk_id", ""), row.get("embedding_chunk_id", "")):
+                matched_row = row
+                break
+    if matched_row is None:
+        matched_row = _find_matching_context_chunk(source_chunk or chunk_hint, context_chunk_rows)
+
+    doc_id = (
+        (matched_row or {}).get("doc_id")
+        or (context_chunk_rows[0].get("doc_id") if context_chunk_rows else "")
+    )
+    chunk_text_value = _clean_ws((matched_row or {}).get("chunk_text") or source_chunk or chunk_hint)
+    chunk_id = _clean_ws((matched_row or {}).get("chunk_id") or "")
+    if not chunk_id and raw_chunk_id:
+        chunk_id = canonicalize_chunk_id(raw_chunk_id, doc_id=doc_id)
+    if not chunk_id and chunk_text_value:
+        chunk_id = canonicalize_chunk_id(derive_source_chunk_id(chunk_text_value), doc_id=doc_id)
+
+    enriched["doc_id"] = doc_id
+    enriched["mcq_id"] = enriched.get("mcq_id") or enriched.get("id", "")
+    enriched["chunk_id"] = chunk_id
+    enriched["source_chunk_id"] = chunk_id
+    if chunk_text_value:
+        enriched["chunk_text"] = chunk_text_value
+        enriched["source_chunk"] = source_chunk or chunk_text_value
+        enriched["source_chunk_preview"] = _shorten(chunk_text_value, max_len=180)
+    enriched["detailed_explanation"] = detailed
+    enriched.pop("_chunk_text_hint", None)
+    return enriched
+
+
 def _validate_mcq_obj(obj: dict, paragraph: str = "") -> bool:
     try:
         if not isinstance(obj, dict):
@@ -562,6 +672,7 @@ def generate_mcq_from_context(
     chunk_word_target: int = 90,
     concepts: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict]:
+    context_chunk_rows = _build_context_chunk_rows(context_text or "")
 
     # ── 1. Extract concepts ──────────────────────────────────────────────
     # FIX v6: always cap at 5, regardless of n (v5 used max(n,5) which
@@ -610,8 +721,9 @@ def generate_mcq_from_context(
                 "concept_id": row["concept_id"],
                 "concept_label": row["concept_label"],
                 "question_type": row["type_id"],
+                "_chunk_text_hint": ch,
             })
-        return out[:n]
+        return [_attach_chunk_metadata(item, context_chunk_rows) for item in out[:n]]
 
     # ── LLM path — BATCH ────────────────────────────────────────────────
     content_for_prompt = _shorten(context_text or "", max_len=6000)
@@ -782,6 +894,7 @@ def generate_mcq_from_context(
                         "concept_id": plan_row["concept_id"],
                         "concept_label": plan_row["concept_label"],
                         "question_type": plan_row["type_id"],
+                        "_chunk_text_hint": chunk,
                     })
                     fallback_q_index += 1  # FIX v6: advance index only on success
                     break
@@ -823,8 +936,9 @@ def generate_mcq_from_context(
             "concept_id": q.get("concept_id", ""),
             "concept_label": q.get("concept_label", ""),
             "question_type": q.get("question_type", ""),
+            "_chunk_text_hint": q.get("_chunk_text_hint", ""),
         }
-        cleaned.append(base)
+        cleaned.append(_attach_chunk_metadata(base, context_chunk_rows))
 
     return cleaned
 
@@ -852,6 +966,8 @@ def generate_quiz_from_context(
         difficulty = q.get("difficulty", "medium")
         questions.append({
             "id": qid,
+            "mcq_id": q.get("mcq_id") or qid,
+            "chunk_id": q.get("chunk_id", ""),
             "question": question_text,
             "answer": answer_text,
             "difficulty": difficulty,

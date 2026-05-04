@@ -2,7 +2,8 @@
 from typing import List, Dict, Any, Optional
 import re
 from collections import defaultdict
-from datetime import datetime
+
+from backend.concept_policy import resolve_concept_bucket
 
 def _shorten(text: str, n: int = 200) -> str:
     if not text:
@@ -37,20 +38,38 @@ def analyze_confusion(
     quiz_submissions = quiz_submissions or []
     retrieved_chunks = retrieved_chunks or []
 
-    # 1) Aggregate quiz signals by normalized question text (or id)
-    # Use question text as primary grouping; if missing, use id.
-    aggregated = defaultdict(lambda: {"count_wrong": 0, "examples": []})
+    # 1) Aggregate quiz signals by deterministic concept bucket.
+    aggregated = defaultdict(lambda: {
+        "count_wrong": 0,
+        "examples": [],
+        "concept_id": "",
+        "concept_label": "",
+        "source_chunk_id": "",
+    })
     for sub in quiz_submissions:
         qtext = (sub.get("question") or "").strip()
         qid = sub.get("id") or ""
-        key = qtext if qtext else qid
-        # treat missing key as placeholder
-        if not key:
-            key = f"quiz_{qid}"
         is_correct = bool(sub.get("is_correct", False))
         if not is_correct:
+            concept_meta = resolve_concept_bucket(
+                qid=qid,
+                stem=sub.get("stem", ""),
+                question=qtext,
+                question_item=sub,
+                existing=sub,
+            )
+            key = concept_meta["concept_bucket_key"] or (qid or qtext or "unknown")
             aggregated[key]["count_wrong"] += 1
-            aggregated[key]["examples"].append({"type": "quiz", "id": qid, "question": qtext})
+            aggregated[key]["concept_id"] = concept_meta["concept_id"] or aggregated[key]["concept_id"]
+            aggregated[key]["concept_label"] = concept_meta["concept_label"] or aggregated[key]["concept_label"]
+            aggregated[key]["source_chunk_id"] = concept_meta["source_chunk_id"] or aggregated[key]["source_chunk_id"]
+            aggregated[key]["examples"].append({
+                "type": "quiz",
+                "id": qid,
+                "question": qtext,
+                "concept_id": concept_meta["concept_id"],
+                "source_chunk_id": concept_meta["source_chunk_id"],
+            })
 
     # 2) Conversation signals (weaker)
     confusion_terms = ["confus", "don't understand", "dont understand", "unclear", "why", "how", "hard", "difficult", "i'm stuck", "i'm lost", "can't", "cant", "help", "explain"]
@@ -69,8 +88,12 @@ def analyze_confusion(
         # status: confused if repeated mistakes (>=2), shaky if single mistake
         status = "confused" if cnt >= 2 else "shaky"
         reason = f"{'Repeated incorrect answers' if cnt >= 2 else 'Incorrect answer'} on quiz items (count={cnt})."
+        label = meta.get("concept_label") or _shorten((examples[0] or {}).get("question", "") if examples else key, 160)
         results.append({
-            "concept": _shorten(key, 160),
+            "concept": label,
+            "concept_id": meta.get("concept_id", ""),
+            "concept_label": meta.get("concept_label", ""),
+            "source_chunk_id": meta.get("source_chunk_id", ""),
             "status": status,
             "reason": reason,
             "evidence": examples,

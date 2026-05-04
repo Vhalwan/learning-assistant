@@ -7,12 +7,35 @@ import os
 from typing import Dict, List, Optional
 from pathlib import Path
 
+from backend.concept_policy import resolve_concept_bucket
+
 DEFAULT_QUIZ_DIR = "data/processed"
 
 
 def get_quiz_path(stem: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> str:
     """Get the path for a quiz file given a document stem."""
     return os.path.join(quiz_dir, f"{stem}_quiz_items.json")
+
+
+def _normalize_quiz_item(item: Dict) -> Dict:
+    normalized = dict(item or {})
+    chunk_meta = resolve_concept_bucket(
+        question_item=normalized,
+        existing=normalized,
+    )
+    chunk_id = (chunk_meta.get("source_chunk_id") or "").strip()
+    if chunk_id and not str(normalized.get("chunk_id") or "").strip():
+        normalized["chunk_id"] = chunk_id
+    if chunk_id and not str(normalized.get("source_chunk_id") or "").strip():
+        normalized["source_chunk_id"] = chunk_id
+    source_chunk = (chunk_meta.get("source_chunk") or "").strip()
+    if source_chunk and not str(normalized.get("chunk_text") or "").strip():
+        normalized["chunk_text"] = source_chunk
+    if source_chunk and not str(normalized.get("source_chunk") or "").strip():
+        normalized["source_chunk"] = source_chunk
+    if not str(normalized.get("mcq_id") or "").strip() and str(normalized.get("id") or "").strip():
+        normalized["mcq_id"] = normalized.get("id")
+    return normalized
 
 
 def save_quiz_items(stem: str, quiz_items: List[Dict], quiz_dir: str = DEFAULT_QUIZ_DIR) -> str:
@@ -78,7 +101,7 @@ def load_quiz_items(stem: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Optional[Lis
                 data = json.load(f)
                 items = data.get("quiz_items", [])
                 if items:
-                    return items
+                    return [_normalize_quiz_item(item) for item in items if isinstance(item, dict)]
         except Exception:
             pass
     
@@ -103,7 +126,7 @@ def load_quiz_items(stem: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Optional[Lis
                             "answer": q.get("answer", ""),
                             "explanation": ""
                         })
-                    return converted
+                    return [_normalize_quiz_item(item) for item in converted]
         except Exception:
             pass
     
@@ -137,7 +160,7 @@ def load_quiz_item_by_id(card_id: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Opti
                 quiz_items = data.get("quiz_items", [])
                 for item in quiz_items:
                     if item.get("id") == card_id:
-                        return item
+                        return _normalize_quiz_item(item)
         except (json.JSONDecodeError, IOError, OSError):
             continue
     
@@ -154,13 +177,13 @@ def load_quiz_item_by_id(card_id: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Opti
                         if "placeholder" in question_text.lower():
                             return None
                         # Convert old format to new format
-                        return {
+                        return _normalize_quiz_item({
                             "id": q.get("id"),
                             "question": question_text,
                             "choices": {},
                             "answer": q.get("answer", ""),
                             "explanation": ""
-                        }
+                        })
         except (json.JSONDecodeError, IOError, OSError):
             continue
     
@@ -195,7 +218,7 @@ def load_all_quiz_items(quiz_dir: str = DEFAULT_QUIZ_DIR) -> Dict[str, Dict]:
                 for item in quiz_items:
                     item_id = item.get("id")
                     if item_id:
-                        all_items[item_id] = item
+                        all_items[item_id] = _normalize_quiz_item(item)
         except (json.JSONDecodeError, IOError, OSError) as e:
             # Log specific errors but continue processing other files
             continue
@@ -218,13 +241,13 @@ def load_all_quiz_items(quiz_dir: str = DEFAULT_QUIZ_DIR) -> Dict[str, Dict]:
                         continue
                     if item_id and item_id not in all_items:  # Don't overwrite new format items
                         # Convert old format to new format
-                        all_items[item_id] = {
+                        all_items[item_id] = _normalize_quiz_item({
                             "id": q.get("id"),
                             "question": question_text,
                             "choices": {},
                             "answer": q.get("answer", ""),
                             "explanation": ""
-                        }
+                        })
         except (json.JSONDecodeError, IOError, OSError):
             continue
     
