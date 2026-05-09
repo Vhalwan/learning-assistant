@@ -15,6 +15,7 @@ Changes vs previous version:
 import uuid
 import hashlib
 import time
+import re
 import requests
 from pathlib import Path
 from typing import Any, List, Dict
@@ -27,6 +28,20 @@ from frontend.handlers import (
     record_quiz_result,
 )
 from backend.study_srs import SRSManager
+
+
+def _normalize_quiz_question_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _quiz_session_chunk_counts(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for q in items or []:
+        cid = (q.get("chunk_id") or q.get("source_chunk_id") or "").strip().lower()
+        if not cid:
+            continue
+        counts[cid] = counts.get(cid, 0) + 1
+    return counts
 
 
 def _mark_selection_made(sel_key: str):
@@ -111,6 +126,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
     quiz_state_key = f"quiz_items_{stem}"
     quiz_generation_key = f"{quiz_state_key}_generation"
+    wave_breaks_key = f"{quiz_state_key}_wave_breaks"
     if quiz_generation_key not in st.session_state:
         st.session_state[quiz_generation_key] = 0
     doc_id_key = f"doc_id_{stem}"
@@ -153,6 +169,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                                     api_base=os.getenv("API_BASE", API_DEFAULT),
                                     token=st.session_state.get("api_token", "") or "",
                                     llm_call=None,
+                                    session_chunk_counts=None,
                                 )
                                 msg = f"Quiz generated: {len(quiz_items)} items."
                                 if latency:
@@ -162,10 +179,12 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                                 quiz_items, _ = generate_quiz(
                                     stem=stem, context_text=text, n=int(n_q),
                                     use_api_mode=False, llm_call=llm,
+                                    session_chunk_counts=None,
                                 )
                                 st.success(f"Quiz generated: {len(quiz_items)} items (local).")
 
                             st.session_state[quiz_state_key] = quiz_items
+                            st.session_state[wave_breaks_key] = []
                             st.session_state[quiz_generation_key] = (
                                 int(st.session_state.get(quiz_generation_key, 0)) + 1
                             )
@@ -204,7 +223,14 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     seen_qids: Dict[str, int] = {}
     quiz_render_items: List[Dict[str, Any]] = []
 
+    wave_breaks_raw = st.session_state.get(wave_breaks_key, [])
+    wave_breaks = set(wave_breaks_raw) if isinstance(wave_breaks_raw, list) else set()
+
     for idx, q in enumerate(quiz_items, start=1):
+        if idx in wave_breaks:
+            st.markdown("---")
+            st.markdown("### Additional questions")
+
         with st.container():
             st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
             qid = q.get("id", str(uuid.uuid4()))
@@ -239,7 +265,9 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                 submitted = st.session_state.get(submit_key, {})
                 status_icon = " ✅" if submitted.get("is_correct") else " ❌"
 
-            st.markdown(f"### Q{idx}{status_icon}: {q_text}")
+            st.markdown(f"### Q{idx}{status_icon}")
+            if q_text:
+                st.markdown(q_text)
             st.markdown("---")
 
             placeholder = "Select an answer"
@@ -275,12 +303,27 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
             with c2:
                 st.markdown("**Choices:**")
+                correct_letter_upper = (answer_letter or "").strip().upper()
+                chosen_letter_post = ""
+                if already_submitted:
+                    chosen_letter_post = (
+                        st.session_state.get(submit_key, {}).get("chosen", "") or ""
+                    ).strip().upper()
                 for label in ["A", "B", "C", "D"]:
                     opt = choices.get(label, "")
+                    # After submission, mark the correct answer green and
+                    # the chosen-but-wrong answer red so users can scan the
+                    # outcome at a glance without rereading the alert above.
+                    marker = ""
+                    if already_submitted:
+                        if label == correct_letter_upper:
+                            marker = "✅ "
+                        elif label == chosen_letter_post:
+                            marker = "❌ "
                     if opt:
-                        st.markdown(f"- **{label}.** {opt}")
+                        st.markdown(f"- {marker}**{label}.** {opt}")
                     else:
-                        st.markdown(f"- **{label}.** _(no option)_")
+                        st.markdown(f"- {marker}**{label}.** _(no option)_")
 
             # Derive chosen letter
             chosen_letter = None
@@ -425,16 +468,165 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
 
             st.markdown("---")
 
-    # ── Next-step recommendations (unchanged logic) ───────────────────────
+    # ── Aggregate progress across the current batch ───────────────────────
+    total_questions = len(quiz_items)
     total_answered = 0
+    total_correct = 0
     total_wrong = 0
+    wrong_topic_counts: Dict[str, int] = {}
     for render_item in quiz_render_items:
         submitted = st.session_state.get(render_item["submit_key"])
-        if submitted:
-            total_answered += 1
-            if not submitted.get("is_correct", False):
-                total_wrong += 1
+        if not submitted:
+            continue
+        total_answered += 1
+        if submitted.get("is_correct", False):
+            total_correct += 1
+            continue
+        total_wrong += 1
+        q = render_item["question"]
+        topic = (
+            (q.get("concept_label") or "").strip()
+            or (q.get("source_chunk_preview") or "").strip()
+            or (q.get("source_chunk") or "").strip()
+        )
+        if topic:
+            # Keep the topic display short for the summary card.
+            if len(topic) > 120:
+                topic = topic[:120].rstrip() + "…"
+            wrong_topic_counts[topic] = wrong_topic_counts.get(topic, 0) + 1
 
+    is_quiz_complete = total_questions > 0 and total_answered == total_questions
+
+    # ── Completion panel: score, accuracy, encouragement, continue ────────
+    if is_quiz_complete:
+        accuracy_pct = (total_correct / total_questions) * 100.0 if total_questions else 0.0
+        if accuracy_pct >= 90:
+            encouragement = "🎯 Excellent work — you've got a strong grip on this lecture."
+        elif accuracy_pct >= 70:
+            encouragement = "✨ You're improving — a couple more rounds will lock this in."
+        elif accuracy_pct >= 50:
+            encouragement = "💡 Keep practicing this lecture — you're getting there."
+        else:
+            encouragement = "📚 Keep practicing — try reviewing the lecture and giving it another go."
+
+        st.markdown("### ✅ Quiz complete")
+        m1, m2 = st.columns(2)
+        with m1:
+            st.metric("Score", f"{total_correct} / {total_questions}")
+        with m2:
+            st.metric("Accuracy", f"{accuracy_pct:.0f}%")
+        st.markdown(encouragement)
+
+        if wrong_topic_counts:
+            top_topic, _ = max(
+                wrong_topic_counts.items(),
+                key=lambda kv: kv[1],
+            )
+            st.markdown(f"**🧠 You struggled most with:** {top_topic}")
+
+        # Continue Quiz: append N more questions without resetting prior state.
+        cont_key = f"{quiz_state_key}_continue_{generation_token}"
+        cont_n = max(1, int(n_q))
+        if st.button(
+            f"🔄 Continue with {cont_n} more question(s)",
+            key=cont_key,
+            type="primary",
+            use_container_width=True,
+        ):
+            if not text:
+                st.warning("No document text — cannot continue.")
+            else:
+                with st.spinner("Generating more questions..."):
+                    try:
+                        chunk_counts = _quiz_session_chunk_counts(quiz_items)
+                        if st.session_state.get("use_api_mode", False):
+                            more_items, _ = generate_quiz(
+                                stem=stem,
+                                context_text=text,
+                                n=cont_n,
+                                use_api_mode=True,
+                                api_base=os.getenv("API_BASE", API_DEFAULT),
+                                token=st.session_state.get("api_token", "") or "",
+                                llm_call=None,
+                                session_chunk_counts=chunk_counts,
+                            )
+                        else:
+                            more_items, _ = generate_quiz(
+                                stem=stem,
+                                context_text=text,
+                                n=cont_n,
+                                use_api_mode=False,
+                                llm_call=llm,
+                                session_chunk_counts=chunk_counts,
+                            )
+
+                        existing_ids = {
+                            (item.get("id") or "")
+                            for item in quiz_items
+                            if item.get("id")
+                        }
+                        existing_qnorm = {
+                            _normalize_quiz_question_text(item.get("question") or "")
+                            for item in quiz_items
+                        }
+                        appended = []
+                        for item in more_items or []:
+                            tid = (item.get("id") or "").strip()
+                            qnorm = _normalize_quiz_question_text(item.get("question") or "")
+                            if tid and tid in existing_ids:
+                                continue
+                            if qnorm and qnorm in existing_qnorm:
+                                continue
+                            appended.append(item)
+                            if tid:
+                                existing_ids.add(tid)
+                            if qnorm:
+                                existing_qnorm.add(qnorm)
+
+                        if appended:
+                            first_new_idx = len(quiz_items) + 1
+                            waves = st.session_state.get(wave_breaks_key, [])
+                            if not isinstance(waves, list):
+                                waves = []
+                            waves.append(first_new_idx)
+                            st.session_state[wave_breaks_key] = waves
+
+                            combined = list(quiz_items) + appended
+                            st.session_state[quiz_state_key] = combined
+                            try:
+                                save_quiz_to_disk(stem, combined)
+                                if "srs_disk_quiz_items_cache" in st.session_state:
+                                    del st.session_state["srs_disk_quiz_items_cache"]
+                            except Exception as e:
+                                st.warning(
+                                    f"Continued in session but failed to save to disk: {e}"
+                                )
+                            st.success(f"Added {len(appended)} new question(s).")
+                            try:
+                                st.rerun()
+                            except Exception:
+                                try:
+                                    st.experimental_rerun()
+                                except Exception:
+                                    pass
+                        else:
+                            st.info(
+                                "No new unique questions were generated — try clicking again "
+                                "or change the number of items."
+                            )
+                    except requests.HTTPError as he:
+                        try:
+                            detail = he.response.json().get("detail", str(he))
+                        except Exception:
+                            detail = str(he)
+                        st.error(f"Continue failed: {detail}")
+                    except Exception as e:
+                        st.error("Continue failed.")
+                        st.exception(e)
+
+        st.markdown("")
+
+    # ── Next-step recommendations (preserved logic for missed items) ──────
     if total_answered and total_wrong > 0:
         st.markdown("### 🔁 Next step recommendations")
         st.markdown(f"You answered {total_answered} question(s). Missed: {total_wrong}.")
@@ -492,7 +684,10 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
             except Exception as e:
                 st.error(f"Could not add missed concepts: {e}")
 
-    elif total_answered and total_wrong == 0:
+    elif total_answered and total_wrong == 0 and not is_quiz_complete:
+        # Partial progress with no misses yet — keep the lightweight nudge.
+        # Once the user finishes the batch, the completion panel above takes
+        # over with a richer score / continue affordance.
         st.markdown("### 🔁 Next step recommendations")
         st.markdown(f"You answered {total_answered} question(s). Missed: 0.")
-        st.markdown("Great job. You can generate more MCQs for extra practice.")
+        st.markdown("Great progress so far — keep going.")

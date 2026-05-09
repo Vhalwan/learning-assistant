@@ -107,6 +107,8 @@ class GenerateQuizRequest(BaseModel):
     context_text: str
     n: Optional[int] = 5
     type: Optional[str] = "mcq"
+    # Session-only: how many MCQs already used each chunk_id in this quiz sitting (UI-driven).
+    session_chunk_counts: Optional[Dict[str, int]] = None
 
 
 class ChatRequest(BaseModel):
@@ -438,13 +440,22 @@ def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(chec
                 n=body.n or 5,
                 llm_call=capturing_llm,
                 concepts=concepts,
+                session_chunk_counts=body.session_chunk_counts,
             )
         except TypeError:
-            quiz_list = _gen_quiz.generate_mcq_from_context(
-                body.context_text,
-                n=body.n or 5,
-                llm_call=capturing_llm,
-            )
+            try:
+                quiz_list = _gen_quiz.generate_mcq_from_context(
+                    body.context_text,
+                    n=body.n or 5,
+                    llm_call=capturing_llm,
+                    concepts=concepts,
+                )
+            except TypeError:
+                quiz_list = _gen_quiz.generate_mcq_from_context(
+                    body.context_text,
+                    n=body.n or 5,
+                    llm_call=capturing_llm,
+                )
 
         # prefix IDs with stem
         prefixed = []

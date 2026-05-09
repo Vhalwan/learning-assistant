@@ -485,6 +485,7 @@ def generate_quiz(
     api_base: str = None,
     token: str = "",
     llm_call = None,
+    session_chunk_counts: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[float]]:
     """Generate MCQ quiz items. Returns (quiz_items, latency)"""
     def _ensure_concept_fields(items: List[Dict[str, Any]]):
@@ -510,7 +511,13 @@ def generate_quiz(
     api_base = api_base or os.getenv("API_BASE", "http://localhost:8000")
     if use_api_mode:
         url = f"{api_base.rstrip('/')}/generate_quiz_live"
-        payload = {"stem": stem, "context_text": context_text, "n": int(n), "type": "mcq"}
+        payload = {
+            "stem": stem,
+            "context_text": context_text,
+            "n": int(n),
+            "type": "mcq",
+            "session_chunk_counts": session_chunk_counts,
+        }
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -543,9 +550,20 @@ def generate_quiz(
             except Exception:
                 pass
         try:
-            quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call, concepts=concepts)
+            quiz_items = generate_mcq_from_context(
+                context_text,
+                n=int(n),
+                llm_call=llm_call,
+                concepts=concepts,
+                session_chunk_counts=session_chunk_counts,
+            )
         except TypeError:
-            quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call)
+            try:
+                quiz_items = generate_mcq_from_context(
+                    context_text, n=int(n), llm_call=llm_call, concepts=concepts
+                )
+            except TypeError:
+                quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call)
         # Use stable IDs based on normalized question text to prevent duplicates in SRS.
         for idx, itm in enumerate(quiz_items, start=1):
             itm["id"] = _stable_quiz_item_id(stem, itm, idx)

@@ -45,7 +45,7 @@ import random
 import re
 import time
 import logging
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set
 
 from backend.concept_policy import canonicalize_chunk_id, derive_source_chunk_id
 from backend.helpers import chunk_text as build_embedding_chunks
@@ -60,6 +60,13 @@ BACKOFF_503_MAX = 12.0   # FIX v6: cap so wait never exceeds 12 s (v5 could hit 
 _MIN_SENT_WORDS = 8
 _MIN_CHOICE_LEN = 8
 _MIN_QUESTION_LEN = 12
+
+# Display limits — large enough that quiz UI rarely shows "..." truncation.
+_QUIZ_QUESTION_MAX_LEN = 1800
+_QUIZ_CHOICE_MAX_LEN = 420
+
+# Session-only diversity: max MCQs anchored to the same chunk_id in one quiz sitting.
+_SESSION_MAX_MCQS_PER_CHUNK = 2
 
 _BAD_PHRASES = [
     "unrelated concept", "is an unrelated concept", "not asked here",
@@ -662,6 +669,177 @@ def _extract_explanation_fields(obj: dict, answer_letter: str) -> Dict:
     }
 
 
+def _normalize_session_chunk_counts(raw: Optional[Dict[str, int]]) -> Dict[str, int]:
+    if not raw:
+        return {}
+    out: Dict[str, int] = {}
+    for k, v in raw.items():
+        ck = _clean_ws(str(k)).lower()
+        if not ck:
+            continue
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            iv = 0
+        out[ck] = out.get(ck, 0) + max(0, iv)
+    return out
+
+
+def _normalize_question_key(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _chunk_key(item: Dict) -> str:
+    return _clean_ws(str(item.get("chunk_id") or item.get("source_chunk_id") or "")).lower()
+
+
+def _pick_with_chunk_budget(
+    candidates: List[Dict],
+    n: int,
+    session_counts: Dict[str, int],
+    max_per_chunk: int,
+) -> List[Dict]:
+    """
+    Greedy selection up to n items, preferring chunks with lower combined usage.
+    """
+    counts = dict(session_counts)
+    picked: List[Dict] = []
+    remaining = list(candidates)
+    stall_guard = 0
+    while len(picked) < n and remaining:
+        remaining.sort(key=lambda it: (counts.get(_chunk_key(it), 0), random.random()))
+        item = remaining.pop(0)
+        cid = _chunk_key(item)
+        if counts.get(cid, 0) >= max_per_chunk:
+            remaining.append(item)
+            stall_guard += 1
+            if stall_guard > max(len(remaining) * 4, 16):
+                break
+            continue
+        stall_guard = 0
+        picked.append(item)
+        counts[cid] = counts.get(cid, 0) + 1
+    return picked
+
+
+def _ordered_embedding_rows(
+    chunk_rows: List[Dict[str, str]],
+    usage_counts: Dict[str, int],
+) -> List[Dict[str, str]]:
+    """Prefer chunks with fewer uses in this session (stable tie-break: earlier index)."""
+    indexed = list(enumerate(chunk_rows))
+    indexed.sort(key=lambda ix_row: (usage_counts.get(_clean_ws(ix_row[1].get("chunk_id") or "").lower(), 0), ix_row[0]))
+    return [row for _, row in indexed]
+
+
+def _assemble_and_attach(items: List[Dict], context_chunk_rows: List[Dict[str, str]]) -> List[Dict]:
+    cleaned: List[Dict] = []
+    for q in items:
+        base = {
+            "id": q["id"],
+            "question": q["question"],
+            "choices": q["choices"],
+            "answer": q["answer"],
+            "brief_explanation": q.get("brief_explanation", ""),
+            "detailed_explanation": q.get("detailed_explanation", {
+                "why_correct": "",
+                "why_wrong": {"A": "", "B": "", "C": "", "D": ""},
+                "source_chunk": "",
+            }),
+            "concept_id": q.get("concept_id", ""),
+            "concept_label": q.get("concept_label", ""),
+            "question_type": q.get("question_type", ""),
+            "_chunk_text_hint": q.get("_chunk_text_hint", ""),
+        }
+        cleaned.append(_attach_chunk_metadata(base, context_chunk_rows))
+    return cleaned
+
+
+def _one_chunk_mcq_llm(
+    llm_call: Callable[[str], str],
+    chunk: str,
+    plan_row: Dict[str, str],
+    next_num: int,
+    used_questions_fb: Set[str],
+) -> Optional[Dict]:
+    """Returns one MCQ dict (pre-metadata) or None if all retries fail."""
+    prompt = _PER_CHUNK_PROMPT_TEMPLATE.format(
+        paragraph=_shorten(chunk, max_len=2000),
+        concept_label=plan_row["concept_label"],
+        type_instruction=plan_row["type_instruction"],
+    )
+    for attempt in range(1, MAX_RETRIES + 2):
+        try:
+            logger.info("Per-chunk MCQ LLM call — attempt %s", attempt)
+            raw = llm_call(prompt)
+            if raw is None:
+                raise RuntimeError("LLM returned None")
+
+            parsed = safe_json_load(raw)
+
+            if isinstance(parsed, list) and parsed:
+                obj = parsed[0]
+            elif isinstance(parsed, dict) and "questions" in parsed:
+                obj = (parsed["questions"] or [None])[0]
+            elif isinstance(parsed, dict):
+                obj = parsed
+            else:
+                raise ValueError("Unexpected shape from per-chunk LLM response")
+
+            if not obj or not isinstance(obj, dict):
+                raise ValueError("No MCQ object in response")
+            if not obj.get("id"):
+                obj["id"] = f"q{next_num}"
+            if "answer" in obj:
+                obj["answer"] = str(obj["answer"]).strip().upper()
+
+            if not _validate_mcq_obj(obj, chunk):
+                raise ValueError("MCQ failed validation")
+
+            q_norm = _normalize_question_key(obj["question"])
+            if q_norm in used_questions_fb:
+                return None
+            used_questions_fb.add(q_norm)
+
+            obj["question"] = _shorten(str(obj["question"]), max_len=_QUIZ_QUESTION_MAX_LEN)
+            for k in list(obj.get("choices", {}).keys()):
+                obj["choices"][k] = _shorten(str(obj["choices"][k]), max_len=_QUIZ_CHOICE_MAX_LEN)
+
+            expl_fields = _extract_explanation_fields(obj, obj["answer"])
+
+            return {
+                "id": obj["id"],
+                "question": obj["question"],
+                "choices": obj["choices"],
+                "answer": obj["answer"],
+                **expl_fields,
+                "concept_id": plan_row["concept_id"],
+                "concept_label": plan_row["concept_label"],
+                "question_type": plan_row["type_id"],
+                "_chunk_text_hint": chunk,
+            }
+
+        except Exception as e:
+            if _is_rate_limit_error(e):
+                delay = _extract_retry_delay(e, default=15.0)
+                logger.error("Quota exhausted in per-chunk MCQ — waiting %.1fs. Error: %s", delay, e)
+                time.sleep(delay)
+                return None
+            if _is_overload_error(e):
+                wait = min(BACKOFF_503 * attempt, BACKOFF_503_MAX)
+                logger.warning("Model overloaded (503) in per-chunk MCQ — waiting %.1fs.", wait)
+                if attempt <= MAX_RETRIES:
+                    time.sleep(wait)
+                    continue
+                return None
+            logger.warning("Per-chunk MCQ attempt %s failed: %s", attempt, e)
+            if attempt <= MAX_RETRIES:
+                time.sleep(BACKOFF_BASE * (2 ** (attempt - 1)))
+                continue
+            return None
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core generator  (v6 — v4 speed + v5 diversity)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -671,6 +849,8 @@ def generate_mcq_from_context(
     llm_call: Optional[Callable[[str], str]] = None,
     chunk_word_target: int = 90,
     concepts: Optional[List[Dict[str, str]]] = None,
+    session_chunk_counts: Optional[Dict[str, int]] = None,
+    max_questions_per_chunk_session: int = _SESSION_MAX_MCQS_PER_CHUNK,
 ) -> List[Dict]:
     context_chunk_rows = _build_context_chunk_rows(context_text or "")
 
@@ -725,6 +905,9 @@ def generate_mcq_from_context(
             })
         return [_attach_chunk_metadata(item, context_chunk_rows) for item in out[:n]]
 
+    session_counts = _normalize_session_chunk_counts(session_chunk_counts)
+    max_cap = max(1, int(max_questions_per_chunk_session or _SESSION_MAX_MCQS_PER_CHUNK))
+
     # ── LLM path — BATCH ────────────────────────────────────────────────
     content_for_prompt = _shorten(context_text or "", max_len=6000)
     question_plan_str = _format_question_plan(plan)
@@ -773,9 +956,9 @@ def generate_mcq_from_context(
                     continue
                 used_questions.add(q_text_norm)
 
-                obj["question"] = _shorten(str(obj["question"]), max_len=240)
+                obj["question"] = _shorten(str(obj["question"]), max_len=_QUIZ_QUESTION_MAX_LEN)
                 for k in list(obj.get("choices", {}).keys()):
-                    obj["choices"][k] = _shorten(str(obj["choices"][k]), max_len=180)
+                    obj["choices"][k] = _shorten(str(obj["choices"][k]), max_len=_QUIZ_CHOICE_MAX_LEN)
 
                 expl_fields = _extract_explanation_fields(obj, obj["answer"])
 
@@ -821,126 +1004,160 @@ def generate_mcq_from_context(
                 logger.info("Backing off %.1fs before retry.", wait)
                 time.sleep(wait)
 
-    # ── Fallback: per-chunk ──────────────────────────────────────────────
-    if not batch_succeeded and len(out_mcqs) < n:
-        logger.info("Batch failed — falling back to per-chunk for remaining %s items.", n - len(out_mcqs))
-        chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target)
-        needed = n - len(out_mcqs)
-        max_attempts = needed * 2
-        attempts_used = 0
-        used_questions_fb: set = {re.sub(r'\s+', ' ', q["question"].strip().lower()) for q in out_mcqs}
+    # ── Fallback: per-chunk (embedding chunks first — aligns with chunk_id diversity) ──
+    if len(out_mcqs) < n:
+        if not batch_succeeded:
+            logger.info("Batch failed — falling back to per-chunk for remaining %s items.", n - len(out_mcqs))
+        else:
+            logger.info("Batch short — per-chunk fill for remaining %s item(s).", n - len(out_mcqs))
 
-        # FIX v6: track fallback question index separately to avoid the off-by-one
-        # bug in v5 where plan_idx was computed from len(out_mcqs) twice.
+        usage_for_order: Dict[str, int] = dict(session_counts)
+        for q in out_mcqs:
+            tmp = _assemble_and_attach([q], context_chunk_rows)
+            if tmp:
+                ck = _chunk_key(tmp[0])
+                if ck:
+                    usage_for_order[ck] = usage_for_order.get(ck, 0) + 1
+
+        ordered_rows = _ordered_embedding_rows(context_chunk_rows, usage_for_order)
+        para_chunks = _paragraph_chunks(context_text or "", approx_words=chunk_word_target)
+        used_questions_fb: Set[str] = {_normalize_question_key(q["question"]) for q in out_mcqs}
+
         fallback_q_index = len(out_mcqs)
+        needed = n - len(out_mcqs)
+        max_attempts = max(needed * 3, 15)
+        attempts_used = 0
 
-        for chunk in chunks:
+        def _embedding_pass(rows: List[Dict[str, str]]) -> None:
+            nonlocal fallback_q_index, attempts_used
+            for row in rows:
+                if len(out_mcqs) >= n or attempts_used >= max_attempts:
+                    return
+                chunk = _clean_ws(row.get("chunk_text") or "")
+                if not chunk:
+                    continue
+                cid_pre = _clean_ws(row.get("chunk_id") or "").lower()
+                if cid_pre and usage_for_order.get(cid_pre, 0) >= max_cap:
+                    continue
+                plan_row = plan[min(fallback_q_index, len(plan) - 1)]
+                attempts_used += 1
+                got = _one_chunk_mcq_llm(
+                    llm_call, chunk, plan_row, len(out_mcqs) + 1, used_questions_fb,
+                )
+                if not got:
+                    continue
+                tmp_att = _assemble_and_attach([got], context_chunk_rows)
+                cid_a = _chunk_key(tmp_att[0]) if tmp_att else ""
+                if cid_a and usage_for_order.get(cid_a, 0) >= max_cap:
+                    continue
+                out_mcqs.append(got)
+                if cid_a:
+                    usage_for_order[cid_a] = usage_for_order.get(cid_a, 0) + 1
+                fallback_q_index += 1
+
+        _embedding_pass(ordered_rows)
+
+        for chunk in para_chunks:
             if len(out_mcqs) >= n or attempts_used >= max_attempts:
                 break
-
             plan_row = plan[min(fallback_q_index, len(plan) - 1)]
-
-            prompt = _PER_CHUNK_PROMPT_TEMPLATE.format(
-                paragraph=_shorten(chunk, max_len=2000),
-                concept_label=plan_row["concept_label"],
-                type_instruction=plan_row["type_instruction"],
+            attempts_used += 1
+            got = _one_chunk_mcq_llm(
+                llm_call, chunk, plan_row, len(out_mcqs) + 1, used_questions_fb,
             )
-            for attempt in range(1, MAX_RETRIES + 2):
-                attempts_used += 1
-                try:
-                    logger.info("Fallback chunk call — attempt %s", attempts_used)
-                    raw = llm_call(prompt)
-                    if raw is None:
-                        raise RuntimeError("LLM returned None")
+            if not got:
+                continue
+            tmp_att = _assemble_and_attach([got], context_chunk_rows)
+            cid_a = _chunk_key(tmp_att[0]) if tmp_att else ""
+            if cid_a and usage_for_order.get(cid_a, 0) >= max_cap:
+                continue
+            out_mcqs.append(got)
+            if cid_a:
+                usage_for_order[cid_a] = usage_for_order.get(cid_a, 0) + 1
+            fallback_q_index += 1
 
-                    parsed = safe_json_load(raw)
+    # ── Attach metadata + session chunk budget (prefer unused chunks first) ───────────
+    cleaned_all = _assemble_and_attach(out_mcqs, context_chunk_rows)
+    selected = _pick_with_chunk_budget(cleaned_all, n, session_counts, max_cap)
 
-                    if isinstance(parsed, list) and parsed:
-                        obj = parsed[0]
-                    elif isinstance(parsed, dict) and "questions" in parsed:
-                        obj = (parsed["questions"] or [None])[0]
-                    elif isinstance(parsed, dict):
-                        obj = parsed
-                    else:
-                        raise ValueError("Unexpected shape from per-chunk LLM response")
+    deficit = n - len(selected)
+    if deficit > 0 and llm_call is not None:
+        usage_live = dict(session_counts)
+        for it in selected:
+            ck = _chunk_key(it)
+            if ck:
+                usage_live[ck] = usage_live.get(ck, 0) + 1
+        used_qnorm = {_normalize_question_key(it.get("question") or "") for it in cleaned_all}
+        fb_idx = len(selected)
 
-                    if not obj or not isinstance(obj, dict):
-                        raise ValueError("No MCQ object in response")
-                    if not obj.get("id"):
-                        obj["id"] = f"q{len(out_mcqs) + 1}"
-                    if "answer" in obj:
-                        obj["answer"] = str(obj["answer"]).strip().upper()
+        ordered_rows2 = _ordered_embedding_rows(context_chunk_rows, usage_live)
+        max_attempts2 = max(deficit * 4, 12)
+        attempts2 = 0
+        extras: List[Dict] = []
 
-                    if not _validate_mcq_obj(obj, chunk):
-                        raise ValueError("MCQ failed validation")
+        def _topup_pass(rows: List[Dict[str, str]]) -> None:
+            nonlocal fb_idx, attempts2
+            for row in rows:
+                if len(extras) >= deficit or attempts2 >= max_attempts2:
+                    return
+                chunk = _clean_ws(row.get("chunk_text") or "")
+                if not chunk:
+                    continue
+                cid_pre = _clean_ws(row.get("chunk_id") or "").lower()
+                if cid_pre and usage_live.get(cid_pre, 0) >= max_cap:
+                    continue
+                plan_row = plan[min(fb_idx, len(plan) - 1)]
+                attempts2 += 1
+                raw_got = _one_chunk_mcq_llm(
+                    llm_call, chunk, plan_row, len(selected) + len(extras) + 1, used_qnorm,
+                )
+                if not raw_got:
+                    continue
+                attached_list = _assemble_and_attach([raw_got], context_chunk_rows)
+                if not attached_list:
+                    continue
+                att = attached_list[0]
+                ck_a = _chunk_key(att)
+                if ck_a and usage_live.get(ck_a, 0) >= max_cap:
+                    continue
+                extras.append(att)
+                if ck_a:
+                    usage_live[ck_a] = usage_live.get(ck_a, 0) + 1
+                qn = _normalize_question_key(att.get("question") or "")
+                if qn:
+                    used_qnorm.add(qn)
+                fb_idx += 1
 
-                    q_norm = re.sub(r'\s+', ' ', obj["question"].strip().lower())
-                    if q_norm in used_questions_fb:
-                        break
-                    used_questions_fb.add(q_norm)
+        _topup_pass(ordered_rows2)
 
-                    obj["question"] = _shorten(str(obj["question"]), max_len=240)
-                    for k in list(obj.get("choices", {}).keys()):
-                        obj["choices"][k] = _shorten(str(obj["choices"][k]), max_len=180)
+        for ch in _paragraph_chunks(context_text or "", approx_words=chunk_word_target):
+            if len(extras) >= deficit or attempts2 >= max_attempts2:
+                break
+            plan_row = plan[min(fb_idx, len(plan) - 1)]
+            attempts2 += 1
+            raw_got = _one_chunk_mcq_llm(
+                llm_call, ch, plan_row, len(selected) + len(extras) + 1, used_qnorm,
+            )
+            if not raw_got:
+                continue
+            attached_list = _assemble_and_attach([raw_got], context_chunk_rows)
+            if not attached_list:
+                continue
+            att = attached_list[0]
+            ck_a = _chunk_key(att)
+            if ck_a and usage_live.get(ck_a, 0) >= max_cap:
+                continue
+            extras.append(att)
+            if ck_a:
+                usage_live[ck_a] = usage_live.get(ck_a, 0) + 1
+            qn = _normalize_question_key(att.get("question") or "")
+            if qn:
+                used_qnorm.add(qn)
+            fb_idx += 1
 
-                    expl_fields = _extract_explanation_fields(obj, obj["answer"])
+        selected = selected + extras[:deficit]
 
-                    out_mcqs.append({
-                        "id": obj["id"],
-                        "question": obj["question"],
-                        "choices": obj["choices"],
-                        "answer": obj["answer"],
-                        **expl_fields,
-                        "concept_id": plan_row["concept_id"],
-                        "concept_label": plan_row["concept_label"],
-                        "question_type": plan_row["type_id"],
-                        "_chunk_text_hint": chunk,
-                    })
-                    fallback_q_index += 1  # FIX v6: advance index only on success
-                    break
-
-                except Exception as e:
-                    if _is_rate_limit_error(e):
-                        delay = _extract_retry_delay(e, default=15.0)
-                        logger.error("Quota exhausted in fallback — waiting %.1fs. Error: %s", delay, e)
-                        time.sleep(delay)
-                        chunks = []
-                        break
-                    if _is_overload_error(e):
-                        # FIX v6: same capped backoff in fallback path
-                        wait = min(BACKOFF_503 * attempt, BACKOFF_503_MAX)
-                        logger.warning("Model overloaded (503) in fallback attempt %s — waiting %.1fs.", attempts_used, wait)
-                        if attempt <= MAX_RETRIES:
-                            time.sleep(wait)
-                            continue
-                        break
-                    logger.warning("Fallback attempt %s failed: %s", attempts_used, e)
-                    if attempt <= MAX_RETRIES:
-                        time.sleep(BACKOFF_BASE * (2 ** (attempt - 1)))
-                    break
-
-    # ── Final assembly ───────────────────────────────────────────────────
-    cleaned = []
-    for q in out_mcqs[:n]:
-        base = {
-            "id": q["id"],
-            "question": q["question"],
-            "choices": q["choices"],
-            "answer": q["answer"],
-            "brief_explanation": q.get("brief_explanation", ""),
-            "detailed_explanation": q.get("detailed_explanation", {
-                "why_correct": "",
-                "why_wrong": {"A": "", "B": "", "C": "", "D": ""},
-                "source_chunk": "",
-            }),
-            "concept_id": q.get("concept_id", ""),
-            "concept_label": q.get("concept_label", ""),
-            "question_type": q.get("question_type", ""),
-            "_chunk_text_hint": q.get("_chunk_text_hint", ""),
-        }
-        cleaned.append(_attach_chunk_metadata(base, context_chunk_rows))
-
-    return cleaned
+    return selected[:n]
 
 
 # ── backwards-compatible wrapper (unchanged signature) ───────────────────────
