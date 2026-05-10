@@ -207,20 +207,32 @@ def _select_summary_chunk_indices(total_chunks: int, top_k: Optional[int], summa
 
 def _build_summary_instruction(summary_type: str) -> str:
     normalized_type = (summary_type or "brief").strip().lower()
+    structure = (
+        "Use EXACTLY these Markdown section headings in this order (### level), each followed by its content:\n"
+        "### Key ideas\n"
+        "Bullet list of the main claims or storyline (faithful to the text).\n"
+        "### Definitions\n"
+        "Terms or formal definitions a student should memorize (bullet list).\n"
+        "### Exam traps\n"
+        "Common misconceptions or easy mistakes vs what the lecture actually says (bullet list).\n"
+        "### Recap\n"
+        "Exactly 3 bullets: the shortest possible memory anchors for the whole lecture.\n"
+        "Do not add a separate top-level title like 'Summary'. "
+    )
     if normalized_type == "detailed":
         return (
-            "Write a DETAILED, structured summary of the following lecture. "
-            "Use short section headings and bullet-pointed takeaways. "
-            "Keep it faithful to the text and do not hallucinate facts. "
-            "Do not add a top-level title like 'Summary'. "
-            "End with one final line exactly in this format: "
+            "Write a DETAILED summary of the following lecture. "
+            + structure
+            + "Each section may use sub-bullets where helpful. "
+            "Keep it faithful and do not invent facts. "
+            "After the Recap section, add one final line exactly in this format: "
             "Key concepts: concept 1, concept 2, concept 3"
         )
     return (
-        "Write a BRIEF summary (3-6 sentences) capturing the main ideas and key takeaways of the following lecture. "
-        "Be concise and factual. "
-        "Do not add a top-level title like 'Summary'. "
-        "End with one final line exactly in this format: "
+        "Write a BRIEF but structured summary of the following lecture (aim for tight bullets, not essay prose). "
+        + structure
+        + "Keep each section short. "
+        "After the Recap section, add one final line exactly in this format: "
         "Key concepts: concept 1, concept 2, concept 3"
     )
 

@@ -34,10 +34,11 @@ from frontend.runtime_ui_helpers import (
     strip_key_concepts_from_answer,
     strip_retrieval_artifacts,
     clean_summary_text,
-	clean_key_concepts_list,
-	derive_key_concepts_from_summary_text,
-	trim_history_to_max_turns,
-	render_assistant_html,
+    clean_key_concepts_list,
+    derive_key_concepts_from_summary_text,
+    parse_summary_sections,
+    trim_history_to_max_turns,
+    render_assistant_html,
 )
 from frontend.handlers import (
     init_llm,
@@ -72,6 +73,28 @@ from backend.vectorstore.faiss_store import build_faiss_index  # optional; handl
 from backend.generate_quiz import generate_mcq_from_context
 from backend.study_srs import SRSManager, INTERVALS
 from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all_quiz_items
+from backend.confusion_store import get_top_confusions
+from backend.quiz_session_log import recent_sessions, trend_vs_prior
+
+
+def _sidebar_lecture_stats(stem: str) -> tuple[int, Optional[float], int]:
+    """Aggregate quiz activity from confusion store for the current lecture stem."""
+    if not (stem or "").strip():
+        return (0, None, 0)
+    try:
+        items = get_top_confusions(limit=None, stem=stem)
+    except Exception:
+        return (0, None, 0)
+    if not items:
+        return (0, None, 0)
+    total_attempts = sum(int(x.get("total_attempts") or 0) for x in items)
+    total_correct = sum(int(x.get("correct_attempts") or 0) for x in items)
+    acc: Optional[float] = None
+    if total_attempts > 0:
+        acc = (total_correct / total_attempts) * 100.0
+    weak = sum(1 for x in items if int(x.get("wrong_attempts") or 0) > 0)
+    return (total_attempts, acc, weak)
+
 
 # initialize LLM (this mirrors existing behaviour)
 llm = init_llm()
@@ -350,7 +373,68 @@ st.markdown(
         margin-bottom: 0.25rem;
       }
 
+      .la-learn-rail {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: stretch;
+        gap: 0.35rem 0.5rem;
+        margin: 0.5rem 0 1.25rem;
+        padding: 1rem 1.1rem;
+        border-radius: 20px;
+        background: linear-gradient(135deg, rgba(236, 254, 255, 0.95), rgba(255, 255, 255, 0.92));
+        border: 1px solid #c5e3df;
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
+      }
+      .la-flow-node {
+        flex: 1 1 140px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.35rem;
+        padding: 0.75rem 0.85rem;
+        border-radius: 16px;
+        background: #fff;
+        border: 1px solid #d5e8e6;
+        text-decoration: none;
+        color: var(--text);
+        min-height: 4.5rem;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+      .la-flow-node:hover {
+        border-color: var(--accent);
+        box-shadow: 0 8px 20px rgba(15, 118, 110, 0.12);
+      }
+      .la-flow-num {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.85rem;
+        height: 1.85rem;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+        font-weight: 700;
+        font-size: 0.9rem;
+      }
+      .la-flow-t {
+        font-weight: 700;
+        font-size: 0.98rem;
+      }
+      .la-flow-d {
+        font-size: 0.82rem;
+        color: var(--muted);
+        line-height: 1.35;
+      }
+      .la-flow-arrow {
+        align-self: center;
+        font-size: 1.25rem;
+        color: var(--accent);
+        font-weight: 600;
+        user-select: none;
+        padding: 0 0.15rem;
+      }
       @media (max-width: 720px) {
+        .la-flow-arrow { display: none; }
         .app-header {
           align-items: flex-start;
         }
@@ -407,28 +491,13 @@ for lvl, msg in _startup_msgs:
 
 st.markdown(
     """
-**Upload a lecture PDF and study it interactively.**  
-
-Options:
-- SAFE embeddings are used by default.
-- Recreate embeddings or build FAISS only when needed.
-
-Study modes:
-- **Ask** for focused lecture questions.
-- **Summary** for quick overviews.
-- **Chat** for back-and-forth understanding.
-
-Learning tools:
-- **Quiz** to test understanding.
-- **Confused** to review weak concepts.
-
-Review tools:
-- **SRS** to revisit important items over time.
+**Upload a lecture PDF from the sidebar and jump straight into study tools.**  
+Ask questions, get a summary, chat, quiz yourself, review weak topics, and use spaced repetition — all from one lecture.
 """
 )
 
 # ----------------------------
-# API mode toggle + token UI
+# API mode toggle + token UI (defaults; widgets live in sidebar Advanced)
 # ----------------------------
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
 if "use_api_mode" not in st.session_state:
@@ -439,26 +508,89 @@ default_token = os.getenv("API_TOKEN", "") or ""
 if "api_token" not in st.session_state:
     st.session_state.api_token = default_token
 
+if "use_faiss_search" not in st.session_state:
+    st.session_state["use_faiss_search"] = False
+
 with st.sidebar:
-    st.markdown("### 📄 Upload & Settings")
-    uploaded = st.file_uploader("Upload a lecture PDF", type=["pdf"])
-    st.markdown("#### API Settings")
-    st.session_state.use_api_mode = st.checkbox("Use API mode", value=st.session_state.use_api_mode)
-    st.session_state.api_token = st.text_input(
-        "API Token (override)", value=st.session_state.api_token, type="password",
-        help="Reads default from environment; typing here overrides for this session",
+    st.markdown("### Learning Assistant")
+    st.markdown("##### Upload lecture PDF")
+    uploaded = st.file_uploader(
+        "Lecture PDF",
+        type=["pdf"],
+        help="Drag and drop a file here, or click Browse files.",
     )
-    st.markdown("#### Navigation")
+    sidebar_pdf_name: Optional[str] = None
+    sidebar_stem: Optional[str] = None
+    if uploaded is not None:
+        sidebar_pdf_name = uploaded.name
+        sidebar_stem = Path(uploaded.name).stem
+    elif st.session_state.get("current_stem"):
+        sidebar_stem = str(st.session_state.get("current_stem") or "").strip() or None
+        sidebar_pdf_name = (st.session_state.get("current_pdf_filename") or "").strip() or None
+        if sidebar_stem and not sidebar_pdf_name:
+            sidebar_pdf_name = f"{sidebar_stem}.pdf"
+
+    if sidebar_pdf_name:
+        st.caption(f"Lecture loaded: **{sidebar_pdf_name}**")
+        st.caption("Upload another PDF above anytime to replace it.")
+    else:
+        st.caption("No lecture uploaded")
+
+    st.markdown("---")
+    st.markdown("##### Study tools")
     st.markdown(
         """
-        - [Setup](#setup-your-lecture)
-        - [Study modes](#study-modes)
-        - [Quiz](#study-quiz)
-        - [Confused?](#confused-quick-prioritized-list)
-        - [SRS](#spaced-repetition-review)
+- [Study](#study-modes)
+- [Quiz](#study-quiz)
+- [Weak topics](#weak-topics)
+- [SRS](#srs)
         """,
         unsafe_allow_html=True,
     )
+
+    if sidebar_stem:
+        n_ans, acc_pct, n_weak = _sidebar_lecture_stats(sidebar_stem)
+        st.markdown("---")
+        st.markdown("##### This lecture")
+        acc_display = f"{acc_pct:.0f}%" if acc_pct is not None else "—"
+        st.caption(f"Questions answered · **{n_ans}**")
+        st.caption(f"Accuracy (all time) · **{acc_display}**")
+        trend_line, delta = trend_vs_prior(sidebar_stem)
+        if delta is not None:
+            st.caption(f"Quiz trend · **{delta:+.0f} pts** vs your prior quiz average")
+        st.caption(trend_line[:220] + ("…" if len(trend_line) > 220 else ""))
+        sess_rows = recent_sessions(sidebar_stem, 3)
+        if sess_rows:
+            st.caption("Last quiz rounds (newest first)")
+            for row in reversed(sess_rows):
+                try:
+                    p = float(row.get("accuracy_pct", 0))
+                    ttot = int(row.get("total", 0))
+                    ccor = int(row.get("correct", 0))
+                except Exception:
+                    p, ttot, ccor = 0.0, 0, 0
+                st.caption(f"· {ccor}/{ttot} → {p:.0f}%")
+        st.caption(f"Weak topics · **{n_weak}**")
+
+    st.markdown("---")
+    with st.expander("Advanced", expanded=False):
+        st.caption("Optional technical settings. You can ignore these for normal study.")
+        st.session_state.use_api_mode = st.checkbox(
+            "Use study server instead of local",
+            value=st.session_state.use_api_mode,
+            help="When enabled, requests go to your configured API base URL.",
+        )
+        st.session_state.api_token = st.text_input(
+            "Use your own API key (optional)",
+            value=st.session_state.api_token,
+            type="password",
+            help="Defaults from your environment; entering a value overrides for this session only.",
+        )
+        st.session_state["use_faiss_search"] = st.checkbox(
+            "Faster search for long PDFs",
+            value=bool(st.session_state.get("use_faiss_search", False)),
+            help="Optional index for quicker retrieval on large lectures. Ordinary search still works if off.",
+        )
 
 st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
 st.markdown("## 1. Setup your lecture")
@@ -489,6 +621,7 @@ if uploaded:
     embeddings_path = Path(f"data/processed/{stem}_embeddings.json")
     index_path = Path(f"data/processed/{stem}_embeddings.index")
     st.session_state["current_stem"] = stem
+    st.session_state["current_pdf_filename"] = uploaded.name
     current_label = stem.replace("_", " ").title()
     st.markdown(
         """
@@ -507,13 +640,7 @@ if uploaded:
     recreate_btn = False
     build_index_btn = False
 
-    # Keep FAISS as the only optional performance choice.
-    use_faiss_search = st.checkbox(
-        "Enable fast search (FAISS) for larger lectures",
-        value=bool(st.session_state.get("use_faiss_search", False)),
-        help="Optional performance boost for retrieval. Regular search still works without this.",
-    )
-    st.session_state["use_faiss_search"] = use_faiss_search
+    use_faiss_search = bool(st.session_state.get("use_faiss_search", False))
     # Create embeddings when missing or when they are requested
     if (not embeddings_path.exists()) or recreate_btn:
         try:
@@ -561,7 +688,7 @@ if uploaded:
     # ----------------------------
     st.markdown("---")
     st.markdown('<a id="study-modes"></a>', unsafe_allow_html=True)
-    st.markdown("## 2. Study modes")
+    st.markdown("## 2. Study")
     st.write(
         "Use the tabs below to understand the lecture in the way that fits best right now. "
         "The learning loop underneath turns that understanding into practice and review."
@@ -737,7 +864,25 @@ if uploaded:
 
                         st.subheader("Summary")
                         if summary_display:
-                            st.markdown(summary_display)
+                            sections = parse_summary_sections(summary_display)
+                            if sections.get("has_structure"):
+                                sec_defs = [
+                                    ("Key ideas", "key_ideas"),
+                                    ("Definitions", "definitions"),
+                                    ("Exam traps", "exam_traps"),
+                                    ("Recap (3 bullets)", "recap"),
+                                ]
+                                for title, sk in sec_defs:
+                                    body = (sections.get(sk) or "").strip()
+                                    if body:
+                                        st.markdown(f"### {title}")
+                                        st.markdown(body)
+                                rem = (sections.get("remainder") or "").strip()
+                                if rem:
+                                    st.markdown("### Also covered")
+                                    st.markdown(rem)
+                            else:
+                                st.markdown(summary_display)
                         else:
                             st.info("No summary returned.")
                         st.subheader("Key concepts / highlights")
@@ -787,26 +932,28 @@ if uploaded:
     # ----------------------------
     st.markdown("## 3. Learning loop")
     st.write(
-        "Work straight down the page: test yourself, fix the concepts that keep tripping you up, then move the important ones into spaced repetition."
+        "Follow the path: test yourself, clear up weak topics, then promote what matters into spaced repetition."
     )
     st.markdown(
         """
-        <div class="la-step-grid">
-          <div class="la-step-card">
-            <div class="la-step-number">1</div>
-            <div class="la-step-title">Quiz</div>
-            <p class="la-step-copy">Generate a short MCQ set and see where your understanding is strongest or weakest.</p>
-          </div>
-          <div class="la-step-card">
-            <div class="la-step-number">2</div>
-            <div class="la-step-title">Confused</div>
-            <p class="la-step-copy">Review the concepts you missed repeatedly and launch follow-up help without rewriting the prompt yourself.</p>
-          </div>
-          <div class="la-step-card">
-            <div class="la-step-number">3</div>
-            <div class="la-step-title">SRS</div>
-            <p class="la-step-copy">Save the concepts worth retaining and review them on a lighter, more predictable cadence.</p>
-          </div>
+        <div class="la-learn-rail" role="navigation" aria-label="Learning loop steps">
+          <a class="la-flow-node" href="#study-quiz">
+            <span class="la-flow-num">1</span>
+            <span class="la-flow-t">Quiz</span>
+            <span class="la-flow-d">Mixed angles — definition, scenario, trap, compare.</span>
+          </a>
+          <span class="la-flow-arrow" aria-hidden="true">→</span>
+          <a class="la-flow-node" href="#weak-topics">
+            <span class="la-flow-num">2</span>
+            <span class="la-flow-t">Weak topics</span>
+            <span class="la-flow-d">See what you miss and fix it in one place.</span>
+          </a>
+          <span class="la-flow-arrow" aria-hidden="true">→</span>
+          <a class="la-flow-node" href="#srs">
+            <span class="la-flow-num">3</span>
+            <span class="la-flow-t">SRS</span>
+            <span class="la-flow-d">Save cards and review on a schedule.</span>
+          </a>
         </div>
         """,
         unsafe_allow_html=True,
@@ -820,9 +967,10 @@ if uploaded:
 
     st.markdown("---")
 
-    # Step 2: Confused (prioritized list of things you missed)
-    st.markdown("### 3.2 Review what confused you")
-    st.write("This section surfaces the concepts you missed repeatedly, with quick actions for explanation, chat follow-up, and SRS.")
+    # Step 2: Weak topics (prioritized list of things you missed)
+    st.markdown('<a id="weak-topics"></a>', unsafe_allow_html=True)
+    st.markdown("### 3.2 Weak topics")
+    st.write("Concepts you missed show up here, with quick actions for explanation, chat follow-up, and SRS.")
     # Render confused directly (removed outer expander)
     render_confused(
         st=st,
@@ -836,9 +984,9 @@ if uploaded:
     st.markdown("---")
 
     # Step 3: Spaced Repetition (SRS)
-    st.markdown("### 3.3 Spaced repetition")
+    st.markdown('<a id="srs"></a>', unsafe_allow_html=True)
+    st.markdown("### 3.3 Spaced repetition (SRS)")
     st.write("Review due cards to move knowledge into long-term memory, or switch to Browse to view and manage all saved cards.")
     render_srs_section(st, stem=stem)
 
     st.markdown("---")
-    st.caption("Tip: For reproducible tests set USE_SAFE_EMBEDDINGS=1 and build FAISS index to compare results with NumPy search.")

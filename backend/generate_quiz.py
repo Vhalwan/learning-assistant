@@ -80,17 +80,21 @@ _DEFAULT_CONCEPTS = [
     }
 ]
 
-# ── Question types for diversity rotation (unchanged from v5) ─────────────────
-_QUESTION_TYPES = [
-    ("definition",   "Ask what something IS or means (definition / identification)"),
-    ("mechanism",    "Ask HOW something works or WHY it happens (mechanism / reasoning)"),
-    ("application",  "Present a real-world scenario or example and ask what concept it illustrates"),
-    ("not_true",     "Ask which of the four options is FALSE or NOT a feature of something"),
-    ("comparison",   "Ask how two concepts differ or which statement correctly distinguishes them"),
-    ("consequence",  "Ask what the result or implication of something is"),
-    ("criticism",    "Ask about a limitation, flaw, or critique of a model/idea"),
-    ("property",     "Ask about a specific property, characteristic, or requirement of something"),
+# ── Question types: core angles (definition / application / trap / compare) + extras ──
+_CORE_QUESTION_TYPES = [
+    ("definition",    "Definition — ask what the term or idea IS or means; identify the best lecture-faithful wording."),
+    ("application",   "Application — give a short scenario or example; which option is the best lecture-supported judgment?"),
+    ("misconception", "Misconception trap — one option should be a common wrong belief; the correct answer must match the lecture, not folk wisdom."),
+    ("comparison",    "Compare two concepts from the lecture — which statement correctly distinguishes or relates them?"),
 ]
+_EXTRA_QUESTION_TYPES = [
+    ("mechanism",     "Ask HOW something works or WHY it happens (mechanism / reasoning)"),
+    ("not_true",      "Ask which option is FALSE or NOT supported by the lecture"),
+    ("consequence",   "Ask what result or implication follows from a claim in the lecture"),
+    ("property",      "Ask about a specific property, characteristic, or requirement"),
+    ("criticism",     "Ask about a limitation, flaw, or caveat the lecture mentions"),
+]
+_QUESTION_TYPES = _CORE_QUESTION_TYPES + _EXTRA_QUESTION_TYPES
 
 _CONCEPT_PROMPT_TEMPLATE = """
 You are an expert educator. Extract 2 to {max_concepts} canonical concepts from the lecture content when possible.
@@ -111,6 +115,12 @@ QUESTION PLAN (follow exactly, one row per question):
 {question_plan}
 
 Each row: concept = topic to focus on | type = cognitive structure to use.
+
+Cognitive angle hints (follow the type id literally; do not collapse every question into generic recall):
+  • definition — precise meaning / identification, not a rephrased duplicate of another question on the same concept.
+  • application — novel mini-scenario; wrong answers plausible in real life but wrong per the lecture.
+  • misconception — explicitly target a tempting error; correct option is the lecture view.
+  • comparison — two ideas from the lecture contrasted; avoid repeating a definition-only stem.
 
 Return JSON ONLY (no extra text, no markdown fences).
 Output must be a JSON array of exactly {n} objects, each with keys:
@@ -204,24 +214,30 @@ def _build_question_plan(concepts: List[Dict[str, str]], n: int) -> List[Dict[st
             pool = shuffled_concepts[:]
             random.shuffle(pool)
 
-    type_pool = _QUESTION_TYPES[:]
-    random.shuffle(type_pool)
+    def _fresh_type_pool() -> List[tuple]:
+        c = _CORE_QUESTION_TYPES[:]
+        random.shuffle(c)
+        e = _EXTRA_QUESTION_TYPES[:]
+        random.shuffle(e)
+        return c + e
+
+    type_pool = _fresh_type_pool()
     type_seq: List[tuple] = []
     last_type = None
     pool_t = type_pool[:]
     while len(type_seq) < n:
         candidates_t = [t for t in pool_t if t[0] != last_type]
         if not candidates_t:
+            type_pool = _fresh_type_pool()
             pool_t = type_pool[:]
-            random.shuffle(pool_t)
             candidates_t = [t for t in pool_t if t[0] != last_type] or pool_t
         chosen_t = candidates_t[0]
         type_seq.append(chosen_t)
         pool_t.remove(chosen_t)
         last_type = chosen_t[0]
         if not pool_t:
+            type_pool = _fresh_type_pool()
             pool_t = type_pool[:]
-            random.shuffle(pool_t)
 
     plan = []
     for i in range(n):

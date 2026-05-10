@@ -270,6 +270,94 @@ def clean_summary_text(summary: str, summary_type: str = "brief") -> str:
     return strip_retrieval_artifacts(cleaned)
 
 
+def parse_summary_sections(markdown: str) -> Dict[str, Any]:
+    """
+    Split a model-written summary that uses ### Key ideas / Definitions / Exam traps / Recap.
+    Returns dict with section bodies, leftover text, and has_structure if enough headings matched.
+    """
+    if not isinstance(markdown, str) or not markdown.strip():
+        return {
+            "has_structure": False,
+            "key_ideas": "",
+            "definitions": "",
+            "exam_traps": "",
+            "recap": "",
+            "remainder": "",
+        }
+
+    text = markdown.strip()
+    # Heading pattern: ## or ### optional whitespace + title
+    heading_re = re.compile(r"^(#{2,3})\s+(.+?)\s*$", re.MULTILINE)
+    matches = list(heading_re.finditer(text))
+    if not matches:
+        return {
+            "has_structure": False,
+            "key_ideas": "",
+            "definitions": "",
+            "exam_traps": "",
+            "recap": "",
+            "remainder": text,
+        }
+
+    def _norm_title(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+    canon = {
+        "key ideas": "key_ideas",
+        "definitions": "definitions",
+        "exam traps": "exam_traps",
+        "recap": "recap",
+    }
+
+    sections: Dict[str, str] = {k: "" for k in ("key_ideas", "definitions", "exam_traps", "recap")}
+    spans: List[Tuple[int, int, str]] = []
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        raw_title = m.group(2).strip()
+        key = canon.get(_norm_title(raw_title))
+        if key:
+            body = text[start:end].strip()
+            sections[key] = body
+            spans.append((m.start(), end, key))
+
+    hit = sum(1 for k in sections if (sections[k] or "").strip())
+    has_structure = hit >= 2
+
+    if not spans:
+        return {
+            "has_structure": False,
+            "key_ideas": "",
+            "definitions": "",
+            "exam_traps": "",
+            "recap": "",
+            "remainder": text,
+        }
+
+    covered = sorted(spans, key=lambda x: x[0])
+    remainder_parts: List[str] = []
+    pos = 0
+    for a, b, _ in covered:
+        if a > pos:
+            chunk = text[pos:a].strip()
+            if chunk:
+                remainder_parts.append(chunk)
+        pos = max(pos, b)
+    if pos < len(text):
+        tail = text[pos:].strip()
+        if tail:
+            remainder_parts.append(tail)
+
+    return {
+        "has_structure": has_structure,
+        "key_ideas": sections["key_ideas"],
+        "definitions": sections["definitions"],
+        "exam_traps": sections["exam_traps"],
+        "recap": sections["recap"],
+        "remainder": "\n\n".join(remainder_parts).strip(),
+    }
+
+
 def clean_key_concepts_list(key_concepts: List[str], summary_type: str = "brief") -> List[str]:
     out: List[str] = []
     seen = set()

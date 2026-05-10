@@ -17,6 +17,7 @@ import hashlib
 import time
 import re
 import requests
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Dict
 import os
@@ -28,6 +29,19 @@ from frontend.handlers import (
     record_quiz_result,
 )
 from backend.study_srs import SRSManager
+from backend.quiz_session_log import append_quiz_session, recent_sessions, trend_vs_prior
+
+_QUESTION_ANGLE_LABELS = {
+    "definition": "Definition",
+    "application": "Application",
+    "misconception": "Misconception trap",
+    "comparison": "Compare concepts",
+    "mechanism": "Mechanism / reasoning",
+    "not_true": "Which is false?",
+    "consequence": "Implication",
+    "property": "Property / requirement",
+    "criticism": "Limitation / critique",
+}
 
 
 def _normalize_quiz_question_text(text: str) -> str:
@@ -119,9 +133,9 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     st.markdown('<a id="study-quiz"></a>', unsafe_allow_html=True)
     st.subheader("📝 Study / Quiz")
     st.markdown(
-        "Generate short multiple-choice quizzes from your lecture. "
-        "Read each card, select an answer, then **Check answer**. "
-        "Use **Add to SRS** to save questions you'd like to review later."
+        "Each batch mixes **definition**, **application**, **misconception-trap**, and **compare**-style "
+        "questions (same topics, different thinking angles). "
+        "Select an answer, then **Check answer**. Use **Add to SRS** for cards you want later."
     )
 
     quiz_state_key = f"quiz_items_{stem}"
@@ -265,7 +279,19 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                 submitted = st.session_state.get(submit_key, {})
                 status_icon = " ✅" if submitted.get("is_correct") else " ❌"
 
+            qtype_raw = (q.get("question_type") or "").strip().lower()
+            angle = _QUESTION_ANGLE_LABELS.get(
+                qtype_raw,
+                qtype_raw.replace("_", " ").title() if qtype_raw else "",
+            )
             st.markdown(f"### Q{idx}{status_icon}")
+            if angle:
+                st.markdown(
+                    f'<span style="display:inline-block;padding:0.2rem 0.65rem;border-radius:999px;'
+                    f"font-size:0.82rem;font-weight:600;background:#ecfeff;color:#115e59;"
+                    f'border:1px solid #99f6e4;">{angle}</span>',
+                    unsafe_allow_html=True,
+                )
             if q_text:
                 st.markdown(q_text)
             st.markdown("---")
@@ -503,18 +529,56 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
         if accuracy_pct >= 90:
             encouragement = "🎯 Excellent work — you've got a strong grip on this lecture."
         elif accuracy_pct >= 70:
-            encouragement = "✨ You're improving — a couple more rounds will lock this in."
+            encouragement = "✨ Strong round — a couple more passes will lock this in."
         elif accuracy_pct >= 50:
             encouragement = "💡 Keep practicing this lecture — you're getting there."
         else:
             encouragement = "📚 Keep practicing — try reviewing the lecture and giving it another go."
 
+        log_key = f"{quiz_state_key}_session_logged_{generation_token}_{total_questions}"
+        if not st.session_state.get(log_key):
+            try:
+                append_quiz_session(
+                    stem=stem,
+                    doc_id=doc_id or "",
+                    correct=int(total_correct),
+                    total=int(total_questions),
+                    ts_iso=datetime.now(timezone.utc).isoformat(),
+                )
+                st.session_state[log_key] = True
+            except Exception:
+                pass
+
         st.markdown("### ✅ Quiz complete")
-        m1, m2 = st.columns(2)
+        m1, m2, m3 = st.columns(3)
         with m1:
             st.metric("Score", f"{total_correct} / {total_questions}")
         with m2:
-            st.metric("Accuracy", f"{accuracy_pct:.0f}%")
+            st.metric("This round", f"{accuracy_pct:.0f}%")
+        trend_msg, delta = trend_vs_prior(stem)
+        with m3:
+            delta_label = "Trend Δ"
+            if delta is None:
+                st.metric(delta_label, "—")
+            else:
+                st.metric(delta_label, f"{delta:+.0f} pts vs avg")
+        st.caption(trend_msg)
+
+        last3 = recent_sessions(stem, 3)
+        if last3:
+            lines = []
+            for row in reversed(last3):
+                try:
+                    pct = float(row.get("accuracy_pct", 0))
+                    tot = int(row.get("total", 0))
+                    cor = int(row.get("correct", 0))
+                except Exception:
+                    pct, tot, cor = 0.0, 0, 0
+                ts = (row.get("ts") or "")[:16].replace("T", " ")
+                lines.append(f"- **{ts} UTC** — {cor}/{tot} · **{pct:.0f}%**")
+            st.markdown("**Last quiz sessions** (newest first)")
+            st.markdown("\n".join(lines))
+
         st.markdown(encouragement)
 
         if wrong_topic_counts:
