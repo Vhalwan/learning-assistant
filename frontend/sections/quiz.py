@@ -401,6 +401,9 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                     if st.button("Add to SRS", key=srs_key, use_container_width=True):
                         try:
                             mgr = SRSManager()
+                            concept_label = (q.get("concept_label") or "").strip()
+                            concept_id = (q.get("concept_id") or "").strip()
+                            topic_title = concept_label or ""
                             mgr.ensure_card(
                                 qid,
                                 meta={
@@ -414,6 +417,10 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                                     "origin": "quiz_mcq",
                                     "quiz_question_id": qid,
                                     "source_reason": "Added from quiz review",
+                                    "concept_label": concept_label,
+                                    "concept_id": concept_id,
+                                    "title": topic_title,
+                                    "concept": topic_title,
                                 },
                             )
                             if "srs_quiz_items_cache" not in st.session_state:
@@ -427,6 +434,8 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                                 "detailed_explanation": detailed_explanation,
                                 "item_type": "mcq",
                                 "origin": "quiz_mcq",
+                                "concept_label": concept_label,
+                                "concept_id": concept_id,
                             }
                             st.session_state[f"{srs_key}_done"] = True
                             st.info("Added to SRS.")
@@ -717,6 +726,9 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                     if card_id in seen_card_ids:
                         continue
                     seen_card_ids.add(card_id)
+                    concept_label_m = (q.get("concept_label") or "").strip()
+                    concept_id_m = (q.get("concept_id") or "").strip()
+                    topic_m = concept_label_m or ""
                     mgr.ensure_card(
                         card_id,
                         meta={
@@ -730,6 +742,10 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                             "origin": "quiz_mcq",
                             "quiz_question_id": base_qid or card_id,
                             "source_reason": "Added because you missed this in quiz session",
+                            "concept_label": concept_label_m,
+                            "concept_id": concept_id_m,
+                            "title": topic_m,
+                            "concept": topic_m,
                         },
                     )
                     st.session_state["srs_quiz_items_cache"][card_id] = {
@@ -741,6 +757,8 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                         "detailed_explanation": q.get("detailed_explanation", {}),
                         "item_type": "mcq",
                         "origin": "quiz_mcq",
+                        "concept_label": concept_label_m,
+                        "concept_id": concept_id_m,
                     }
                     added += 1
                 st.success(f"Added {added} missed concept(s) to SRS.")

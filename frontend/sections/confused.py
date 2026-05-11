@@ -401,6 +401,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                                     question_text = question_text or concept
 
+                                topic_heading = (
+                                    (item.get("title") or item.get("concept") or item.get("concept_label") or concept or "")
+                                    .strip()
+                                )
                                 if is_mcq_item:
                                     mcq_payload = _build_mcq_from_item(item, selected_mcq)
                                     card_id = card_id or mcq_payload.get("id") or deterministic_fallback_id
@@ -415,6 +419,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                         "explanation": mcq_payload.get("explanation") or "",
                                         "stem": stem,
                                         "source_reason": "Added from Confused review",
+                                        "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
+                                        "concept_id": (item.get("concept_id") or "").strip(),
+                                        "concept": topic_heading or extracted_concept,
+                                        "title": topic_heading or extracted_concept,
                                     }
                                 else:
                                     card_meta = {
@@ -423,6 +431,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                         "question": question_text or "",
                                         "stem": stem,
                                         "source_reason": "Added from Confused review",
+                                        "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
+                                        "concept_id": (item.get("concept_id") or "").strip(),
+                                        "concept": topic_heading or extracted_concept,
+                                        "title": topic_heading or extracted_concept,
                                     }
                                 mgr.ensure_card(card_id, meta=card_meta)
                                 if "srs_quiz_items_cache" not in st.session_state:

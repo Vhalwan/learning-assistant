@@ -147,6 +147,7 @@ class SRSManager:
         meta["last_reviewed"] = now.isoformat()
         meta["next_due"] = (now + timedelta(days=interval_days)).isoformat()
         meta["review_count"] = int(meta.get("review_count", 0)) + 1
+        meta["last_rating"] = r
         self._save()
 
     def get_card_meta(self, card_id: str):
