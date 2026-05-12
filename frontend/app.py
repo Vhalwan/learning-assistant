@@ -74,26 +74,199 @@ from backend.generate_quiz import generate_mcq_from_context
 from backend.study_srs import SRSManager, INTERVALS
 from backend.quiz_storage import save_quiz_items, load_quiz_item_by_id, load_all_quiz_items
 from backend.confusion_store import get_top_confusions
-from backend.quiz_session_log import recent_sessions, trend_vs_prior
+from backend.quiz_session_log import recent_sessions
 
 
-def _sidebar_lecture_stats(stem: str) -> tuple[int, Optional[float], int]:
-    """Aggregate quiz activity from confusion store for the current lecture stem."""
+def _sidebar_lecture_feedback(stem: str) -> Dict[str, Any]:
+    """Aggregate sidebar-ready lecture feedback from confusion history."""
+    empty = {
+        "questions_answered": 0,
+        "accuracy_pct": None,
+    }
     if not (stem or "").strip():
-        return (0, None, 0)
+        return empty
     try:
         items = get_top_confusions(limit=None, stem=stem)
     except Exception:
-        return (0, None, 0)
+        return empty
     if not items:
-        return (0, None, 0)
+        return empty
+
     total_attempts = sum(int(x.get("total_attempts") or 0) for x in items)
     total_correct = sum(int(x.get("correct_attempts") or 0) for x in items)
-    acc: Optional[float] = None
+    accuracy_pct: Optional[float] = None
     if total_attempts > 0:
-        acc = (total_correct / total_attempts) * 100.0
-    weak = sum(1 for x in items if int(x.get("wrong_attempts") or 0) > 0)
-    return (total_attempts, acc, weak)
+        accuracy_pct = (total_correct / total_attempts) * 100.0
+
+    return {
+        "questions_answered": total_attempts,
+        "accuracy_pct": accuracy_pct,
+    }
+
+
+def _sidebar_recent_performance(stem: str, limit: int = 3) -> tuple[List[Dict[str, Any]], str]:
+    rows = recent_sessions(stem, limit)
+    if not rows:
+        return ([], "No recent quiz rounds yet.")
+
+    accuracies: List[float] = []
+    for row in rows:
+        try:
+            accuracies.append(float(row.get("accuracy_pct", 0)))
+        except Exception:
+            accuracies.append(0.0)
+
+    if len(accuracies) == 1:
+        score = accuracies[0]
+        if score < 60:
+            return (rows, "Your recent results are lower — reviewing now will help.")
+        return (rows, "Recent results look steady — keep going.")
+
+    first_score = accuracies[0]
+    last_score = accuracies[-1]
+    recent_average = sum(accuracies) / len(accuracies)
+
+    if recent_average < 60 or last_score < first_score:
+        message = "Recent results are lower — a quick review will help."
+    elif last_score >= first_score + 10:
+        message = "Recent results are improving."
+    else:
+        message = "Recent results look steady — keep going."
+    return (rows, message)
+
+
+def _sidebar_topic_label(item: Dict[str, Any], limit: int = 28) -> str:
+    raw = (
+        (item.get("title") or "").strip()
+        or (item.get("concept_label") or "").strip()
+        or (item.get("source_chunk_preview") or "").strip()
+        or (item.get("source_chunk") or "").strip()
+    )
+    label = " ".join(raw.split())
+    if not label:
+        return ""
+    if len(label) <= limit:
+        return label
+    return label[: limit - 3].rsplit(" ", 1)[0] + "..."
+
+
+def _sidebar_card_stem(card_id: str, meta: Dict[str, Any] | None) -> str:
+    if meta and meta.get("stem"):
+        return str(meta.get("stem") or "").strip()
+    if card_id and "_" in card_id:
+        return card_id.rsplit("_", 1)[0]
+    return ""
+
+
+def _sidebar_bar_percentages(rows: List[Dict[str, int]]) -> List[float]:
+    bars: List[float] = []
+    for row in rows:
+        total = max(int(row.get("total", 0) or 0), 0)
+        correct = max(int(row.get("correct", 0) or 0), 0)
+        if total <= 0:
+            bars.append(0.0)
+            continue
+        bars.append((correct / total) * 100.0)
+    return bars
+
+
+def _sidebar_progress_snapshot(stem: str, limit: int = 5) -> Dict[str, Any]:
+    rows = recent_sessions(stem, limit)
+    empty = {
+        "score_text": "—",
+        "score_subtext": "No completed quiz session yet",
+        "trend_text": "Waiting for data",
+        "trend_class": "steady",
+        "bar_percentages": [],
+    }
+    if not rows:
+        return empty
+
+    cleaned_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            correct = int(row.get("correct", 0))
+        except Exception:
+            correct = 0
+        try:
+            total = int(row.get("total", 0))
+        except Exception:
+            total = 0
+        cleaned_rows.append({"correct": correct, "total": total})
+
+    last_row = cleaned_rows[-1]
+    bar_percentages = _sidebar_bar_percentages(cleaned_rows)
+    trend_text = "Steady →"
+    trend_class = "steady"
+    if len(bar_percentages) >= 2:
+        prior_average = sum(bar_percentages[:-1]) / max(len(bar_percentages) - 1, 1)
+        last_accuracy = bar_percentages[-1]
+        if last_accuracy >= prior_average + 8:
+            trend_text = "Improving ↑"
+            trend_class = "up"
+        elif last_accuracy <= prior_average - 8:
+            trend_text = "Lower ↓"
+            trend_class = "down"
+
+    return {
+        "score_text": f"{last_row['correct']} / {last_row['total']}" if last_row["total"] > 0 else "—",
+        "score_subtext": "last session",
+        "trend_text": trend_text,
+        "trend_class": trend_class,
+        "bar_percentages": bar_percentages,
+    }
+
+
+def _sidebar_recent_weak_topics(stem: str, limit: int = 2) -> List[str]:
+    if not (stem or "").strip():
+        return []
+    try:
+        items = get_top_confusions(limit=None, stem=stem)
+    except Exception:
+        return []
+    if not items:
+        return []
+
+    def recent_key(item: Dict[str, Any]) -> str:
+        return max(
+            str(item.get("last_wrong") or "").strip(),
+            str(item.get("last_seen") or "").strip(),
+            str(item.get("last_updated") or "").strip(),
+        )
+
+    recent_wrong = [item for item in items if int(item.get("wrong_attempts") or 0) > 0]
+    recent_wrong.sort(key=recent_key, reverse=True)
+
+    topics: List[str] = []
+    seen = set()
+    for item in recent_wrong:
+        label = _sidebar_topic_label(item)
+        if not label:
+            continue
+        normalized = label.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        topics.append(label)
+        if len(topics) >= limit:
+            break
+    return topics
+
+
+def _sidebar_due_srs_count(stem: str) -> int:
+    if not (stem or "").strip():
+        return 0
+    try:
+        srs_mgr = SRSManager()
+        due_cards = srs_mgr.get_due_cards()
+    except Exception:
+        return 0
+    count = 0
+    for card_id in due_cards:
+        meta = srs_mgr.get_card_meta(card_id) or {}
+        if _sidebar_card_stem(card_id, meta) == stem:
+            count += 1
+    return count
 
 
 # initialize LLM (this mirrors existing behaviour)
@@ -433,6 +606,105 @@ st.markdown(
         user-select: none;
         padding: 0 0.15rem;
       }
+      .la-sidebar-card {
+        margin: 0.65rem 0;
+        padding: 0.9rem 0.95rem;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid #d5e8e6;
+        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.08);
+      }
+      .la-sidebar-kicker {
+        margin-bottom: 0.45rem;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .la-sidebar-score {
+        font-size: 1.8rem;
+        font-weight: 800;
+        line-height: 1.05;
+        color: var(--text);
+      }
+      .la-sidebar-sub {
+        margin-top: 0.2rem;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+      .la-sidebar-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.22rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.74rem;
+        font-weight: 700;
+        margin-top: 0.6rem;
+      }
+      .la-sidebar-badge.up {
+        background: #ecfdf3;
+        color: #166534;
+      }
+      .la-sidebar-badge.down {
+        background: #fef2f2;
+        color: #b91c1c;
+      }
+      .la-sidebar-badge.steady {
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+      .la-sidebar-spark {
+        margin-top: 0.8rem;
+        display: flex;
+        align-items: flex-end;
+        gap: 0.32rem;
+        height: 4.75rem;
+      }
+      .la-sidebar-spark-bar {
+        flex: 1 1 0;
+        min-width: 0.42rem;
+        border-radius: 6px 6px 0 0;
+        background: linear-gradient(180deg, #14b8a6 0%, #0f766e 100%);
+        min-height: 4px;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+      }
+      .la-sidebar-chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.38rem;
+      }
+      .la-sidebar-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.28rem 0.58rem;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+        font-size: 0.75rem;
+        font-weight: 600;
+        line-height: 1.2;
+      }
+      .la-sidebar-chip-muted {
+        background: #f1f5f9;
+        color: #475569;
+      }
+      .la-sidebar-due {
+        margin-top: 0.15rem;
+        display: flex;
+        align-items: baseline;
+        gap: 0.35rem;
+      }
+      .la-sidebar-due-count {
+        font-size: 1.8rem;
+        font-weight: 800;
+        line-height: 1;
+        color: var(--text);
+      }
+      .la-sidebar-due-label {
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
       @media (max-width: 720px) {
         .la-flow-arrow { display: none; }
         .app-header {
@@ -549,28 +821,47 @@ with st.sidebar:
     )
 
     if sidebar_stem:
-        n_ans, acc_pct, n_weak = _sidebar_lecture_stats(sidebar_stem)
+        progress = _sidebar_progress_snapshot(sidebar_stem, limit=5)
+        weak_topics = _sidebar_recent_weak_topics(sidebar_stem, limit=2)
+        due_count = _sidebar_due_srs_count(sidebar_stem)
+        spark_bars = "".join(
+            f'<span class="la-sidebar-spark-bar" style="height: max(4px, {max(0.0, min(100.0, float(bar or 0.0))):.1f}%);"></span>'
+            for bar in progress.get("bar_percentages", [])
+        )
+        sparkline_html = ""
+        if spark_bars:
+            sparkline_html = f'<div class="la-sidebar-spark">{spark_bars}</div>'
+        weak_topics_html = "".join(
+            f'<span class="la-sidebar-chip">{html_mod.escape(topic)}</span>'
+            for topic in weak_topics
+        ) or '<span class="la-sidebar-chip la-sidebar-chip-muted">No recent misses</span>'
+        due_label = "card due now" if due_count == 1 else "cards due now"
         st.markdown("---")
         st.markdown("##### This lecture")
-        acc_display = f"{acc_pct:.0f}%" if acc_pct is not None else "—"
-        st.caption(f"Questions answered · **{n_ans}**")
-        st.caption(f"Accuracy (all time) · **{acc_display}**")
-        trend_line, delta = trend_vs_prior(sidebar_stem)
-        if delta is not None:
-            st.caption(f"Quiz trend · **{delta:+.0f} pts** vs your prior quiz average")
-        st.caption(trend_line[:220] + ("…" if len(trend_line) > 220 else ""))
-        sess_rows = recent_sessions(sidebar_stem, 3)
-        if sess_rows:
-            st.caption("Last quiz rounds (newest first)")
-            for row in reversed(sess_rows):
-                try:
-                    p = float(row.get("accuracy_pct", 0))
-                    ttot = int(row.get("total", 0))
-                    ccor = int(row.get("correct", 0))
-                except Exception:
-                    p, ttot, ccor = 0.0, 0, 0
-                st.caption(f"· {ccor}/{ttot} → {p:.0f}%")
-        st.caption(f"Weak topics · **{n_weak}**")
+        st.markdown(
+            f"""
+            <div class="la-sidebar-card">
+              <div class="la-sidebar-kicker">Progress</div>
+              <div class="la-sidebar-score">{html_mod.escape(progress["score_text"])}</div>
+              <div class="la-sidebar-sub">{html_mod.escape(progress["score_subtext"])}</div>
+              <div class="la-sidebar-badge {html_mod.escape(progress["trend_class"])}">{html_mod.escape(progress["trend_text"])}</div>
+              {sparkline_html}
+            </div>
+            <div class="la-sidebar-card">
+              <div class="la-sidebar-kicker">Struggling with</div>
+              <div class="la-sidebar-chip-row">{weak_topics_html}</div>
+              <div class="la-sidebar-sub">Based on recent wrong answers</div>
+            </div>
+            <div class="la-sidebar-card">
+              <div class="la-sidebar-kicker">SRS cards due</div>
+              <div class="la-sidebar-due">
+                <div class="la-sidebar-due-count">{due_count}</div>
+                <div class="la-sidebar-due-label">{html_mod.escape(due_label)}</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
     with st.expander("Advanced", expanded=False):
