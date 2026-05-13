@@ -63,38 +63,34 @@ def _choice_with_text(letter: str, choices: dict) -> str:
     return f"{clean_letter}. {option_text}" if option_text else clean_letter
 
 
-def _format_flagged_reason(evidence_entry: dict) -> str:
+def _format_flagged_reason(evidence_entry: dict, is_most_recent: bool = False) -> str:
+    """Return a short one-line reason for a single wrong-answer evidence row.
+
+    Keeps bullets compact: trimmed question text plus the correct answer letter.
+    The "you chose" hint is only added for the most recent wrong attempt because
+    the persisted card stores only the latest chosen answer, so attaching it to
+    older evidence rows would be misleading.
+    """
     meta = evidence_entry.get("meta", {}) or {}
-    question = " ".join(str(meta.get("question") or evidence_entry.get("question") or "").split())
-    try:
-        wrong_count = int(meta.get("wrong_count", 0) or 0)
-    except Exception:
-        wrong_count = 0
+    raw_question = str(meta.get("question") or evidence_entry.get("question") or "")
+    question = _shorten(raw_question, limit=100)
+
     chosen = str(meta.get("last_chosen_answer") or "").strip().upper()
     correct = str(meta.get("answer") or "").strip().upper()
-    choices = meta.get("choices", {}) if isinstance(meta.get("choices"), dict) else {}
-    explanation = " ".join(str(meta.get("explanation") or "").split())
 
-    reason_parts = []
-    if wrong_count > 1:
-        reason_parts.append(f"missed {wrong_count} times")
-    else:
-        reason_parts.append("answered incorrectly")
+    tail_parts = []
+    if is_most_recent and chosen and correct and chosen != correct:
+        tail_parts.append(f"chose {chosen}")
+    if correct:
+        tail_parts.append(f"correct: {correct}")
 
-    if chosen and correct and chosen != correct:
-        reason_parts.append(f"you chose {_choice_with_text(chosen, choices)}")
-        reason_parts.append(f"the correct answer was {_choice_with_text(correct, choices)}")
-    elif correct:
-        reason_parts.append(f"the correct answer was {_choice_with_text(correct, choices)}")
-
-    if explanation:
-        reason_parts.append(explanation.rstrip("."))
-
-    if question and reason_parts:
-        return f"{question} - " + "; ".join(reason_parts) + "."
+    if question and tail_parts:
+        return f"{question} — " + ", ".join(tail_parts)
     if question:
         return question
-    return "Repeated incorrect quiz answers for this concept."
+    if tail_parts:
+        return "Wrong attempt — " + ", ".join(tail_parts)
+    return "Wrong quiz attempt for this concept."
 
 
 def _format_timestamp(value: str) -> str:
@@ -185,13 +181,13 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
     # When empty, show one calm line only (no cards/icons)
     if not real_confusions:
-        st.success("No wrong quiz answers are recorded for this lecture yet. When you miss a question, the matching weak area will appear here and stable chunk-based cards will rise to the top.")
+        st.success("No wrong quiz answers are recorded for this lecture yet. When you miss a question, the matching concept will appear here.")
     else:
         preview_limit = min(len(real_confusions), 5)
         for idx, item in enumerate(real_confusions[:preview_limit], start=1):
             with st.container():
                 st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
-                concept = item.get("title") or item.get("concept") or item.get("concept_label") or "Unlabeled chunk"
+                concept = item.get("title") or item.get("concept") or item.get("concept_label") or "Unlabeled concept"
                 strength = int(item.get("signal_strength", 0))
                 total_attempts = int(item.get("total_attempts", 0) or 0)
                 error_rate = float(item.get("error_rate", 0.0) or 0.0)
@@ -200,9 +196,9 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 with header_cols[0]:
                     st.markdown(f"### {idx}. {concept}")
                     if strength > 1:
-                        st.write("You have missed multiple quiz questions tied to this chunk.")
+                        st.write("You have missed multiple quiz questions tied to this concept.")
                     else:
-                        st.write("You missed a quiz question tied to this chunk.")
+                        st.write("You missed a quiz question tied to this concept.")
                     if item.get("reason"):
                         st.caption(item.get("reason"))
                     if last_seen:
@@ -216,7 +212,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 item_type = (item.get("item_type") or ("mcq" if item.get("is_mcq") else "concept")).strip().lower()
                 is_mcq_item = item_type == "mcq"
 
-                # Build a deduplicated list of candidate original MCQs from evidence
+                # Build a deduplicated list of WRONG-only candidate MCQs from evidence.
+                # `evidence` is sourced from the card's mcq_history, which the
+                # confusion store only appends to on incorrect attempts, so every
+                # entry here represents a question the user actually got wrong.
                 mcq_candidates = []
                 seen_mcq = set()
                 for e in evidence:
@@ -233,7 +232,12 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     label = question or "(question text unavailable)"
                     mcq_candidates.append({"id": stable_id or None, "question": question, "label": label})
 
-                if is_mcq_item:
+                # Only fall back to the card's latest question if it really was a
+                # wrong attempt. The persisted `last_question`/`original_question`
+                # field is updated on every recorded answer (correct or wrong), so
+                # we must gate this behind `last_is_correct == False` to avoid
+                # leaking a correctly-answered question into the SRS dropdown.
+                if is_mcq_item and not bool(item.get("last_is_correct", False)):
                     mcq_payload = _build_mcq_from_item(item, {"id": item.get("quiz_question_id"), "question": item.get("original_question")})
                     if mcq_payload.get("question"):
                         fallback_id = mcq_payload.get("id") or ""
@@ -242,7 +246,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                         if (candidate["id"], candidate["question"]) not in seen_mcq:
                             mcq_candidates.insert(0, candidate)
 
-                fallback_label = "No original MCQ available"
+                fallback_label = "No wrong-answered question available"
                 if not mcq_candidates:
                     mcq_candidates = [{"id": None, "question": "", "label": fallback_label}]
 
@@ -264,8 +268,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                 if evidence:
                     with st.expander("Why this weak area was flagged"):
+                        st.caption("Last 5 wrong quiz attempts for this concept.")
                         seen_q = set()
                         reason_rows = []
+                        first_quiz_seen = False
                         for e in evidence:
                             if e.get("type") in ("quiz", "persisted"):
                                 meta = e.get("meta", {}) or {}
@@ -275,18 +281,21 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                     dedupe_key = (qid, qtext.strip().lower())
                                     if dedupe_key not in seen_q:
                                         seen_q.add(dedupe_key)
-                                        reason_rows.append(_format_flagged_reason(e))
+                                        reason_rows.append(
+                                            _format_flagged_reason(e, is_most_recent=not first_quiz_seen)
+                                        )
+                                        first_quiz_seen = True
                                 if qid and qtext:
                                     evidence_quiz_rows.append({"qid": qid, "question": qtext})
                             else:
-                                extra = " ".join(str(e).split())
+                                extra = _shorten(" ".join(str(e).split()), limit=120)
                                 if extra:
                                     reason_rows.append(extra)
                         if reason_rows:
                             for row in reason_rows[:5]:
                                 st.write(f"- {row}")
                         else:
-                            st.write("- Repeated incorrect quiz answers for this chunk.")
+                            st.write("- Repeated incorrect quiz answers for this concept.")
 
                 delete_keys = []
                 for e in evidence:

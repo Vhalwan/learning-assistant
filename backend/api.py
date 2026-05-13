@@ -427,7 +427,7 @@ def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(chec
             if gen_concepts is None:
                 concepts = []
             else:
-                concepts = gen_concepts(body.context_text, max_concepts=5, llm_call=capturing_llm)
+                concepts = gen_concepts(body.context_text, max_concepts=8, llm_call=capturing_llm)
             try:
                 save_concepts(body.stem, concepts, doc_id=doc_id)
             except Exception:

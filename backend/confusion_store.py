@@ -89,8 +89,22 @@ def _card_title(concept_label: str, chunk_preview: str, chunk_id: str) -> str:
     return title
 
 
-def _new_card(chunk_id: str, stem: str = "", doc_id: str = "") -> Dict[str, Any]:
-    card_id = build_chunk_card_id(chunk_id)
+def _linked_chunks(*values: Any) -> List[str]:
+    out: List[str] = []
+    for value in values:
+        if isinstance(value, list):
+            candidates = value
+        else:
+            candidates = [value]
+        for candidate in candidates:
+            clean = _clean_text(candidate)
+            if clean and clean not in out:
+                out.append(clean)
+    return out
+
+
+def _new_card(chunk_id: str, stem: str = "", doc_id: str = "", card_id: str = "") -> Dict[str, Any]:
+    card_id = _clean_text(card_id) or build_chunk_card_id(chunk_id)
     return {
         "card_id": card_id,
         "store_key": card_id,
@@ -131,16 +145,22 @@ def _new_card(chunk_id: str, stem: str = "", doc_id: str = "") -> Dict[str, Any]
 
 def _apply_chunk_meta(card: Dict[str, Any], meta: Dict[str, str]) -> None:
     chunk_id = _clean_text(meta.get("source_chunk_id"))
+    bucket_key = _clean_text(meta.get("concept_bucket_key"))
     concept_label = _clean_text(meta.get("concept_label"))
     concept_id = _clean_text(meta.get("concept_id")).lower()
     source_chunk = _clean_text(meta.get("source_chunk"))
     source_chunk_preview = _clean_text(meta.get("source_chunk_preview"))
 
-    if chunk_id:
-        card["chunk_id"] = chunk_id
+    if bucket_key:
+        card["card_id"] = bucket_key
+        card["store_key"] = bucket_key
+    elif chunk_id and not _clean_text(card.get("card_id")):
         card["card_id"] = build_chunk_card_id(chunk_id)
         card["store_key"] = card["card_id"]
-        card["linked_chunk_ids"] = [chunk_id]
+    if chunk_id:
+        if not _clean_text(card.get("chunk_id")):
+            card["chunk_id"] = chunk_id
+        card["linked_chunk_ids"] = _linked_chunks(card.get("linked_chunk_ids"), chunk_id)
     if concept_label and not _clean_text(card.get("concept_label")):
         card["concept_label"] = concept_label
     if concept_id and not _clean_text(card.get("concept_id")):
@@ -167,15 +187,18 @@ def _normalize_card_entry(entry: Dict[str, Any], store_key: str) -> Optional[Dic
         existing=entry,
     )
     chunk_id = _clean_text(entry.get("chunk_id") or entry.get("source_chunk_id") or chunk_meta.get("source_chunk_id"))
-    if not chunk_id:
+    card_key = _clean_text(chunk_meta.get("concept_bucket_key") or store_key)
+    if not chunk_id and not card_key:
         return None
 
     card = _new_card(
         chunk_id=chunk_id,
         stem=entry.get("stem", ""),
         doc_id=entry.get("doc_id", ""),
+        card_id=card_key,
     )
     _apply_chunk_meta(card, chunk_meta)
+    card["linked_chunk_ids"] = _linked_chunks(entry.get("linked_chunk_ids"), card.get("linked_chunk_ids"), chunk_id)
 
     wrong_attempts = _as_int(entry.get("wrong_attempts", entry.get("wrong_count", 0)))
     correct_attempts = _as_int(entry.get("correct_attempts", entry.get("correct_count", 0)))
@@ -248,13 +271,15 @@ def _build_card_from_legacy_entry(entry: Dict[str, Any], store_key: str) -> Opti
         existing=entry,
     )
     chunk_id = _clean_text(chunk_meta.get("source_chunk_id"))
-    if not chunk_id:
+    card_key = _clean_text(chunk_meta.get("concept_bucket_key") or store_key)
+    if not chunk_id and not card_key:
         return None
 
     card = _new_card(
         chunk_id=chunk_id,
         stem=entry.get("stem", ""),
         doc_id=entry.get("doc_id", ""),
+        card_id=card_key,
     )
     _apply_chunk_meta(card, chunk_meta)
 
@@ -338,7 +363,14 @@ def _merge_cards(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str
         merged["last_chosen_answer"] = _clean_text(incoming.get("last_chosen_answer")).upper()
         merged["last_is_correct"] = bool(incoming.get("last_is_correct", False))
 
-    merged["linked_chunk_ids"] = [merged.get("chunk_id")] if _clean_text(merged.get("chunk_id")) else []
+    merged["linked_chunk_ids"] = _linked_chunks(
+        merged.get("linked_chunk_ids"),
+        incoming.get("linked_chunk_ids"),
+        merged.get("chunk_id"),
+        incoming.get("chunk_id"),
+    )
+    if not _clean_text(merged.get("chunk_id")) and merged["linked_chunk_ids"]:
+        merged["chunk_id"] = merged["linked_chunk_ids"][0]
     return merged
 
 
@@ -427,6 +459,10 @@ def _decorate_card(card: Dict[str, Any]) -> Dict[str, Any]:
         for mcq_id in (decorated.get("mcq_history") or [])
         if _clean_text(mcq_id)
     ]
+    decorated["linked_chunk_ids"] = _linked_chunks(
+        decorated.get("linked_chunk_ids"),
+        decorated.get("chunk_id"),
+    )
     return decorated
 
 
@@ -477,7 +513,7 @@ def record_quiz_result(
     """
     Record that the user answered a quiz item.
 
-    Confusion cards are keyed strictly by chunk_id and updated in place.
+    Confusion cards are keyed by lecture concept and keep chunk ids as evidence.
     """
     p = Path(path or DEFAULT_PATH)
     data = load_confusion(p)
@@ -523,11 +559,12 @@ def record_quiz_result(
     if not chunk_id:
         raise ValueError("Quiz result is missing a chunk_id/source chunk anchor.")
 
-    card_key = build_chunk_card_id(chunk_id)
+    card_key = _clean_text(chunk_meta.get("concept_bucket_key")) or build_chunk_card_id(chunk_id)
     card = _normalize_card_entry(data.get(card_key, {}), card_key) or _new_card(
         chunk_id=chunk_id,
         stem=stem,
         doc_id=doc_id,
+        card_id=card_key,
     )
     _apply_chunk_meta(card, chunk_meta)
 
@@ -545,7 +582,9 @@ def record_quiz_result(
     card["doc_id"] = _clean_text(doc_id or card.get("doc_id", ""))
     card["store_key"] = card_key
     card["card_id"] = card_key
-    card["linked_chunk_ids"] = [chunk_id]
+    if chunk_id and not _clean_text(card.get("chunk_id")):
+        card["chunk_id"] = chunk_id
+    card["linked_chunk_ids"] = _linked_chunks(card.get("linked_chunk_ids"), chunk_id)
     card["last_mcq_id"] = mcq_id
     card["quiz_question_id"] = mcq_id
     if question_text:
@@ -592,7 +631,7 @@ def get_top_confusions(
     only_wrong: bool = False,
 ) -> List[Dict[str, Any]]:
     """
-    Return persisted chunk-based confusion cards ranked by normalized weakness.
+    Return persisted concept-based confusion cards ranked by normalized weakness.
     """
     p = Path(path or DEFAULT_PATH)
     data = load_confusion(p)

@@ -6,8 +6,8 @@ v6 changes vs v5  (goal: v4 speed + reliability, v5 diversity):
   ─────────────────────────────────────────────────────────────────
   SPEED / 503 FIXES
   ─────────────────────────────────────────────────────────────────
-  1. Concept extraction max_concepts capped at 5 again (was max(n,5) in v5 —
-     asking for 10 concepts for a 10-question quiz caused much larger LLM calls).
+  1. Concept extraction now targets a lecture-level map of about 5-10 topics
+     instead of treating chunks as the student-facing unit.
 
   2. BACKOFF_503 reduced from 10 s → 4 s, and the multiplier is now capped:
        wait = min(BACKOFF_503 * attempt, BACKOFF_503_MAX)   (max 12 s)
@@ -97,7 +97,8 @@ _EXTRA_QUESTION_TYPES = [
 _QUESTION_TYPES = _CORE_QUESTION_TYPES + _EXTRA_QUESTION_TYPES
 
 _CONCEPT_PROMPT_TEMPLATE = """
-You are an expert educator. Extract 2 to {max_concepts} canonical concepts from the lecture content when possible.
+You are an expert educator. Extract 5 to {max_concepts} canonical concepts from the lecture content when possible.
+Aim for meaningful lecture topics that can span multiple chunks/slides. Use fewer than 5 only when the content truly has fewer distinct topics.
 Return JSON ONLY (no extra text). Output must be a JSON array of objects with keys:
   - concept_id (snake_case, short, stable)
   - concept_label (human-readable)
@@ -374,7 +375,7 @@ def _extract_retry_delay(e: Exception, default: float = 5.0) -> float:
     return default
 
 
-def _normalize_concepts(raw, max_concepts: int = 5) -> List[Dict[str, str]]:
+def _normalize_concepts(raw, max_concepts: int = 8) -> List[Dict[str, str]]:
     max_concepts = int(max_concepts or 1)
     max_concepts = max(1, min(max_concepts, 20))
     concepts: List[Dict[str, str]] = []
@@ -422,7 +423,7 @@ def _normalize_concepts(raw, max_concepts: int = 5) -> List[Dict[str, str]]:
 
 def generate_concepts_from_context(
     context_text: str,
-    max_concepts: int = 5,
+    max_concepts: int = 8,
     llm_call: Optional[Callable[[str], str]] = None,
 ) -> List[Dict[str, str]]:
     if llm_call is None:
@@ -871,13 +872,13 @@ def generate_mcq_from_context(
     context_chunk_rows = _build_context_chunk_rows(context_text or "")
 
     # ── 1. Extract concepts ──────────────────────────────────────────────
-    # FIX v6: always cap at 5, regardless of n (v5 used max(n,5) which
-    # caused much larger concept-extraction calls for big quizzes).
+    # Concepts are lecture-level topics, not storage chunks. Preserve up to 10
+    # saved concepts, and ask for about 8 when extracting from this lecture.
     concept_list = (
-        _normalize_concepts(concepts, max_concepts=5)
+        _normalize_concepts(concepts, max_concepts=10)
         if concepts is not None
         else generate_concepts_from_context(
-            context_text, max_concepts=5, llm_call=llm_call
+            context_text, max_concepts=8, llm_call=llm_call
         )
     )
 

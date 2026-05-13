@@ -3,6 +3,7 @@ import os
 import sys
 import re
 import json
+import hashlib
 import html as html_mod
 import uuid
 from pathlib import Path
@@ -43,6 +44,7 @@ from frontend.runtime_ui_helpers import (
 from frontend.handlers import (
     init_llm,
     create_embeddings_if_needed,
+    ensure_concepts_for_lecture,
     load_embeddings_wrapper,
     perform_query,
     perform_summary,
@@ -909,6 +911,7 @@ if uploaded:
 
     # derive the stem and paths
     stem = tmp_pdf.stem
+    doc_id = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:12]
     embeddings_path = Path(f"data/processed/{stem}_embeddings.json")
     index_path = Path(f"data/processed/{stem}_embeddings.index")
     st.session_state["current_stem"] = stem
@@ -940,6 +943,20 @@ if uploaded:
         except Exception as e:
             st.error("Failed to create embeddings.")
             st.exception(e)
+
+    try:
+        with st.spinner("Extracting lecture concepts..."):
+            lecture_concepts, concepts_created = ensure_concepts_for_lecture(
+                stem=stem,
+                text=text,
+                llm_call=llm,
+                doc_id=doc_id,
+                max_concepts=8,
+            )
+        if concepts_created and lecture_concepts:
+            st.caption(f"Concept map ready: {len(lecture_concepts)} lecture concepts.")
+    except Exception as e:
+        st.warning(f"Lecture concepts could not be extracted yet: {e}")
 
     # Show a single completion status when setup is ready.
     try:

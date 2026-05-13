@@ -1,9 +1,8 @@
 """
-Chunk-anchored helpers for stable confusion tracking.
+Concept helpers for stable student-facing progress tracking.
 
-Core rule: confusion grouping must be based on chunk identity only.
-Question wording, quiz ids, and runtime regrouping are never used to decide
-which weakness card an MCQ belongs to.
+Chunks remain the retrieval/source unit. Concepts are the weakness/progress
+unit that students see, so multiple chunks can feed the same concept card.
 """
 from __future__ import annotations
 
@@ -64,6 +63,22 @@ def build_chunk_card_id(chunk_id: str) -> str:
     return f"chunk:{chunk}"
 
 
+def build_concept_card_id(
+    concept_id: str = "",
+    *,
+    stem: str = "",
+    doc_id: str = "",
+    concept_label: str = "",
+) -> str:
+    concept = slugify_concept_id(concept_id or concept_label, fallback="").lower()
+    if not concept:
+        return ""
+    namespace = build_chunk_namespace(stem=stem, doc_id=doc_id)
+    if namespace:
+        return f"concept:{namespace}:{concept}"
+    return f"concept:{concept}"
+
+
 def _extract_source_chunk(question_item: Optional[Dict[str, Any]], existing: Optional[Dict[str, Any]]) -> str:
     detailed = question_item.get("detailed_explanation") if isinstance(question_item, dict) else {}
     if not isinstance(detailed, dict):
@@ -95,13 +110,16 @@ def resolve_concept_bucket(
     Resolve a stable concept bucket for a quiz result.
 
     Grouping priority:
-      1. Explicit `chunk_id` / `source_chunk_id`
-      2. Deterministic chunk fingerprint derived from the source chunk text
+      1. Canonical lecture concept (`concept_id` / `concept_label`)
+      2. Chunk fingerprint only as a fallback when no concept can be resolved
 
     There is intentionally no fallback to quiz ids or question wording.
     """
     question_item = question_item or {}
     existing = existing or {}
+
+    stem_value = _clean_text(question_item.get("stem") or existing.get("stem") or stem)
+    doc_id_value = _clean_text(question_item.get("doc_id") or existing.get("doc_id"))
 
     concept_label = _clean_text(
         question_item.get("concept_label")
@@ -109,7 +127,10 @@ def resolve_concept_bucket(
         or existing.get("concept_label")
         or existing.get("concept")
     )
-    concept_id = _clean_text(question_item.get("concept_id") or existing.get("concept_id")).lower()
+    concept_id = slugify_concept_id(
+        question_item.get("concept_id") or existing.get("concept_id") or concept_label,
+        fallback="",
+    )
 
     source_chunk = _extract_source_chunk(question_item, existing)
     source_chunk_id = canonicalize_chunk_id(
@@ -117,24 +138,29 @@ def resolve_concept_bucket(
         or question_item.get("chunk_id")
         or existing.get("source_chunk_id")
         or existing.get("chunk_id"),
-        stem=_clean_text(question_item.get("stem") or existing.get("stem") or stem),
-        doc_id=_clean_text(question_item.get("doc_id") or existing.get("doc_id")),
+        stem=stem_value,
+        doc_id=doc_id_value,
     )
     if not source_chunk_id and source_chunk:
         source_chunk_id = canonicalize_chunk_id(
             derive_source_chunk_id(source_chunk),
-            stem=_clean_text(question_item.get("stem") or existing.get("stem") or stem),
-            doc_id=_clean_text(question_item.get("doc_id") or existing.get("doc_id")),
+            stem=stem_value,
+            doc_id=doc_id_value,
         )
 
     if not concept_label and source_chunk:
         concept_label = _shorten(source_chunk, limit=90)
     if not concept_id and concept_label:
         concept_id = slugify_concept_id(concept_label, fallback="concept")
-    if not concept_id and source_chunk_id:
-        concept_id = source_chunk_id
 
-    bucket_key = build_chunk_card_id(source_chunk_id)
+    bucket_key = build_concept_card_id(
+        concept_id,
+        stem=stem_value,
+        doc_id=doc_id_value,
+        concept_label=concept_label,
+    )
+    if not bucket_key:
+        bucket_key = build_chunk_card_id(source_chunk_id)
 
     return {
         "concept_id": concept_id,

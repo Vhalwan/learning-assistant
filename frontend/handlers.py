@@ -13,6 +13,7 @@ from backend.rag_query import (
     rag_answer_from_embeddings, rag_generate_summary_from_embeddings, rag_chat_answer,
 )
 from backend.generate_quiz import generate_quiz_from_context, generate_mcq_from_context
+from backend.concept_policy import build_concept_card_id, slugify_concept_id
 from backend.concept_storage import load_concepts, save_concepts
 try:
     from backend.concept_storage import load_concepts_with_meta as _load_concepts_with_meta
@@ -77,6 +78,47 @@ def load_embeddings_wrapper(embeddings_path: str):
         return ids, texts, vecs
     except Exception:
         return [], [], []
+
+
+def ensure_concepts_for_lecture(
+    stem: str,
+    text: str,
+    llm_call=None,
+    doc_id: str = "",
+    max_concepts: int = 8,
+    force: bool = False,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """
+    Ensure the lecture has a persisted concept map.
+
+    Returns (concepts, created_or_replaced). Concepts are lecture-level topics
+    that MCQs and weak-topic progress share across retrieval chunks.
+    """
+    clean_stem = (stem or "").strip()
+    if not clean_stem:
+        return [], False
+
+    effective_doc_id = (doc_id or hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:12]).strip()
+    if not force and _load_concepts_with_meta is not None:
+        meta = _load_concepts_with_meta(clean_stem)
+        if meta and isinstance(meta, dict):
+            concepts = meta.get("concepts") or []
+            meta_doc_id = (meta.get("doc_id") or "").strip()
+            if concepts and meta_doc_id == effective_doc_id:
+                return concepts, False
+
+    if _generate_concepts_from_context is None or llm_call is None:
+        return [], False
+
+    concepts = _generate_concepts_from_context(
+        text or "",
+        max_concepts=max(5, min(int(max_concepts or 8), 10)),
+        llm_call=llm_call,
+    )
+    if concepts:
+        save_concepts(clean_stem, concepts, doc_id=effective_doc_id)
+        return concepts, True
+    return [], False
 
 
 def perform_query(
@@ -291,6 +333,91 @@ def delete_confusion_entries(keys: List[str]) -> int:
         return 0
 
 
+def _concept_group_key(row: Dict[str, Any], stem: str = "", doc_id: str = "") -> str:
+    card_id = (row.get("concept_bucket_key") or row.get("card_id") or row.get("store_key") or "").strip()
+    if card_id.startswith("concept:"):
+        return card_id
+    concept_id = (row.get("concept_id") or "").strip()
+    concept_label = (row.get("concept_label") or "").strip()
+    concept_key = build_concept_card_id(
+        concept_id,
+        stem=stem or row.get("stem", ""),
+        doc_id=doc_id or row.get("doc_id", ""),
+        concept_label=concept_label,
+    )
+    if concept_key:
+        return concept_key
+    return card_id or (row.get("chunk_id") or row.get("source_chunk_id") or "").strip()
+
+
+def _merge_persisted_by_concept(rows: List[Dict[str, Any]], stem: str = "", doc_id: str = "") -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        key = _concept_group_key(raw, stem=stem, doc_id=doc_id)
+        if not key:
+            continue
+        incoming = dict(raw)
+        if key not in merged:
+            incoming["card_id"] = key
+            incoming["store_key"] = key
+            incoming["concept_bucket_key"] = key
+            merged[key] = incoming
+            continue
+
+        base = merged[key]
+        base["total_attempts"] = int(base.get("total_attempts", 0) or 0) + int(incoming.get("total_attempts", 0) or 0)
+        base["wrong_attempts"] = int(base.get("wrong_attempts", 0) or 0) + int(incoming.get("wrong_attempts", 0) or 0)
+        base["correct_attempts"] = int(base.get("correct_attempts", 0) or 0) + int(incoming.get("correct_attempts", 0) or 0)
+
+        history = []
+        for mcq_id in list(base.get("mcq_history") or []) + list(incoming.get("mcq_history") or []):
+            clean = str(mcq_id or "").strip()
+            if clean:
+                history.append(clean)
+        base["mcq_history"] = history
+
+        linked = []
+        for chunk_id in (
+            list(base.get("linked_chunk_ids") or [])
+            + list(incoming.get("linked_chunk_ids") or [])
+            + [base.get("chunk_id"), incoming.get("chunk_id"), incoming.get("source_chunk_id")]
+        ):
+            clean = str(chunk_id or "").strip()
+            if clean and clean not in linked:
+                linked.append(clean)
+        base["linked_chunk_ids"] = linked
+        if not (base.get("chunk_id") or "").strip() and linked:
+            base["chunk_id"] = linked[0]
+
+        for field in ("concept_id", "concept_label", "title", "concept", "source_chunk_preview", "source_chunk"):
+            if not (base.get(field) or "").strip() and (incoming.get(field) or "").strip():
+                base[field] = incoming.get(field)
+
+        incoming_seen = str(incoming.get("last_seen") or incoming.get("last_updated") or "")
+        base_seen = str(base.get("last_seen") or base.get("last_updated") or "")
+        if incoming_seen >= base_seen:
+            for field in (
+                "last_seen", "last_updated", "last_mcq_id", "quiz_question_id",
+                "question", "last_question", "choices", "answer", "correct_answer",
+                "explanation", "last_chosen_answer", "last_is_correct",
+            ):
+                if field in incoming:
+                    base[field] = incoming.get(field)
+
+    for row in merged.values():
+        wrong = int(row.get("wrong_attempts", row.get("wrong_count", 0)) or 0)
+        total = int(row.get("total_attempts", wrong + int(row.get("correct_attempts", 0) or 0)) or 0)
+        total = max(total, wrong)
+        error_rate = (wrong / total) if total else 0.0
+        score = (wrong + 1.0) / (total + 2.0)
+        row["error_rate"] = error_rate
+        row["score"] = score
+        row["final_score"] = score * math.log(1 + total) if total > 0 else 0.0
+    return list(merged.values())
+
+
 def perform_confusion_analysis(
     history: Optional[List[Dict[str, str]]] = None,
     quiz_submissions: Optional[List[Dict[str, Any]]] = None,
@@ -301,7 +428,7 @@ def perform_confusion_analysis(
     llm_call = None,
 ) -> List[Dict[str, Any]]:
     """
-    Return persisted chunk-based confusion cards ranked by their normalized score.
+    Return persisted concept-based confusion cards ranked by their normalized score.
     """
     try:
         persisted = load_persisted_confusions(
@@ -319,6 +446,8 @@ def perform_confusion_analysis(
         print(f"[confusion_analysis] loaded_persisted={len(persisted)} top_n={top_n} stem='{stem}' doc_id='{doc_id}'")
     except Exception:
         pass
+
+    persisted = _merge_persisted_by_concept(persisted, stem=stem, doc_id=doc_id)
 
     real: List[Dict[str, Any]] = []
     for p in persisted:
@@ -351,7 +480,7 @@ def perform_confusion_analysis(
             or concept_label
             or source_chunk_preview
             or chunk_id
-            or "Unlabeled chunk"
+            or "Unlabeled concept"
         )
         store_key = (p.get("store_key") or p.get("card_id") or "").strip()
         last_seen = (p.get("last_seen") or p.get("last_updated") or p.get("last_wrong") or p.get("last_correct") or "").strip()
@@ -426,6 +555,7 @@ def perform_confusion_analysis(
             "card_id": (p.get("card_id") or store_key),
             "store_key": store_key,
             "chunk_id": chunk_id,
+            "linked_chunk_ids": p.get("linked_chunk_ids") or ([chunk_id] if chunk_id else []),
             "quiz_question_id": last_qid,
             "original_question": last_question,
             "choices": (p.get("choices") or {}) if isinstance(p.get("choices"), dict) else {},
@@ -489,24 +619,15 @@ def generate_quiz(
 ) -> Tuple[List[Dict[str, Any]], Optional[float]]:
     """Generate MCQ quiz items. Returns (quiz_items, latency)"""
     def _ensure_concept_fields(items: List[Dict[str, Any]]):
-        if not items:
-            return
-        concept_label = ""
-        concept_id = ""
         for itm in items:
-            if not concept_label:
-                concept_label = (itm.get("concept_label") or "").strip()
-            if not concept_id:
-                concept_id = (itm.get("concept_id") or "").strip()
-        if not concept_label and not concept_id:
-            return
-        for itm in items:
-            if not (itm.get("concept_label") or "").strip():
-                if concept_label:
-                    itm["concept_label"] = concept_label
-            if not (itm.get("concept_id") or "").strip():
-                if concept_id:
-                    itm["concept_id"] = concept_id
+            if not isinstance(itm, dict):
+                continue
+            concept_label = (itm.get("concept_label") or itm.get("concept") or "").strip()
+            concept_id = (itm.get("concept_id") or "").strip()
+            if concept_label and not (itm.get("concept_label") or "").strip():
+                itm["concept_label"] = concept_label
+            if concept_label and not concept_id:
+                itm["concept_id"] = slugify_concept_id(concept_label, fallback="concept")
 
     api_base = api_base or os.getenv("API_BASE", "http://localhost:8000")
     if use_api_mode:
@@ -544,7 +665,7 @@ def generate_quiz(
             if _generate_concepts_from_context is None:
                 concepts = []
             else:
-                concepts = _generate_concepts_from_context(context_text, max_concepts=5, llm_call=llm_call)
+                concepts = _generate_concepts_from_context(context_text, max_concepts=8, llm_call=llm_call)
             try:
                 save_concepts(stem, concepts, doc_id=doc_id)
             except Exception:
