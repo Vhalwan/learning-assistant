@@ -126,9 +126,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     followup_notice_key = f"conf_followup_notice_{stem}"
 
     st.markdown('<a id="confused-quick-prioritized-list"></a>', unsafe_allow_html=True)
-    st.markdown("## Confused? Coaching list")
-    st.write("These are the concepts most worth reviewing next.")
-    st.caption("Start with the top card, get a simple explanation, or queue a follow-up prompt for Chat.")
 
     followup_notice = st.session_state.get(followup_notice_key)
     notice_rendered = False
@@ -195,10 +192,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 header_cols = st.columns([3.0, 1.0, 1.0])
                 with header_cols[0]:
                     st.markdown(f"### {idx}. {concept}")
-                    if strength > 1:
-                        st.write("You have missed multiple quiz questions tied to this concept.")
-                    else:
-                        st.write("You missed a quiz question tied to this concept.")
                     if item.get("reason"):
                         st.caption(item.get("reason"))
                     if last_seen:

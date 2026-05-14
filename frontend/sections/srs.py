@@ -601,26 +601,7 @@ def render_srs_section(st: Any, stem: str | None = None):
     """
     stem = stem or _infer_stem_from_session(st.session_state)
 
-    st.markdown("---")
     st.markdown('<a id="spaced-repetition-review"></a>', unsafe_allow_html=True)
-    st.subheader("📌 Study mode")
-
-    with st.expander("What is Spaced Repetition?", expanded=False):
-        st.markdown(
-            """
-            **Spaced Repetition** helps you remember information long-term by reviewing it at increasing intervals.
-
-            **How it works (quick):**
-            - Hard: bring the card back sooner
-            - Good: move it forward at a steady pace
-            - Easy: stretch it much further out
-
-            **To get started:**
-            1. Generate a quiz from your PDF above
-            2. Click **Add to SRS** on questions you want to review later
-            3. Come back here to review due cards for this lecture
-            """
-        )
 
     tab_review, tab_browse = st.tabs(["Review (SRS)", "📚 Browse cards"])
 

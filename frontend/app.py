@@ -278,8 +278,6 @@ llm = init_llm()
 _startup_msgs = []
 if llm is None:
     _startup_msgs.append(("warning", "LLM not available — using placeholders"))
-else:
-    _startup_msgs.append(("info", "LLM ready — will generate real MCQs"))
 
 # Check FAISS builder availability (handlers also has this; keep for early error messages)
 try:
@@ -744,11 +742,10 @@ st.markdown(
 st.markdown(
     """
     <div class="app-header">
-      <div class="app-logo">LA</div>
+      <div class="app-logo">LV</div>
       <div>
-        <div class="app-eyebrow">Study workflow</div>
-        <div class="app-title">Learning Assistant</div>
-        <div class="app-subtitle">Turn one lecture into a clean loop: understand it, test yourself, fix weak spots, and review later.</div>
+        <div class="app-title">Lectova</div>
+        <div class="app-subtitle">One lecture. Understand it, test it, remember it.</div>
       </div>
     </div>
     """,
@@ -762,13 +759,6 @@ for lvl, msg in _startup_msgs:
         st.warning(msg)
     else:
         st.info(msg)
-
-st.markdown(
-    """
-**Upload a lecture PDF from the sidebar and jump straight into study tools.**  
-Ask questions, get a summary, chat, quiz yourself, review weak topics, and use spaced repetition — all from one lecture.
-"""
-)
 
 # ----------------------------
 # API mode toggle + token UI (defaults; widgets live in sidebar Advanced)
@@ -786,7 +776,7 @@ if "use_faiss_search" not in st.session_state:
     st.session_state["use_faiss_search"] = False
 
 with st.sidebar:
-    st.markdown("### Learning Assistant")
+    st.markdown("### Lectova")
     st.markdown("##### Upload lecture PDF")
     uploaded = st.file_uploader(
         "Lecture PDF",
@@ -804,6 +794,12 @@ with st.sidebar:
         if sidebar_stem and not sidebar_pdf_name:
             sidebar_pdf_name = f"{sidebar_stem}.pdf"
 
+    # Clear session state if no upload but session has old data
+    if uploaded is None and st.session_state.get("current_stem"):
+        st.session_state["current_stem"] = None
+        st.session_state["current_pdf_filename"] = None
+        st.rerun()
+
     if sidebar_pdf_name:
         st.caption(f"Lecture loaded: **{sidebar_pdf_name}**")
         st.caption("Upload another PDF above anytime to replace it.")
@@ -815,9 +811,9 @@ with st.sidebar:
     st.markdown(
         """
 - [Study](#study-modes)
-- [Quiz](#study-quiz)
+- [Test yourself](#test-yourself)
 - [Weak topics](#weak-topics)
-- [SRS](#srs)
+- [Spaced repetition (SRS)](#srs)
         """,
         unsafe_allow_html=True,
     )
@@ -885,12 +881,11 @@ with st.sidebar:
             help="Optional index for quicker retrieval on large lectures. Ordinary search still works if off.",
         )
 
-st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
-st.markdown("## 1. Setup your lecture")
-st.write(
-    "Upload one lecture PDF from the sidebar, then create embeddings for it. "
-    "Once that is ready, every study tool below works off the same lecture."
-)
+# Show instruction only if no file is uploaded or loaded
+if not uploaded and not st.session_state.get("current_stem"):
+    st.markdown(
+        "Upload a lecture PDF from the sidebar to get started."
+    )
 
 # ----------------------------
 # Upload + controls (unchanged logic)
@@ -906,9 +901,6 @@ if uploaded:
         pages = [p.extract_text() or "" for p in pdf.pages]
     text = "\n\n".join(pages)
 
-    st.subheader("Extracted preview")
-    st.write(text[:1000] + ("..." if len(text) > 1000 else ""))
-
     # derive the stem and paths
     stem = tmp_pdf.stem
     doc_id = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:12]
@@ -917,79 +909,147 @@ if uploaded:
     st.session_state["current_stem"] = stem
     st.session_state["current_pdf_filename"] = uploaded.name
     current_label = stem.replace("_", " ").title()
-    st.markdown(
-        """
-        <div class="la-inline-banner">
-          <strong>Upload lecture</strong>
-          Your lecture is uploaded and processing happens automatically with SAFE embeddings.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.info(f"📄 Current lecture: {current_label}")
 
     # SAFE is the default behavior; keep it as a status, not a user choice.
     os.environ["USE_SAFE_EMBEDDINGS"] = "1"
-    recreate_btn = False
-    build_index_btn = False
-
     use_faiss_search = bool(st.session_state.get("use_faiss_search", False))
-    # Create embeddings when missing or when they are requested
-    if (not embeddings_path.exists()) or recreate_btn:
-        try:
-            with st.spinner("Creating embeddings..."):
-                create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
-        except Exception as e:
-            st.error("Failed to create embeddings.")
-            st.exception(e)
 
-    try:
-        with st.spinner("Extracting lecture concepts..."):
-            lecture_concepts, concepts_created = ensure_concepts_for_lecture(
-                stem=stem,
-                text=text,
-                llm_call=llm,
-                doc_id=doc_id,
-                max_concepts=8,
-            )
-        if concepts_created and lecture_concepts:
-            st.caption(f"Concept map ready: {len(lecture_concepts)} lecture concepts.")
-    except Exception as e:
-        st.warning(f"Lecture concepts could not be extracted yet: {e}")
-
-    # Show a single completion status when setup is ready.
+    # Check if lecture is already ready
+    lecture_is_ready = False
+    ids, texts, vecs = [], [], np.array([])
     try:
         ids, texts, vecs = load_embeddings(str(embeddings_path))
-        if len(ids) > 0:
-            st.success("Lecture is ready to study")
+        lecture_is_ready = len(ids) > 0
     except Exception:
-        ids, texts, vecs = [], [], np.array([])
-        st.warning("Processing not ready yet. Open Advanced reset tools if you need to recreate embeddings.")
+        pass
 
-    # Advanced/reset tools are hidden from the default setup flow.
-    with st.expander("Advanced reset tools"):
-        st.caption("Use these only when troubleshooting or resetting processed data.")
-        adv_col1, adv_col2 = st.columns([1, 1])
-        with adv_col1:
-            recreate_btn = st.button("Recreate embeddings")
-        with adv_col2:
-            build_index_btn = st.button("Build FAISS index")
+    # ========== COLLAPSED UI: Lecture is ready ==========
+    if lecture_is_ready:
+        st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
+        st.markdown(f"<span style='color: var(--muted); font-size: 0.9em;'>✓ Lecture ready: {current_label}</span>", unsafe_allow_html=True)
 
-    # Build FAISS index if requested
-    if build_index_btn:
-        if not embeddings_path.exists():
-            st.error("Cannot build FAISS index — embeddings file missing. Create embeddings first.")
-        elif not _faiss_builder_available:
-            st.error("FAISS builder not available (faiss-cpu not installed). Install: pip install faiss-cpu")
-        else:
+        # Extracted preview accordion (collapsed)
+        with st.expander("Extracted preview", expanded=False):
+            st.write(text[:1000] + ("..." if len(text) > 1000 else ""))
+
+        # Advanced reset tools accordion (collapsed)
+        with st.expander("Advanced reset tools", expanded=False):
+            st.caption("Use these only when troubleshooting or resetting processed data.")
+            recreate_btn = False
+            build_index_btn = False
+            adv_col1, adv_col2 = st.columns([1, 1])
+            with adv_col1:
+                recreate_btn = st.button("Recreate embeddings", key="recreate_ready")
+            with adv_col2:
+                build_index_btn = st.button("Build FAISS index", key="build_index_ready")
+
+            # Build FAISS index if requested
+            if build_index_btn:
+                if not embeddings_path.exists():
+                    st.error("Cannot build FAISS index — embeddings file missing. Create embeddings first.")
+                elif not _faiss_builder_available:
+                    st.error("FAISS builder not available (faiss-cpu not installed). Install: pip install faiss-cpu")
+                else:
+                    try:
+                        with st.spinner("Building FAISS index..."):
+                            build_index(str(embeddings_path), str(index_path))
+                            st.success(f"FAISS index built: {index_path}")
+                    except Exception as e:
+                        st.error("FAISS index build failed.")
+                        st.exception(e)
+
+            # Recreate embeddings if requested
+            if recreate_btn:
+                try:
+                    with st.spinner("Creating embeddings..."):
+                        create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
+                    st.success("Embeddings recreated. Refresh the page.")
+                except Exception as e:
+                    st.error("Failed to recreate embeddings.")
+                    st.exception(e)
+
+    # ========== FULL SETUP UI: Lecture not yet ready ==========
+    else:
+        st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
+        st.markdown("## 1. Setup your lecture")
+        st.write(
+            "Upload one lecture PDF from the sidebar, then create embeddings for it. "
+            "Once that is ready, every study tool below works off the same lecture."
+        )
+
+        st.subheader("Extracted preview")
+        st.write(text[:1000] + ("..." if len(text) > 1000 else ""))
+
+        st.markdown(
+            """
+            <div class="la-inline-banner">
+              <strong>Upload lecture</strong>
+              Your lecture is uploaded and processing happens automatically with SAFE embeddings.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.info(f"📄 Current lecture: {current_label}")
+
+        recreate_btn = False
+        build_index_btn = False
+
+        # Create embeddings when missing or when they are requested
+        if (not embeddings_path.exists()):
             try:
-                with st.spinner("Building FAISS index..."):
-                    build_index(str(embeddings_path), str(index_path))
-                    st.success(f"FAISS index built: {index_path}")
+                with st.spinner("Creating embeddings..."):
+                    create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
             except Exception as e:
-                st.error("FAISS index build failed.")
+                st.error("Failed to create embeddings.")
                 st.exception(e)
+
+        try:
+            with st.spinner("Extracting lecture concepts..."):
+                lecture_concepts, concepts_created = ensure_concepts_for_lecture(
+                    stem=stem,
+                    text=text,
+                    llm_call=llm,
+                    doc_id=doc_id,
+                    max_concepts=8,
+                )
+            if concepts_created and lecture_concepts:
+                st.caption(f"Concept map ready: {len(lecture_concepts)} lecture concepts.")
+        except Exception as e:
+            st.warning(f"Lecture concepts could not be extracted yet: {e}")
+
+        # Show a single completion status when setup is ready.
+        try:
+            ids, texts, vecs = load_embeddings(str(embeddings_path))
+            if len(ids) > 0:
+                st.success("Lecture is ready to study")
+        except Exception:
+            ids, texts, vecs = [], [], np.array([])
+            st.warning("Processing not ready yet. Open Advanced reset tools if you need to recreate embeddings.")
+
+        # Advanced/reset tools are hidden from the default setup flow.
+        with st.expander("Advanced reset tools"):
+            st.caption("Use these only when troubleshooting or resetting processed data.")
+            adv_col1, adv_col2 = st.columns([1, 1])
+            with adv_col1:
+                recreate_btn = st.button("Recreate embeddings", key="recreate_setup")
+            with adv_col2:
+                build_index_btn = st.button("Build FAISS index", key="build_index_setup")
+
+        # Build FAISS index if requested
+        if build_index_btn:
+            if not embeddings_path.exists():
+                st.error("Cannot build FAISS index — embeddings file missing. Create embeddings first.")
+            elif not _faiss_builder_available:
+                st.error("FAISS builder not available (faiss-cpu not installed). Install: pip install faiss-cpu")
+            else:
+                try:
+                    with st.spinner("Building FAISS index..."):
+                        build_index(str(embeddings_path), str(index_path))
+                        st.success(f"FAISS index built: {index_path}")
+                except Exception as e:
+                    st.error("FAISS index build failed.")
+                    st.exception(e)
 
     # ----------------------------
     # 2️⃣ Study modes (UI-only guidance)
@@ -1268,6 +1328,7 @@ if uploaded:
     )
 
     # Step 1: Quiz (unchanged behavior — just a short intro)
+    st.markdown('<a id="test-yourself"></a>', unsafe_allow_html=True)
     st.markdown("### 3.1 Test yourself")
     st.write("Generate a quick set of multiple-choice questions from the lecture and check your understanding.")
     # Render quiz directly (removed outer expander)
@@ -1278,7 +1339,7 @@ if uploaded:
     # Step 2: Weak topics (prioritized list of things you missed)
     st.markdown('<a id="weak-topics"></a>', unsafe_allow_html=True)
     st.markdown("### 3.2 Weak topics")
-    st.write("Concepts you missed show up here, with quick actions for explanation, chat follow-up, and SRS.")
+    st.write("Concepts you missed show up here, with quick actions for explanation and chat follow-up.")
     # Render confused directly (removed outer expander)
     render_confused(
         st=st,
@@ -1289,12 +1350,8 @@ if uploaded:
         llm=llm,
     )
 
-    st.markdown("---")
-
     # Step 3: Spaced Repetition (SRS)
     st.markdown('<a id="srs"></a>', unsafe_allow_html=True)
     st.markdown("### 3.3 Spaced repetition (SRS)")
-    st.write("Review due cards to move knowledge into long-term memory, or switch to Browse to view and manage all saved cards.")
+    st.caption("Review due cards, or browse and manage all saved cards.")
     render_srs_section(st, stem=stem)
-
-    st.markdown("---")
