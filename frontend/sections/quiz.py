@@ -639,18 +639,8 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     Render the Quiz generation + Quiz item UI.
     """
     API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000") if "os" in globals() else "http://localhost:8000"
-
-    st.markdown("---")
+    
     st.markdown('<a id="study-quiz"></a>', unsafe_allow_html=True)
-    st.subheader("📝 Study / Quiz")
-    st.markdown(
-        "Learning is **round-based**: each batch is 1–10 questions with its own summary. "
-        "Only your **current** round is fully open. When you add the next round from the summary, "
-        "earlier rounds move into **collapsed** sections so you can focus on what is new. "
-        "Questions mix **definition**, **application**, **misconception-trap**, and **compare**-style "
-        "angles (same topics, different thinking). "
-        "Select an answer, then **Check answer**. Use **Add to SRS** for cards you want later."
-    )
 
     quiz_state_key = f"quiz_items_{stem}"
     quiz_generation_key = f"{quiz_state_key}_generation"

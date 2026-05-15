@@ -10,10 +10,12 @@ Expose:
     def render_browse(st, stem=None): ...
 """
 
+import html as html_mod
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from backend.study_srs import INTERVALS, SRSManager
 from frontend.handlers import (
@@ -21,6 +23,45 @@ from frontend.handlers import (
     load_quiz_item_by_id_wrapper,
     load_persisted_confusions,
 )
+
+
+def _srs_empty_state(st_module: Any, message: str, icon: str = "📚") -> None:
+    """Centered empty state for SRS when no cards exist yet."""
+    st_module.markdown(
+        f"""
+        <div class="la-srs-empty">
+          <div class="la-srs-empty-icon">{icon}</div>
+          <p><strong>{html_mod.escape(message)}</strong></p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _tag_srs_tabs() -> None:
+    """Apply pill-tab styling class to the SRS tab bar."""
+    components.html(
+        """
+        <script>
+        (function () {
+          const doc = parent.document;
+          const marker = doc.querySelector(".la-srs-tabs-marker");
+          if (!marker) return;
+          const block = marker.closest('[data-testid="stVerticalBlock"]');
+          let cursor = block;
+          for (let i = 0; i < 6 && cursor; i += 1) {
+            cursor = cursor.nextElementSibling;
+            const tabs = cursor && cursor.querySelector('[data-testid="stTabs"]');
+            if (tabs) {
+              tabs.classList.add("la-srs-tabs-root");
+              break;
+            }
+          }
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _shorten(text: str, limit: int = 80) -> str:
@@ -602,8 +643,11 @@ def render_srs_section(st: Any, stem: str | None = None):
     stem = stem or _infer_stem_from_session(st.session_state)
 
     st.markdown('<a id="spaced-repetition-review"></a>', unsafe_allow_html=True)
+    st.markdown('<hr class="la-srs-header-rule" />', unsafe_allow_html=True)
+    st.markdown('<div class="la-srs-tabs-marker"></div>', unsafe_allow_html=True)
 
     tab_review, tab_browse = st.tabs(["Review (SRS)", "📚 Browse cards"])
+    _tag_srs_tabs()
 
     with tab_review:
         _render_review_tab(st, stem)
@@ -860,7 +904,7 @@ def _render_browse_tab(st_module: Any, stem: str | None):
         lecture_cards = _get_lecture_card_ids(srs_mgr, stem)
 
         if not lecture_cards:
-            st_module.info("No SRS cards found for this lecture yet.")
+            _srs_empty_state(st_module, "No SRS cards found for this lecture yet.")
             return
 
         all_quiz_items = _load_quiz_items_for_cards(st_module, quiz_state_key, lecture_cards)

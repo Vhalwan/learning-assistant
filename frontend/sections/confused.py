@@ -8,6 +8,7 @@ Expose a single function:
 This module mirrors the UI and behavior originally in app.py without changes.
 """
 
+import html as html_mod
 import os
 import re
 from datetime import datetime
@@ -182,24 +183,26 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     else:
         preview_limit = min(len(real_confusions), 5)
         for idx, item in enumerate(real_confusions[:preview_limit], start=1):
-            with st.container():
-                st.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown('<div class="la-concept-card-start"></div>', unsafe_allow_html=True)
                 concept = item.get("title") or item.get("concept") or item.get("concept_label") or "Unlabeled concept"
                 strength = int(item.get("signal_strength", 0))
                 total_attempts = int(item.get("total_attempts", 0) or 0)
                 error_rate = float(item.get("error_rate", 0.0) or 0.0)
                 last_seen = _format_timestamp(item.get("last_seen", ""))
-                header_cols = st.columns([3.0, 1.0, 1.0])
+                header_cols = st.columns([2.4, 1, 1])
                 with header_cols[0]:
-                    st.markdown(f"### {idx}. {concept}")
-                    if item.get("reason"):
-                        st.caption(item.get("reason"))
+                    st.markdown(
+                        f'<p class="la-concept-title">{idx}. {html_mod.escape(concept)}</p>',
+                        unsafe_allow_html=True,
+                    )
                     if last_seen:
                         st.caption(f"Last seen: {last_seen}")
                 with header_cols[1]:
                     st.metric("Error rate", f"{error_rate:.0%}")
                 with header_cols[2]:
                     st.metric("Attempts", total_attempts)
+                st.markdown('<hr class="la-concept-divider" />', unsafe_allow_html=True)
                 evidence = item.get("evidence", []) or []
                 evidence_quiz_rows = []
                 item_type = (item.get("item_type") or ("mcq" if item.get("is_mcq") else "concept")).strip().lower()
@@ -326,58 +329,142 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 selected_qid = selected_mcq.get("id")
                 selected_question = selected_mcq.get("question") or ""
 
-                with st.container():
-                    st.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
-                    st.markdown("**Next step**")
-                    primary_action_cols = st.columns(2)
-                    secondary_action_cols = st.columns(2)
-                    with primary_action_cols[0]:
-                        # Explain simply (kept — student-first)
-                        explain_btn_key = f"conf_explain_{stem}_{idx}"
-                        if st.button("Explain simply", key=explain_btn_key, type="primary", use_container_width=True):
-                            try:
-                                candidate_index_path = str(index_path) if index_path and Path(index_path).exists() else None
-                                compact_evidence = []
-                                for row in evidence_quiz_rows[:2]:
-                                    compact_evidence.append(f"- [{row['qid']}] {_shorten(row['question'], 120)}")
-                                explain_q = (
-                                    "You are tutoring a learner on a confusion point. "
-                                    "Explain simply and provide one short concrete example.\n\n"
-                                    f"Confused concept: {extracted_concept}\n"
-                                    "Compact evidence snippets:\n"
-                                    f"{chr(10).join(compact_evidence) if compact_evidence else '- None available'}"
-                                )
-                                resp = perform_query(
-                                    question=explain_q,
-                                    embeddings_path=str(embeddings_path),
-                                    top_k=3,
-                                    use_faiss=bool(use_faiss_search),
-                                    faiss_index_path=candidate_index_path,
-                                    use_api_mode=st.session_state.get("use_api_mode", False),
-                                    api_base=os.getenv("API_BASE", API_DEFAULT),
-                                    token=st.session_state.get("api_token", "") or "",
-                                    llm_call=llm,
-                                )
-                                st.markdown("**Explanation**")
-                                st.write(resp.get("answer", "(no answer returned)"))
-                                if resp.get("retrieved"):
-                                    with st.expander("Show retrieved chunks used for this explanation"):
-                                        for rc in resp.get("retrieved", []):
-                                            st.write(rc.get("text", "")[:1000] + ("..." if len(rc.get("text", "")) > 1000 else ""))
-                            except Exception as e:
-                                st.error("Failed to generate explanation.")
-                                st.exception(e)
-
-                    with primary_action_cols[1]:
-                        follow_key = f"conf_follow_{stem}_{idx}"
-                        if st.button("Ask follow-up in Chat", key=follow_key, use_container_width=True):
-                            follow_prompt = (
-                                f"Concept: {extracted_concept}\n"
-                                "The user struggled with this concept in recent quizzes. Explain it clearly, give simple examples, and highlight key points that might cause confusion."
+                st.markdown('<div class="la-concept-footer-marker"></div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="la-concept-actions"><p class="la-concept-next-step">Next step</p></div>',
+                    unsafe_allow_html=True,
+                )
+                primary_action_cols = st.columns(2)
+                secondary_action_cols = st.columns(2)
+                with primary_action_cols[0]:
+                    # Explain simply (kept — student-first)
+                    explain_btn_key = f"conf_explain_{stem}_{idx}"
+                    if st.button("Explain simply", key=explain_btn_key, type="primary", use_container_width=True):
+                        try:
+                            candidate_index_path = str(index_path) if index_path and Path(index_path).exists() else None
+                            compact_evidence = []
+                            for row in evidence_quiz_rows[:2]:
+                                compact_evidence.append(f"- [{row['qid']}] {_shorten(row['question'], 120)}")
+                            explain_q = (
+                                "You are tutoring a learner on a confusion point. "
+                                "Explain simply and provide one short concrete example.\n\n"
+                                f"Confused concept: {extracted_concept}\n"
+                                "Compact evidence snippets:\n"
+                                f"{chr(10).join(compact_evidence) if compact_evidence else '- None available'}"
                             )
-                            st.session_state[f"chat_pending_input_{stem}"] = follow_prompt
-                            st.session_state[f"open_chat_tab_{stem}"] = True
-                            st.session_state[f"chat_focus_input_{stem}"] = True
+                            resp = perform_query(
+                                question=explain_q,
+                                embeddings_path=str(embeddings_path),
+                                top_k=3,
+                                use_faiss=bool(use_faiss_search),
+                                faiss_index_path=candidate_index_path,
+                                use_api_mode=st.session_state.get("use_api_mode", False),
+                                api_base=os.getenv("API_BASE", API_DEFAULT),
+                                token=st.session_state.get("api_token", "") or "",
+                                llm_call=llm,
+                            )
+                            st.markdown("**Explanation**")
+                            st.write(resp.get("answer", "(no answer returned)"))
+                            if resp.get("retrieved"):
+                                with st.expander("Show retrieved chunks used for this explanation"):
+                                    for rc in resp.get("retrieved", []):
+                                        st.write(rc.get("text", "")[:1000] + ("..." if len(rc.get("text", "")) > 1000 else ""))
+                        except Exception as e:
+                            st.error("Failed to generate explanation.")
+                            st.exception(e)
+
+                with primary_action_cols[1]:
+                    follow_key = f"conf_follow_{stem}_{idx}"
+                    if st.button("Ask follow-up in Chat", key=follow_key, use_container_width=True):
+                        follow_prompt = (
+                            f"Concept: {extracted_concept}\n"
+                            "The user struggled with this concept in recent quizzes. Explain it clearly, give simple examples, and highlight key points that might cause confusion."
+                        )
+                        st.session_state[f"chat_pending_input_{stem}"] = follow_prompt
+                        st.session_state[f"open_chat_tab_{stem}"] = True
+                        st.session_state[f"chat_focus_input_{stem}"] = True
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+                with secondary_action_cols[0]:
+                    # ➕ Add to SRS (idempotent)
+                    add_srs_key = f"conf_add_srs_{stem}_{idx}"
+                    if st.button("Add to SRS", key=add_srs_key, use_container_width=True):
+                        try:
+                            mgr = SRSManager()
+                            # Use selected original MCQ (if available) as primary source
+                            card_id = selected_qid or deterministic_fallback_id
+                            question_text = selected_question or extracted_concept
+
+                            # fallback deterministic id derived from concept+stem
+                            if not card_id:
+                                # make a safe short token from the concept
+                                safe = re.sub(r"[^a-zA-Z0-9_]+", "_", concept).strip("_")[:40] or "conf"
+                                card_id = f"{stem}_{safe}"
+
+                                question_text = question_text or concept
+
+                            topic_heading = (
+                                (item.get("title") or item.get("concept") or item.get("concept_label") or concept or "")
+                                .strip()
+                            )
+                            if is_mcq_item:
+                                mcq_payload = _build_mcq_from_item(item, selected_mcq)
+                                card_id = card_id or mcq_payload.get("id") or deterministic_fallback_id
+                                question_text = mcq_payload.get("question") or question_text
+                                card_meta = {
+                                    "item_type": "mcq",
+                                    "origin": "confused_mcq",
+                                    "quiz_question_id": mcq_payload.get("id") or "",
+                                    "question": question_text or "",
+                                    "choices": mcq_payload.get("choices") or {},
+                                    "answer": mcq_payload.get("answer") or "",
+                                    "explanation": mcq_payload.get("explanation") or "",
+                                    "stem": stem,
+                                    "source_reason": "Added from Confused review",
+                                    "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
+                                    "concept_id": (item.get("concept_id") or "").strip(),
+                                    "concept": topic_heading or extracted_concept,
+                                    "title": topic_heading or extracted_concept,
+                                }
+                            else:
+                                card_meta = {
+                                    "item_type": "concept",
+                                    "origin": "confused_concept",
+                                    "question": question_text or "",
+                                    "stem": stem,
+                                    "source_reason": "Added from Confused review",
+                                    "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
+                                    "concept_id": (item.get("concept_id") or "").strip(),
+                                    "concept": topic_heading or extracted_concept,
+                                    "title": topic_heading or extracted_concept,
+                                }
+                            mgr.ensure_card(card_id, meta=card_meta)
+                            if "srs_quiz_items_cache" not in st.session_state:
+                                st.session_state["srs_quiz_items_cache"] = {}
+                            if is_mcq_item:
+                                st.session_state["srs_quiz_items_cache"][card_id] = {
+                                    "id": card_id,
+                                    "question": card_meta.get("question", ""),
+                                    "choices": card_meta.get("choices", {}) or {},
+                                    "answer": card_meta.get("answer", ""),
+                                    "explanation": card_meta.get("explanation", ""),
+                                    "item_type": "mcq",
+                                }
+                            else:
+                                st.session_state["srs_quiz_items_cache"][card_id] = {
+                                    "id": card_id,
+                                    "question": card_meta.get("question", ""),
+                                    "choices": {},
+                                    "answer": "",
+                                    "explanation": "",
+                                    "item_type": "concept",
+                                }
+                            st.success(f"Added to SRS: {card_id}")
                             try:
                                 st.rerun()
                             except Exception:
@@ -385,106 +472,24 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                     st.experimental_rerun()
                                 except Exception:
                                     pass
-                    with secondary_action_cols[0]:
-                        # ➕ Add to SRS (idempotent)
-                        add_srs_key = f"conf_add_srs_{stem}_{idx}"
-                        if st.button("Add to SRS", key=add_srs_key, use_container_width=True):
+                        except Exception as e:
+                            st.error("Failed to add to SRS.")
+                            st.exception(e)
+                with secondary_action_cols[1]:
+                    delete_key = f"conf_delete_{stem}_{idx}"
+                    if st.button("Reset", key=delete_key, use_container_width=True):
+                        if not delete_keys:
+                            st.warning("No persisted entries found to delete.")
+                        else:
+                            removed = delete_confusion_entries(delete_keys)
+                            st.success(f"Reset {removed} confusion card(s).")
                             try:
-                                mgr = SRSManager()
-                                # Use selected original MCQ (if available) as primary source
-                                card_id = selected_qid or deterministic_fallback_id
-                                question_text = selected_question or extracted_concept
-
-                                # fallback deterministic id derived from concept+stem
-                                if not card_id:
-                                    # make a safe short token from the concept
-                                    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", concept).strip("_")[:40] or "conf"
-                                    card_id = f"{stem}_{safe}"
-
-                                    question_text = question_text or concept
-
-                                topic_heading = (
-                                    (item.get("title") or item.get("concept") or item.get("concept_label") or concept or "")
-                                    .strip()
-                                )
-                                if is_mcq_item:
-                                    mcq_payload = _build_mcq_from_item(item, selected_mcq)
-                                    card_id = card_id or mcq_payload.get("id") or deterministic_fallback_id
-                                    question_text = mcq_payload.get("question") or question_text
-                                    card_meta = {
-                                        "item_type": "mcq",
-                                        "origin": "confused_mcq",
-                                        "quiz_question_id": mcq_payload.get("id") or "",
-                                        "question": question_text or "",
-                                        "choices": mcq_payload.get("choices") or {},
-                                        "answer": mcq_payload.get("answer") or "",
-                                        "explanation": mcq_payload.get("explanation") or "",
-                                        "stem": stem,
-                                        "source_reason": "Added from Confused review",
-                                        "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
-                                        "concept_id": (item.get("concept_id") or "").strip(),
-                                        "concept": topic_heading or extracted_concept,
-                                        "title": topic_heading or extracted_concept,
-                                    }
-                                else:
-                                    card_meta = {
-                                        "item_type": "concept",
-                                        "origin": "confused_concept",
-                                        "question": question_text or "",
-                                        "stem": stem,
-                                        "source_reason": "Added from Confused review",
-                                        "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
-                                        "concept_id": (item.get("concept_id") or "").strip(),
-                                        "concept": topic_heading or extracted_concept,
-                                        "title": topic_heading or extracted_concept,
-                                    }
-                                mgr.ensure_card(card_id, meta=card_meta)
-                                if "srs_quiz_items_cache" not in st.session_state:
-                                    st.session_state["srs_quiz_items_cache"] = {}
-                                if is_mcq_item:
-                                    st.session_state["srs_quiz_items_cache"][card_id] = {
-                                        "id": card_id,
-                                        "question": card_meta.get("question", ""),
-                                        "choices": card_meta.get("choices", {}) or {},
-                                        "answer": card_meta.get("answer", ""),
-                                        "explanation": card_meta.get("explanation", ""),
-                                        "item_type": "mcq",
-                                    }
-                                else:
-                                    st.session_state["srs_quiz_items_cache"][card_id] = {
-                                        "id": card_id,
-                                        "question": card_meta.get("question", ""),
-                                        "choices": {},
-                                        "answer": "",
-                                        "explanation": "",
-                                        "item_type": "concept",
-                                    }
-                                st.success(f"Added to SRS: {card_id}")
+                                st.rerun()
+                            except Exception:
                                 try:
-                                    st.rerun()
+                                    st.experimental_rerun()
                                 except Exception:
-                                    try:
-                                        st.experimental_rerun()
-                                    except Exception:
-                                        pass
-                            except Exception as e:
-                                st.error("Failed to add to SRS.")
-                                st.exception(e)
-                    with secondary_action_cols[1]:
-                        delete_key = f"conf_delete_{stem}_{idx}"
-                        if st.button("Reset", key=delete_key, use_container_width=True):
-                            if not delete_keys:
-                                st.warning("No persisted entries found to delete.")
-                            else:
-                                removed = delete_confusion_entries(delete_keys)
-                                st.success(f"Reset {removed} confusion card(s).")
-                                try:
-                                    st.rerun()
-                                except Exception:
-                                    try:
-                                        st.experimental_rerun()
-                                    except Exception:
-                                        pass
+                                    pass
         if notice_rendered:
             st.session_state.pop(followup_notice_key, None)
     st.markdown("---")

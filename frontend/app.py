@@ -79,6 +79,243 @@ from backend.confusion_store import get_top_confusions
 from backend.quiz_session_log import recent_sessions
 
 
+# ---------------------------------------------------------------------------
+# Section divider helper — renders a bold visual banner between major sections
+# so users always know where they are on the page.
+# ---------------------------------------------------------------------------
+def _section_divider(
+    label: str,
+    icon: str = "",
+    subtitle: str = "",
+    *,
+    show_break: bool = True,
+    section_id: str = "",
+) -> None:
+    break_html = (
+        '<hr class="la-major-section-break" aria-hidden="true" />' if show_break else ""
+    )
+    subtitle_html = (
+        f'<div class="la-major-header-sub">{html_mod.escape(subtitle)}</div>'
+        if subtitle
+        else ""
+    )
+    icon_html = (
+        f'<span class="la-major-header-icon" aria-hidden="true">{icon}</span>'
+        if icon
+        else ""
+    )
+    id_attr = f' id="{html_mod.escape(section_id)}"' if section_id else ""
+    st.markdown(
+        f"""
+        {break_html}
+        <div class="la-major-header" data-la-nav-target="true"{id_attr}>
+            <div class="la-major-header-inner">
+                {icon_html}
+                <div class="la-major-header-text">
+                    <div class="la-major-header-title">{html_mod.escape(label)}</div>
+                    {subtitle_html}
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _subsection_divider(
+    label: str, icon: str = "", subtitle: str = "", *, section_id: str = ""
+) -> None:
+    """Lighter divider for sub-sections within a major section (e.g. Quiz, Weak topics, SRS)."""
+    subtitle_html = (
+        f'<p class="la-subsection-sub">{html_mod.escape(subtitle)}</p>'
+        if subtitle
+        else ""
+    )
+    icon_html = (
+        f'<span class="la-subsection-bullet" aria-hidden="true">{icon}</span>'
+        if icon
+        else '<span class="la-subsection-bullet la-subsection-bullet-dot" aria-hidden="true">•</span>'
+    )
+    id_attr = f' id="{html_mod.escape(section_id)}"' if section_id else ""
+    st.markdown(
+        f"""
+        <div class="la-subsection-header" data-la-nav-target="true"{id_attr}>
+            {icon_html}
+            <div>
+                <div class="la-subsection-title">{html_mod.escape(label)}</div>
+                {subtitle_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _inject_page_ui_enhancements() -> None:
+    """Tag Study/SRS tabs, fix tab underline color, and highlight sidebar nav on scroll."""
+    components.html(
+        """
+        <script>
+        (function () {
+          const doc = parent.document;
+          if (!doc) return;
+
+          const styleStudyHighlight = (tabsRoot) => {
+            const highlight = tabsRoot.querySelector('[data-baseweb="tab-highlight"]');
+            if (highlight) {
+              highlight.style.setProperty("background-color", "#0f766e", "important");
+              highlight.style.setProperty("height", "3px", "important");
+              highlight.style.setProperty("border-radius", "2px", "important");
+            }
+          };
+
+          const tagTabsByLabels = (tabsRoot, labels, className, styleHighlight) => {
+            const buttons = Array.from(
+              tabsRoot.querySelectorAll('button[data-baseweb="tab"]')
+            );
+            const texts = buttons.map((b) => (b.innerText || "").trim());
+            const matches = labels.every((l) => texts.includes(l));
+            if (!matches) return false;
+            tabsRoot.classList.add(className);
+            if (styleHighlight) styleStudyHighlight(tabsRoot);
+            return true;
+          };
+
+          const enhanceTabs = () => {
+            const allTabs = Array.from(doc.querySelectorAll('[data-testid="stTabs"]'));
+            for (const tabsRoot of allTabs) {
+              if (
+                tagTabsByLabels(
+                  tabsRoot,
+                  ["Ask", "Summary", "Chat"],
+                  "la-study-tabs-root",
+                  true
+                )
+              ) continue;
+              tagTabsByLabels(
+                tabsRoot,
+                ["Review (SRS)", "📚 Browse cards"],
+                "la-srs-tabs-root",
+                false
+              );
+            }
+          };
+
+          const enhanceNav = () => {
+            const nav = doc.querySelector(".la-sidebar-nav");
+            if (!nav) return;
+
+            const links = Array.from(nav.querySelectorAll("a[href^='#']"));
+            if (!links.length) return;
+
+            const sections = links
+              .map((link) => {
+                const id = (link.getAttribute("href") || "").slice(1);
+                let el =
+                  doc.getElementById(id) ||
+                  doc.querySelector('[data-la-nav-target][id="' + id + '"]');
+                if (!el) return null;
+                return { id, el, link };
+              })
+              .filter(Boolean);
+
+            if (!sections.length) return;
+
+            const setActive = (id) => {
+              links.forEach((link) => {
+                const active = (link.getAttribute("href") || "") === "#" + id;
+                link.classList.toggle("active", active);
+                if (active) {
+                  link.setAttribute("aria-current", "location");
+                } else {
+                  link.removeAttribute("aria-current");
+                }
+              });
+            };
+
+            const pickActive = () => {
+              const offset = 140;
+              let current = sections[0].id;
+              let bestTop = -Infinity;
+              for (const { id, el } of sections) {
+                const top = el.getBoundingClientRect().top;
+                if (top - offset <= 0 && top > bestTop) {
+                  bestTop = top;
+                  current = id;
+                }
+              }
+              setActive(current);
+            };
+
+            if (nav.__laSpyBound) {
+              pickActive();
+              return;
+            }
+            nav.__laSpyBound = true;
+
+            pickActive();
+            const scrollRoots = [
+              doc.querySelector("section.main"),
+              doc.querySelector('[data-testid="stAppViewContainer"]'),
+              doc.documentElement,
+              parent,
+            ].filter(Boolean);
+
+            scrollRoots.forEach((root) => {
+              root.addEventListener("scroll", pickActive, { passive: true });
+            });
+            parent.addEventListener("scroll", pickActive, { passive: true });
+            window.addEventListener("resize", pickActive, { passive: true });
+          };
+
+          const enhanceStudyInput = () => {
+            doc.querySelectorAll(".la-study-question-marker").forEach((marker) => {
+              const block = marker.closest('[data-testid="stVerticalBlock"]');
+              const input = block && block.querySelector('[data-testid="stTextInput"] input');
+              if (!input) return;
+              input.style.setProperty("border", "1px solid #b8c9c8", "important");
+              input.style.setProperty("background", "#ffffff", "important");
+            });
+          };
+
+          const enhanceConceptCards = () => {
+            doc.querySelectorAll(".la-concept-card-start").forEach((marker) => {
+              const wrapper = marker.closest(
+                '[data-testid="stVerticalBlockBorderWrapper"]'
+              );
+              if (!wrapper) return;
+              wrapper.style.setProperty("border", "1px solid #cfdede", "important");
+              wrapper.style.setProperty("border-left", "4px solid #0f766e", "important");
+              wrapper.style.setProperty("border-radius", "8px", "important");
+              wrapper.style.setProperty("margin-bottom", "1.5rem", "important");
+              wrapper.style.setProperty("background", "#ffffff", "important");
+            });
+          };
+
+          const run = () => {
+            enhanceTabs();
+            enhanceNav();
+            enhanceStudyInput();
+            enhanceConceptCards();
+          };
+
+          run();
+          if (!doc.__laUiObserver) {
+            doc.__laUiObserver = new MutationObserver(() => run());
+            doc.__laUiObserver.observe(doc.body, {
+              childList: true,
+              subtree: true,
+            });
+          }
+          setTimeout(run, 250);
+          setTimeout(run, 800);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _sidebar_lecture_feedback(stem: str) -> Dict[str, Any]:
     """Aggregate sidebar-ready lecture feedback from confusion history."""
     empty = {
@@ -432,6 +669,182 @@ st.markdown(
         display: none;
       }
 
+      /* Major section spacing + headers */
+      hr.la-major-section-break {
+        border: none;
+        border-top: 1px solid #c5d8d6;
+        margin: 3rem 0 0;
+        width: 100%;
+      }
+      .la-major-header {
+        margin: 1.25rem 0 1.35rem;
+        padding: 1rem 1.35rem 1rem 1.15rem;
+        border-radius: 16px;
+        background: linear-gradient(135deg, rgba(15,118,110,0.09) 0%, rgba(245,158,11,0.06) 100%);
+        border: 1px solid #d5e8e6;
+        border-left: 5px solid var(--accent);
+        box-shadow: 0 4px 16px rgba(15,118,110,0.07);
+      }
+      .la-major-header-inner {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.65rem;
+      }
+      .la-major-header-icon {
+        font-size: 1.4rem;
+        line-height: 1.2;
+        margin-top: 0.05rem;
+      }
+      .la-major-header-title {
+        font-size: 1.35rem;
+        font-weight: 800;
+        color: var(--accent);
+        letter-spacing: -0.01em;
+        line-height: 1.25;
+      }
+      .la-major-header-sub {
+        margin-top: 0.3rem;
+        font-size: 0.92rem;
+        font-weight: 400;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .la-subsection-header {
+        margin: 2rem 0 0.85rem;
+        padding: 0.7rem 1rem;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.82);
+        border: 1px solid #d5e8e6;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.55rem;
+      }
+      .la-subsection-bullet {
+        font-size: 1.1rem;
+        line-height: 1.3;
+        margin-top: 0.05rem;
+        flex-shrink: 0;
+      }
+      .la-subsection-bullet-dot {
+        color: var(--accent);
+        font-weight: 800;
+      }
+      .la-subsection-title {
+        font-size: 1.12rem;
+        font-weight: 800;
+        color: var(--text);
+        line-height: 1.3;
+      }
+      .la-subsection-sub {
+        margin: 0.28rem 0 0;
+        font-size: 0.9rem;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+
+      /* Zone backgrounds (marker blocks) */
+      div.la-zone-marker { display: none; }
+      div[data-testid="stVerticalBlock"]:has(> div.la-zone-study) {
+        background: #f2f9f8;
+        border: 1px solid #d9ebe9;
+        border-radius: 18px;
+        padding: 0.35rem 0.85rem 0.15rem;
+        margin-bottom: 0.25rem;
+      }
+      div[data-testid="stVerticalBlock"]:has(> div.la-zone-learning) {
+        background: #eef6f5;
+        border: 1px solid #cfe3df;
+        border-radius: 18px;
+        padding: 0.35rem 0.85rem 0.5rem;
+        margin-bottom: 0.25rem;
+      }
+
+      hr.la-learn-flow-break {
+        border: none;
+        border-top: 1px solid #c5d8d6;
+        margin: 1.35rem 0 0.25rem;
+      }
+
+      /* Study tabs — underline style (class applied via la-study-tabs-marker script) */
+      div.la-study-tabs-marker { display: none; }
+      div[data-testid="stTabs"].la-study-tabs-root [data-baseweb="tab-list"] {
+        gap: 0.35rem;
+        border-bottom: 1px solid #d2dfdf;
+      }
+      div[data-testid="stTabs"].la-study-tabs-root button[data-baseweb="tab"] {
+        border-radius: 10px 10px 0 0;
+        padding: 0.6rem 1.1rem;
+        background: transparent !important;
+        font-weight: 700;
+        font-size: 0.98rem;
+        color: var(--muted);
+        border-bottom: 3px solid transparent;
+        margin-bottom: -1px;
+      }
+      div[data-testid="stTabs"].la-study-tabs-root button[aria-selected="true"] {
+        background: transparent !important;
+        color: var(--accent-strong);
+        border-bottom-color: var(--accent);
+        font-weight: 800;
+      }
+      div[data-testid="stTabs"].la-study-tabs-root [data-baseweb="tab-highlight"] {
+        background-color: #0f766e !important;
+        height: 3px !important;
+        border-radius: 2px !important;
+      }
+
+      /* SRS tabs — pill / toggle style */
+      div.la-srs-tabs-marker { display: none; }
+      div[data-testid="stTabs"].la-srs-tabs-root [data-baseweb="tab-list"] {
+        gap: 0.45rem;
+        background: #e8f2f1;
+        border: 1px solid #cfe3df;
+        border-radius: 999px;
+        padding: 0.28rem;
+        width: fit-content;
+        max-width: 100%;
+      }
+      div[data-testid="stTabs"].la-srs-tabs-root button[data-baseweb="tab"] {
+        border-radius: 999px;
+        padding: 0.5rem 1.05rem;
+        background: transparent !important;
+        font-weight: 600;
+        font-size: 0.92rem;
+        color: var(--muted);
+        border: 1px solid transparent;
+      }
+      div[data-testid="stTabs"].la-srs-tabs-root button[aria-selected="true"] {
+        background: #ffffff !important;
+        color: var(--accent-strong);
+        border-color: #b8d9d5;
+        box-shadow: 0 4px 12px rgba(15, 118, 110, 0.12);
+        font-weight: 700;
+      }
+      div[data-testid="stTabs"].la-srs-tabs-root [data-baseweb="tab-highlight"] {
+        display: none !important;
+      }
+
+      hr.la-srs-header-rule {
+        border: none;
+        border-top: 1px solid #d5e8e6;
+        margin: 0.85rem 0 1rem;
+      }
+
+      /* Study question input — visible border */
+      div.la-study-question-marker { display: none; }
+      section.main div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] input,
+      section.main div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] > div > div {
+        border: 1px solid #b8c9c8 !important;
+        background: #ffffff !important;
+        box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.04) !important;
+      }
+      section.main div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] input:focus {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.2) !important;
+      }
+
+      /* Default tabs (fallback) */
       div[data-testid="stTabs"] button[data-baseweb="tab"] {
         border-radius: 999px;
         padding: 0.55rem 1rem;
@@ -581,13 +994,13 @@ st.markdown(
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 1.85rem;
-        height: 1.85rem;
+        width: 2.05rem;
+        height: 2.05rem;
         border-radius: 999px;
         background: var(--accent-soft);
         color: var(--accent-strong);
-        font-weight: 700;
-        font-size: 0.9rem;
+        font-weight: 800;
+        font-size: 1rem;
       }
       .la-flow-t {
         font-weight: 700;
@@ -600,11 +1013,51 @@ st.markdown(
       }
       .la-flow-arrow {
         align-self: center;
-        font-size: 1.25rem;
-        color: var(--accent);
-        font-weight: 600;
+        font-size: 1.55rem;
+        color: var(--accent-strong);
+        font-weight: 800;
         user-select: none;
-        padding: 0 0.15rem;
+        padding: 0 0.2rem;
+        text-shadow: 0 1px 0 rgba(255, 255, 255, 0.8);
+      }
+      [data-la-nav-target] {
+        scroll-margin-top: 5.5rem;
+      }
+      section[data-testid="stSidebar"] .la-sidebar-nav {
+        margin: 0.2rem 0 0;
+      }
+      section[data-testid="stSidebar"] .la-sidebar-nav ul {
+        list-style: disc;
+        padding-left: 1.35rem;
+        margin: 0.15rem 0 0;
+      }
+      section[data-testid="stSidebar"] .la-sidebar-nav li {
+        margin: 0.35rem 0;
+        line-height: 1.4;
+      }
+      section[data-testid="stSidebar"] .la-sidebar-nav a {
+        display: inline-block;
+        font-size: 1.02rem;
+        color: #0f2a33;
+        text-decoration: none;
+        font-weight: 600;
+        padding: 0.12rem 0.4rem;
+        border-radius: 6px;
+        transition: color 0.15s ease, background 0.15s ease;
+      }
+      section[data-testid="stSidebar"] .la-sidebar-nav a:hover {
+        color: var(--accent-strong);
+        background: rgba(15, 118, 110, 0.08);
+      }
+      section[data-testid="stSidebar"] .la-sidebar-nav a.active {
+        color: #0f766e !important;
+        font-weight: 800 !important;
+        background: rgba(15, 118, 110, 0.16) !important;
+      }
+      hr.la-sidebar-nav-divider {
+        border: none;
+        border-top: 1px solid #d5e8e6;
+        margin: 1rem 0 0.85rem;
       }
       .la-sidebar-card {
         margin: 0.65rem 0;
@@ -613,6 +1066,11 @@ st.markdown(
         background: rgba(255, 255, 255, 0.94);
         border: 1px solid #d5e8e6;
         box-shadow: 0 10px 24px rgba(15, 118, 110, 0.08);
+      }
+      .la-sidebar-card.la-sidebar-progress {
+        background: linear-gradient(180deg, #e8f5f3 0%, #f4faf9 100%);
+        border-color: #b8d9d5;
+        box-shadow: 0 12px 26px rgba(15, 118, 110, 0.1);
       }
       .la-sidebar-kicker {
         margin-bottom: 0.45rem;
@@ -725,6 +1183,79 @@ st.markdown(
         z-index: 10;
         backdrop-filter: blur(10px);
       }
+      
+      /* Weak-topic concept cards */
+      div.la-concept-card-start,
+      div.la-concept-footer-marker { display: none; }
+      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) {
+        border: 1px solid #cfdede !important;
+        border-left: 4px solid var(--accent) !important;
+        border-radius: 8px !important;
+        margin-bottom: 1.5rem !important;
+        padding: 0.85rem 1rem 0.65rem !important;
+        background: #ffffff !important;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05) !important;
+      }
+      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) [data-testid="stMetric"] {
+        background: #f0f9f8;
+        border: 1px solid #d5ebe8;
+        padding: 0.4rem 0.55rem;
+        border-radius: 10px;
+        margin-bottom: 0;
+        min-height: 0;
+      }
+      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) [data-testid="stMetric"] label {
+        font-size: 0.78rem;
+      }
+      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        font-size: 1.05rem;
+      }
+      .la-concept-title {
+        font-size: 1.1rem;
+        font-weight: 800;
+        color: var(--text);
+        margin: 0 0 0.2rem;
+        line-height: 1.35;
+      }
+      hr.la-concept-divider {
+        border: none;
+        border-top: 1px solid #e2eceb;
+        margin: 0.35rem 0 0.65rem;
+      }
+      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) .la-concept-actions {
+        background: #f4f7f7;
+        border-top: 1px solid #e2eceb;
+        border-radius: 0 0 6px 6px;
+        margin: 0.65rem -1rem -0.65rem;
+        padding: 0.75rem 1rem 0.85rem;
+      }
+      .la-concept-next-step {
+        font-weight: 800;
+        color: var(--accent);
+        margin: 0 0 0.55rem;
+        font-size: 0.92rem;
+      }
+      .la-srs-empty {
+        text-align: center;
+        padding: 2rem 1.35rem;
+        border-radius: 16px;
+        background: linear-gradient(180deg, #eef8f6 0%, #e3f2f0 100%);
+        border: 2px solid #8fc4bc;
+        color: var(--muted);
+        margin: 0.75rem 0 1.25rem;
+        line-height: 1.5;
+        box-shadow: 0 8px 22px rgba(15, 118, 110, 0.1);
+      }
+      .la-srs-empty-icon {
+        font-size: 2.6rem;
+        margin-bottom: 0.65rem;
+        line-height: 1;
+        filter: saturate(1.1);
+      }
+      .la-srs-empty strong {
+        color: var(--text);
+      }
+
       .chat-fade-top {
         height: 12px;
         background: linear-gradient(to bottom, rgba(255,255,255,0.95), rgba(255,255,255,0));
@@ -807,13 +1338,17 @@ with st.sidebar:
         st.caption("No lecture uploaded")
 
     st.markdown("---")
-    st.markdown("##### Study tools")
+    st.markdown("##### Jump to section")
     st.markdown(
         """
-- [Study](#study-modes)
-- [Test yourself](#test-yourself)
-- [Weak topics](#weak-topics)
-- [Spaced repetition (SRS)](#srs)
+        <nav class="la-sidebar-nav" aria-label="Jump to section">
+          <ul>
+            <li><a href="#study">Study</a></li>
+            <li><a href="#test-yourself">Quiz</a></li>
+            <li><a href="#weak-topics">Weak topics</a></li>
+            <li><a href="#srs">Spaced repetition (SRS)</a></li>
+          </ul>
+        </nav>
         """,
         unsafe_allow_html=True,
     )
@@ -834,11 +1369,11 @@ with st.sidebar:
             for topic in weak_topics
         ) or '<span class="la-sidebar-chip la-sidebar-chip-muted">No recent misses</span>'
         due_label = "card due now" if due_count == 1 else "cards due now"
-        st.markdown("---")
+        st.markdown('<hr class="la-sidebar-nav-divider" />', unsafe_allow_html=True)
         st.markdown("##### This lecture")
         st.markdown(
             f"""
-            <div class="la-sidebar-card">
+            <div class="la-sidebar-card la-sidebar-progress">
               <div class="la-sidebar-kicker">Progress</div>
               <div class="la-sidebar-score">{html_mod.escape(progress["score_text"])}</div>
               <div class="la-sidebar-sub">{html_mod.escape(progress["score_subtext"])}</div>
@@ -971,7 +1506,7 @@ if uploaded:
     # ========== FULL SETUP UI: Lecture not yet ready ==========
     else:
         st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
-        st.markdown("## 1. Setup your lecture")
+        st.markdown("## Setup your lecture")
         st.write(
             "Upload one lecture PDF from the sidebar, then create embeddings for it. "
             "Once that is ready, every study tool below works off the same lecture."
@@ -1052,17 +1587,20 @@ if uploaded:
                     st.exception(e)
 
     # ----------------------------
-    # 2️⃣ Study modes (UI-only guidance)
+    # SECTION: Study
     # ----------------------------
-    st.markdown("---")
-    st.markdown('<a id="study-modes"></a>', unsafe_allow_html=True)
-    st.markdown("## 2. Study")
-    st.write(
-        "Use the tabs below to understand the lecture in the way that fits best right now. "
-        "The learning loop underneath turns that understanding into practice and review."
+    st.markdown('<a id="study"></a>', unsafe_allow_html=True)
+    _section_divider(
+        "Study",
+        icon="📖",
+        subtitle="Ask questions, generate a summary, or chat freely about the lecture.",
+        show_break=False,
+        section_id="study",
     )
+    st.markdown('<div class="la-zone-marker la-zone-study"></div>', unsafe_allow_html=True)
 
     # Use slightly larger tabs with descriptions to improve discoverability
+    st.markdown('<div class="la-study-tabs-marker"></div>', unsafe_allow_html=True)
     tab1, tab2, tab3 = st.tabs(
         [
             "Ask",
@@ -1075,7 +1613,10 @@ if uploaded:
             """
             <script>
             const clickChatTab = () => {
-              const tabs = Array.from(parent.document.querySelectorAll('button[data-baseweb="tab"]'));
+              const root = parent.document.querySelector(".la-study-tabs-root");
+              const tabs = root
+                ? Array.from(root.querySelectorAll('button[data-baseweb="tab"]'))
+                : Array.from(parent.document.querySelectorAll('button[data-baseweb="tab"]'));
               const chatTab = tabs.find((btn) => (btn.innerText || "").trim().toLowerCase() === "chat");
               if (chatTab) {
                 chatTab.click();
@@ -1100,6 +1641,7 @@ if uploaded:
     with tab1:
         st.subheader("Ask a question")
         st.markdown("Type a focused question about the uploaded lecture.")
+        st.markdown('<div class="la-study-question-marker"></div>', unsafe_allow_html=True)
         question = st.text_input("Your question (based on uploaded lecture)", key="qa_question")
         # hide top-k input from users; keep value in session_state
         k = st.session_state.get("qa_k", 3)
@@ -1292,20 +1834,24 @@ if uploaded:
     with tab3:
         render_chat(st=st, stem=stem, llm=llm)
 
-    st.markdown("---")
     hist_key = f"chat_history_{stem}"
 
     # ----------------------------
-    # Learning Loop: Quiz → Confused → SRS (UI-only grouping)
+    # SECTION: Learning Loop
     # ----------------------------
-    st.markdown("## 3. Learning loop")
-    st.write(
-        "Follow the path: test yourself, clear up weak topics, then promote what matters into spaced repetition."
+    st.markdown('<a id="learning-loop"></a>', unsafe_allow_html=True)
+    _section_divider(
+        "Learning loop",
+        icon="🔁",
+        subtitle="Test yourself, fix what you missed, then lock it in with spaced repetition.",
+        section_id="learning-loop",
     )
+    st.markdown('<div class="la-zone-marker la-zone-learning"></div>', unsafe_allow_html=True)
+
     st.markdown(
         """
         <div class="la-learn-rail" role="navigation" aria-label="Learning loop steps">
-          <a class="la-flow-node" href="#study-quiz">
+          <a class="la-flow-node" href="#test-yourself">
             <span class="la-flow-num">1</span>
             <span class="la-flow-t">Quiz</span>
             <span class="la-flow-d">Mixed angles — definition, scenario, trap, compare.</span>
@@ -1326,21 +1872,27 @@ if uploaded:
         """,
         unsafe_allow_html=True,
     )
+    st.markdown('<hr class="la-learn-flow-break" />', unsafe_allow_html=True)
 
-    # Step 1: Quiz (unchanged behavior — just a short intro)
+    # ── Quiz ──────────────────────────────────────────────────────────────
     st.markdown('<a id="test-yourself"></a>', unsafe_allow_html=True)
-    st.markdown("### 3.1 Test yourself")
-    st.write("Generate a quick set of multiple-choice questions from the lecture and check your understanding.")
-    # Render quiz directly (removed outer expander)
+    _subsection_divider(
+        "Test yourself",
+        icon="📝",
+        subtitle="Generate multiple-choice questions from the lecture and check your understanding.",
+        section_id="test-yourself",
+    )
     render_quiz(st=st, stem=stem, text=text, llm=llm, hist_key=hist_key)
 
-    st.markdown("---")
-
-    # Step 2: Weak topics (prioritized list of things you missed)
+    # ── Weak topics ───────────────────────────────────────────────────────
     st.markdown('<a id="weak-topics"></a>', unsafe_allow_html=True)
-    st.markdown("### 3.2 Weak topics")
-    st.write("Concepts you missed show up here, with quick actions for explanation and chat follow-up.")
-    # Render confused directly (removed outer expander)
+    st.markdown('<hr class="la-major-section-break" />', unsafe_allow_html=True)
+    _subsection_divider(
+        "Weak topics",
+        icon="🎯",
+        subtitle="Concepts you missed show up here, with quick actions for explanation and chat follow-up.",
+        section_id="weak-topics",
+    )
     render_confused(
         st=st,
         stem=stem,
@@ -1350,8 +1902,14 @@ if uploaded:
         llm=llm,
     )
 
-    # Step 3: Spaced Repetition (SRS)
+    # ── Spaced Repetition ─────────────────────────────────────────────────
     st.markdown('<a id="srs"></a>', unsafe_allow_html=True)
-    st.markdown("### 3.3 Spaced repetition (SRS)")
-    st.caption("Review due cards, or browse and manage all saved cards.")
+    st.markdown('<hr class="la-major-section-break" />', unsafe_allow_html=True)
+    _subsection_divider(
+        "Spaced repetition (SRS)",
+        icon="🗓️",
+        subtitle="Review due cards, or browse and manage all saved cards.",
+        section_id="srs",
+    )
     render_srs_section(st, stem=stem)
+    _inject_page_ui_enhancements()
