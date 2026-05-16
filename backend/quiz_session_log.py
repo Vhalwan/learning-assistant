@@ -6,13 +6,21 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend.user_context import get_processed_dir, get_user_id
+
 DEFAULT_DIR = Path("data/processed")
 MAX_SESSIONS = 30
 
 
+def _default_dir() -> Path:
+    if get_user_id():
+        return get_processed_dir()
+    return DEFAULT_DIR
+
+
 def _path_for_stem(stem: str) -> Path:
     safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in (stem or "").strip()) or "lecture"
-    return DEFAULT_DIR / f"{safe}_quiz_sessions.json"
+    return _default_dir() / f"{safe}_quiz_sessions.json"
 
 
 def _load_raw(stem: str) -> Dict[str, Any]:

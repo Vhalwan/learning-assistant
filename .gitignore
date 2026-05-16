@@ -42,3 +42,4 @@ data/raw/*.pdf
 end
 python
 uvicorn
+data/ 

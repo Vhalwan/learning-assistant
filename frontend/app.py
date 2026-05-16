@@ -22,10 +22,17 @@ import streamlit.components.v1 as components
 import pdfplumber
 import numpy as np
 import requests
+from frontend.auth import require_auth, logout
 from frontend.sections.confused import render as render_confused
 from frontend.sections.quiz import render as render_quiz
 from frontend.sections.srs import render_srs_section
 from frontend.sections.chat import render as render_chat
+from backend.user_context import (
+    get_embeddings_path,
+    get_index_path,
+    get_raw_dir,
+    set_user_id,
+)
 
 # ------------------------
 # New imports (refactored)
@@ -61,6 +68,9 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="expanded"
 )
+
+_auth_user = require_auth()
+
 st.markdown("""
 <style>
 header[data-testid="stHeader"] {
@@ -1473,6 +1483,12 @@ if "use_faiss_search" not in st.session_state:
 
 with st.sidebar:
     st.markdown("### Lectova")
+    _user_email = (_auth_user.get("email") or "").strip() or "Signed in"
+    st.caption(_user_email)
+    if st.button("Log out", use_container_width=True):
+        logout()
+        st.rerun()
+    st.markdown("---")
     st.markdown("##### Upload lecture PDF")
     uploaded = st.file_uploader(
         "Lecture PDF",
@@ -1593,8 +1609,9 @@ if not uploaded and not st.session_state.get("current_stem"):
 # ----------------------------
 if uploaded:
     # Save uploaded file
-    tmp_pdf = Path("data/raw") / uploaded.name
-    tmp_pdf.parent.mkdir(parents=True, exist_ok=True)
+    raw_dir = get_raw_dir()
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    tmp_pdf = raw_dir / uploaded.name
     tmp_pdf.write_bytes(uploaded.read())
 
     # Extract text preview
@@ -1605,8 +1622,8 @@ if uploaded:
     # derive the stem and paths
     stem = tmp_pdf.stem
     doc_id = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:12]
-    embeddings_path = Path(f"data/processed/{stem}_embeddings.json")
-    index_path = Path(f"data/processed/{stem}_embeddings.index")
+    embeddings_path = get_embeddings_path(stem)
+    index_path = get_index_path(stem)
     st.session_state["current_stem"] = stem
     st.session_state["current_pdf_filename"] = uploaded.name
     current_label = stem.replace("_", " ").title()

@@ -8,11 +8,20 @@ from typing import Dict, List, Optional
 from pathlib import Path
 
 from backend.concept_policy import resolve_concept_bucket
+from backend.user_context import get_quiz_dir, get_user_id
 
 DEFAULT_QUIZ_DIR = "data/processed"
 
 
-def get_quiz_path(stem: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> str:
+def _default_quiz_dir() -> str:
+    if get_user_id():
+        return get_quiz_dir()
+    return DEFAULT_QUIZ_DIR
+
+
+def get_quiz_path(stem: str, quiz_dir: Optional[str] = None) -> str:
+    if quiz_dir is None:
+        quiz_dir = _default_quiz_dir()
     """Get the path for a quiz file given a document stem."""
     return os.path.join(quiz_dir, f"{stem}_quiz_items.json")
 
@@ -38,7 +47,7 @@ def _normalize_quiz_item(item: Dict) -> Dict:
     return normalized
 
 
-def save_quiz_items(stem: str, quiz_items: List[Dict], quiz_dir: str = DEFAULT_QUIZ_DIR) -> str:
+def save_quiz_items(stem: str, quiz_items: List[Dict], quiz_dir: Optional[str] = None) -> str:
     """
     Save quiz items to disk using atomic write to prevent corruption.
     
@@ -50,6 +59,8 @@ def save_quiz_items(stem: str, quiz_items: List[Dict], quiz_dir: str = DEFAULT_Q
     Returns:
         Path to saved file
     """
+    if quiz_dir is None:
+        quiz_dir = _default_quiz_dir()
     quiz_path = get_quiz_path(stem, quiz_dir)
     os.makedirs(os.path.dirname(quiz_path) or ".", exist_ok=True)
     
@@ -82,7 +93,7 @@ def save_quiz_items(stem: str, quiz_items: List[Dict], quiz_dir: str = DEFAULT_Q
     return quiz_path
 
 
-def load_quiz_items(stem: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Optional[List[Dict]]:
+def load_quiz_items(stem: str, quiz_dir: Optional[str] = None) -> Optional[List[Dict]]:
     """
     Load quiz items from disk.
     
@@ -93,6 +104,8 @@ def load_quiz_items(stem: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Optional[Lis
     Returns:
         List of quiz items or None if not found
     """
+    if quiz_dir is None:
+        quiz_dir = _default_quiz_dir()
     # Try new format first
     quiz_path = get_quiz_path(stem, quiz_dir)
     if os.path.exists(quiz_path):
@@ -133,7 +146,7 @@ def load_quiz_items(stem: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Optional[Lis
     return None
 
 
-def load_quiz_item_by_id(card_id: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Optional[Dict]:
+def load_quiz_item_by_id(card_id: str, quiz_dir: Optional[str] = None) -> Optional[Dict]:
     """
     Load a specific quiz item by its card ID.
     Optimized to search files directly instead of loading all items.
@@ -145,6 +158,8 @@ def load_quiz_item_by_id(card_id: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Opti
     Returns:
         Quiz item dict or None if not found
     """
+    if quiz_dir is None:
+        quiz_dir = _default_quiz_dir()
     if not card_id or "_" not in card_id:
         return None
     
@@ -190,7 +205,7 @@ def load_quiz_item_by_id(card_id: str, quiz_dir: str = DEFAULT_QUIZ_DIR) -> Opti
     return None
 
 
-def load_all_quiz_items(quiz_dir: str = DEFAULT_QUIZ_DIR) -> Dict[str, Dict]:
+def load_all_quiz_items(quiz_dir: Optional[str] = None) -> Dict[str, Dict]:
     """
     Load all quiz items from all quiz files (both new and old formats).
     Optimized to cache glob results and avoid redundant file operations.
@@ -198,6 +213,8 @@ def load_all_quiz_items(quiz_dir: str = DEFAULT_QUIZ_DIR) -> Dict[str, Dict]:
     Returns:
         Dict mapping card_id -> quiz_item
     """
+    if quiz_dir is None:
+        quiz_dir = _default_quiz_dir()
     all_items = {}
     quiz_dir_path = Path(quiz_dir)
     

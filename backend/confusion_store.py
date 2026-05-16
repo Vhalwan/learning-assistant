@@ -7,8 +7,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from backend.concept_policy import build_chunk_card_id, resolve_concept_bucket
 from backend.quiz_storage import load_quiz_item_by_id
+from backend.user_context import get_confusion_path, get_user_id
 
-DEFAULT_PATH = Path("data/processed/confusion.json")
+_FALLBACK_PATH = Path("data/processed/confusion.json")
+
+
+def _default_path() -> Path:
+    if get_user_id():
+        return get_confusion_path()
+    return _FALLBACK_PATH
 
 
 def _now_iso() -> str:
@@ -467,7 +474,7 @@ def _decorate_card(card: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_confusion(path: Optional[Path] = None) -> Dict[str, Any]:
-    p = Path(path or DEFAULT_PATH)
+    p = Path(path or _default_path())
     if not p.exists():
         return {}
     try:
@@ -489,7 +496,7 @@ def load_confusion(path: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def save_confusion(data: Dict[str, Any], path: Optional[Path] = None) -> None:
-    p = Path(path or DEFAULT_PATH)
+    p = Path(path or _default_path())
     _ensure_parent(p)
     tmp = p.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -515,7 +522,7 @@ def record_quiz_result(
 
     Confusion cards are keyed by lecture concept and keep chunk ids as evidence.
     """
-    p = Path(path or DEFAULT_PATH)
+    p = Path(path or _default_path())
     data = load_confusion(p)
     t = _now_iso()
 
@@ -537,9 +544,9 @@ def record_quiz_result(
         mcq_source["doc_id"] = doc_id
 
     effective_label = _clean_text(concept_label or concept)
-    if effective_label and not _clean_text(mcq_source.get("concept_label")):
-        mcq_source["concept_label"] = effective_label
-    if _clean_text(concept_id) and not _clean_text(mcq_source.get("concept_id")):
+    if _clean_text(concept_label):
+        mcq_source["concept_label"] = _clean_text(concept_label)
+    if _clean_text(concept_id):
         mcq_source["concept_id"] = _clean_text(concept_id).lower()
 
     chunk_meta = resolve_concept_bucket(
@@ -633,7 +640,7 @@ def get_top_confusions(
     """
     Return persisted concept-based confusion cards ranked by normalized weakness.
     """
-    p = Path(path or DEFAULT_PATH)
+    p = Path(path or _default_path())
     data = load_confusion(p)
     items: List[Dict[str, Any]] = []
 
@@ -666,7 +673,7 @@ def delete_confusion_entries(keys: List[str], path: Optional[Path] = None) -> in
     """
     Delete confusion cards by their persisted store keys. Returns number removed.
     """
-    p = Path(path or DEFAULT_PATH)
+    p = Path(path or _default_path())
     data = load_confusion(p)
     if not data:
         return 0
