@@ -9,6 +9,7 @@ This module mirrors the UI and behavior originally in app.py without changes.
 """
 
 import html as html_mod
+import json
 import os
 import re
 from datetime import datetime
@@ -23,6 +24,19 @@ from backend.study_srs import SRSManager
 
 
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
+
+_QUESTION_ANGLE_LABELS = {
+    "definition": "Definition",
+    "application": "Application",
+    "misconception": "Misconception trap",
+    "comparison": "Compare concepts",
+    "mechanism": "Mechanism / reasoning",
+    "not_true": "Which is false?",
+    "consequence": "Implication",
+    "property": "Property / requirement",
+    "criticism": "Limitation / critique",
+}
+
 
 def _shorten(text: str, limit: int = 140) -> str:
     if not text:
@@ -64,34 +78,288 @@ def _choice_with_text(letter: str, choices: dict) -> str:
     return f"{clean_letter}. {option_text}" if option_text else clean_letter
 
 
-def _format_flagged_reason(evidence_entry: dict, is_most_recent: bool = False) -> str:
-    """Return a short one-line reason for a single wrong-answer evidence row.
+def _question_angle_label(question_type: str) -> str:
+    qtype_raw = str(question_type or "").strip().lower()
+    if not qtype_raw:
+        return "Quiz"
+    return _QUESTION_ANGLE_LABELS.get(
+        qtype_raw,
+        qtype_raw.replace("_", " ").title(),
+    )
 
-    Keeps bullets compact: trimmed question text plus the correct answer letter.
-    The "you chose" hint is only added for the most recent wrong attempt because
-    the persisted card stores only the latest chosen answer, so attaching it to
-    older evidence rows would be misleading.
-    """
+
+def _choice_label(letter: str, choices: dict) -> str:
+    clean_letter = str(letter or "").strip().upper()
+    if not clean_letter or not isinstance(choices, dict):
+        return ""
+    return " ".join(str(choices.get(clean_letter, "") or "").split())
+
+
+def _chosen_mistake_text(letter: str, choices: dict, why_wrong: dict) -> str:
+    clean_letter = str(letter or "").strip().upper()
+    if not clean_letter:
+        return ""
+    if isinstance(why_wrong, dict):
+        reason = " ".join(str(why_wrong.get(clean_letter, "") or "").split())
+        if reason:
+            return reason
+    return _choice_label(clean_letter, choices)
+
+
+def _enforce_word_limit(text: str, max_words: int = 8) -> str:
+    words = " ".join(str(text or "").split()).split()
+    if not words:
+        return ""
+    if len(words) <= max_words:
+        return " ".join(words)
+    return " ".join(words[:max_words])
+
+
+def _sanitize_confusion_blurb(text: str) -> str:
+    clean = " ".join(str(text or "").replace('"', "").replace("'", "").split())
+    clean = clean.strip(" .-—")
+    return _enforce_word_limit(clean, 8)
+
+
+def _blurb_cache() -> dict:
+    key = "confusion_blurb_cache"
+    if key not in st.session_state:
+        st.session_state[key] = {}
+    return st.session_state[key]
+
+
+def _blurb_request_from_evidence(
+    evidence_entry: dict,
+    concept_name: str,
+    last_qid: str,
+    cache_key: str,
+) -> dict | None:
+    """Build a batch-blurb request dict, or None if cached / not eligible."""
+    if _blurb_cache().get(cache_key):
+        return None
+
     meta = evidence_entry.get("meta", {}) or {}
-    raw_question = str(meta.get("question") or evidence_entry.get("question") or "")
-    question = _shorten(raw_question, limit=100)
-
-    chosen = str(meta.get("last_chosen_answer") or "").strip().upper()
+    angle = _question_angle_label(meta.get("question_type") or "")
+    choices = meta.get("choices") if isinstance(meta.get("choices"), dict) else {}
+    why_wrong = meta.get("why_wrong") if isinstance(meta.get("why_wrong"), dict) else {}
     correct = str(meta.get("answer") or "").strip().upper()
+    correct_text = _choice_with_text(correct, choices) or correct or "the correct answer"
 
-    tail_parts = []
-    if is_most_recent and chosen and correct and chosen != correct:
-        tail_parts.append(f"chose {chosen}")
-    if correct:
-        tail_parts.append(f"correct: {correct}")
+    qid = str(meta.get("qid") or evidence_entry.get("qid") or "").strip()
+    chosen = str(meta.get("last_chosen_answer") or "").strip().upper()
+    use_chosen = bool(chosen and correct and chosen != correct and qid and qid == last_qid)
+    wrong_text = _choice_with_text(chosen, choices) if use_chosen else ""
+    if not wrong_text and not correct_text:
+        return None
 
-    if question and tail_parts:
-        return f"{question} — " + ", ".join(tail_parts)
-    if question:
-        return question
-    if tail_parts:
-        return "Wrong attempt — " + ", ".join(tail_parts)
-    return "Wrong quiz attempt for this concept."
+    return {
+        "cache_key": cache_key,
+        "concept_name": " ".join(str(concept_name or "this concept").split()),
+        "angle": angle,
+        "wrong_answer": wrong_text or "their answer",
+        "correct_answer": correct_text,
+    }
+
+
+def _parse_batch_blurb_response(raw: str, expected_keys: list[str]) -> dict[str, str]:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    payload = None
+    try:
+        payload = json.loads(text)
+    except Exception:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                payload = json.loads(match.group(0))
+            except Exception:
+                payload = None
+    if not isinstance(payload, dict):
+        return {}
+
+    out: dict[str, str] = {}
+    for key in expected_keys:
+        val = payload.get(key)
+        if val is None:
+            continue
+        blurb = _sanitize_confusion_blurb(str(val))
+        if blurb:
+            out[key] = blurb
+    return out
+
+
+def _generate_confusion_blurbs_batch(llm_call, requests: list[dict]) -> dict[str, str]:
+    """One LLM call for many confusion blurbs. Updates session cache."""
+    if not llm_call or not requests:
+        return {}
+
+    pending = [r for r in requests if r.get("cache_key") and not _blurb_cache().get(r["cache_key"])]
+    if not pending:
+        return {}
+
+    lines = []
+    for i, req in enumerate(pending, start=1):
+        lines.append(
+            f'{i}. key="{req["cache_key"]}": concept="{req["concept_name"]}", '
+            f'question_type="{req["angle"]}", wrong="{req["wrong_answer"]}", '
+            f'correct="{req["correct_answer"]}"'
+        )
+
+    prompt = (
+        "For each numbered item, write ONE short confusion description (max 8 words). "
+        "Describe the conceptual mistake, not the answer text. "
+        "Never quote or paraphrase the actual answer options.\n\n"
+        + "\n".join(lines)
+        + '\n\nReply with ONLY a JSON object mapping each key string to its description. '
+        'Example: {"stem_1_abc": "confused definition with example"}'
+    )
+    expected_keys = [str(r["cache_key"]) for r in pending]
+    try:
+        raw = llm_call(prompt)
+    except Exception:
+        return {}
+
+    parsed = _parse_batch_blurb_response(raw, expected_keys)
+    cache = _blurb_cache()
+    for key, blurb in parsed.items():
+        cache[key] = blurb
+    return parsed
+
+
+def _collect_pending_blurb_requests(
+    confusion_items: list[dict],
+    stem: str,
+) -> list[dict]:
+    """Gather uncached blurb requests across all visible confusion cards."""
+    requests: list[dict] = []
+    seen_keys: set[str] = set()
+    preview_limit = min(len(confusion_items), 5)
+
+    for idx, item in enumerate(confusion_items[:preview_limit], start=1):
+        evidence = item.get("evidence", []) or []
+        extracted_concept = item.get("concept_label") or item.get("concept") or item.get("title") or ""
+        last_qid = str(item.get("quiz_question_id") or item.get("last_mcq_id") or "").strip()
+        seen_q: set[tuple[str, str]] = set()
+
+        for e in evidence:
+            if e.get("type") not in ("quiz", "persisted"):
+                continue
+            meta = e.get("meta", {}) or {}
+            qtext = " ".join(str(meta.get("question") or e.get("question") or "").split())
+            qid = str(meta.get("qid") or e.get("qid") or "").strip()
+            if not qtext:
+                continue
+            dedupe_key = (qid, qtext.strip().lower())
+            if dedupe_key in seen_q:
+                continue
+            seen_q.add(dedupe_key)
+            if len(seen_q) > 3:
+                break
+
+            cache_key = f"{stem}_{idx}_{qid or dedupe_key}"
+            if cache_key in seen_keys:
+                continue
+            seen_keys.add(cache_key)
+
+            req = _blurb_request_from_evidence(
+                e,
+                concept_name=extracted_concept,
+                last_qid=last_qid,
+                cache_key=cache_key,
+            )
+            if req:
+                requests.append(req)
+    return requests
+
+
+def _ensure_confusion_blurbs(
+    llm_call,
+    stem: str,
+    confusion_items: list[dict],
+) -> None:
+    """Prefetch all pending blurbs for this lecture in one batched LLM call."""
+    if not llm_call:
+        return
+    pending = _collect_pending_blurb_requests(confusion_items, stem)
+    if not pending:
+        return
+    batch_sig = "|".join(sorted(r["cache_key"] for r in pending))
+    done_key = f"conf_blurb_batch_done_{stem}"
+    if st.session_state.get(done_key) == batch_sig:
+        return
+    with st.spinner("Analyzing your mistakes…"):
+        _generate_confusion_blurbs_batch(llm_call, pending)
+    st.session_state[done_key] = batch_sig
+
+
+def _fallback_confusion_blurb(meta: dict, last_qid: str) -> str:
+    choices = meta.get("choices") if isinstance(meta.get("choices"), dict) else {}
+    why_wrong = meta.get("why_wrong") if isinstance(meta.get("why_wrong"), dict) else {}
+    correct = str(meta.get("answer") or "").strip().upper()
+    qid = str(meta.get("qid") or "").strip()
+    chosen = str(meta.get("last_chosen_answer") or "").strip().upper()
+    use_chosen = bool(chosen and correct and chosen != correct and qid and qid == last_qid)
+    if use_chosen:
+        reason = _chosen_mistake_text(chosen, choices, why_wrong)
+        if reason and not reason.strip().upper().startswith(chosen):
+            blurb = _sanitize_confusion_blurb(reason)
+            if blurb:
+                return blurb
+    return "repeated confusion on this concept"
+
+
+def _format_flagged_confusion_line(
+    evidence_entry: dict,
+    last_qid: str,
+    cache_key: str,
+) -> str:
+    """Compact one-liner: [Question type] — [conceptual confusion, max 8 words]."""
+    meta = evidence_entry.get("meta", {}) or {}
+    angle = _question_angle_label(meta.get("question_type") or "")
+
+    cached = _blurb_cache().get(cache_key)
+    if isinstance(cached, str) and cached.strip():
+        blurb = cached.strip()
+    else:
+        blurb = _fallback_confusion_blurb(meta, last_qid=last_qid)
+
+    return f"{angle} — {blurb}"
+
+
+def _build_reason_rows(
+    evidence: list,
+    last_qid: str,
+    stem: str,
+    card_idx: int,
+) -> list[str]:
+    """Build up to 3 reason lines from evidence (no LLM; uses cache or fallback)."""
+    reason_rows: list[str] = []
+    seen_q: set[tuple[str, str]] = set()
+    for e in evidence:
+        if e.get("type") in ("quiz", "persisted"):
+            meta = e.get("meta", {}) or {}
+            qtext = " ".join(str(meta.get("question") or e.get("question") or "").split())
+            qid = str(meta.get("qid") or e.get("qid") or "").strip()
+            if not qtext:
+                continue
+            dedupe_key = (qid, qtext.strip().lower())
+            if dedupe_key in seen_q:
+                continue
+            seen_q.add(dedupe_key)
+            blurb_cache_key = f"{stem}_{card_idx}_{qid or dedupe_key}"
+            reason_rows.append(
+                _format_flagged_confusion_line(
+                    e,
+                    last_qid=last_qid,
+                    cache_key=blurb_cache_key,
+                )
+            )
+        else:
+            extra = _shorten(" ".join(str(e).split()), limit=120)
+            if extra:
+                reason_rows.append(extra)
+    return reason_rows
 
 
 def _format_timestamp(value: str) -> str:
@@ -183,9 +451,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     else:
         preview_limit = min(len(real_confusions), 5)
         for idx, item in enumerate(real_confusions[:preview_limit], start=1):
-            with st.container(border=True):
+            with st.container(border=True, key=f"la_concept_card_{stem}_{idx}"):
                 st.markdown('<div class="la-concept-card-start"></div>', unsafe_allow_html=True)
                 concept = item.get("title") or item.get("concept") or item.get("concept_label") or "Unlabeled concept"
+                extracted_concept = item.get("concept_label") or item.get("concept") or concept
                 strength = int(item.get("signal_strength", 0))
                 total_attempts = int(item.get("total_attempts", 0) or 0)
                 error_rate = float(item.get("error_rate", 0.0) or 0.0)
@@ -243,52 +512,56 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             mcq_candidates.insert(0, candidate)
 
                 fallback_label = "No wrong-answered question available"
+                mcq_candidates = mcq_candidates[:5]
+
                 if not mcq_candidates:
                     mcq_candidates = [{"id": None, "question": "", "label": fallback_label}]
 
                 selected_mcq_key = f"conf_selected_mcq_{stem}_{idx}"
-                selected_mcq_label = st.selectbox(
+                mcq_option_indices = list(range(len(mcq_candidates)))
+
+                def _mcq_option_label(option_index: int) -> str:
+                    row = mcq_candidates[option_index]
+                    return (row.get("question") or row.get("label") or "").strip() or "(question text unavailable)"
+
+                selected_mcq_index = st.selectbox(
                     "Source question for Add to SRS",
-                    options=[c["label"] for c in mcq_candidates],
+                    options=mcq_option_indices,
+                    format_func=_mcq_option_label,
                     key=selected_mcq_key,
                     help="Explain simply and Ask follow-up in Chat use the concept directly. Pick a question here only for Add to SRS.",
                 )
-                st.caption("The dropdown only affects Add to SRS. Explain simply and Chat follow-up always use the concept itself.")
-                selected_mcq = next(
-                    (c for c in mcq_candidates if c["label"] == selected_mcq_label),
-                    mcq_candidates[0],
-                )
-                if selected_mcq.get("question"):
-                    st.caption(selected_mcq.get("question"))
+                st.caption("The picker only affects Add to SRS. Explain simply and Chat follow-up always use the concept itself.")
+                selected_mcq = mcq_candidates[selected_mcq_index]
                 st.caption("Type: MCQ confusion item" if is_mcq_item else "Type: Concept confusion item")
 
+                last_qid = str(item.get("quiz_question_id") or item.get("last_mcq_id") or "").strip()
+                for e in evidence:
+                    if e.get("type") in ("quiz", "persisted"):
+                        meta = e.get("meta", {}) or {}
+                        qtext = " ".join(str(meta.get("question") or e.get("question") or "").split())
+                        qid = str(meta.get("qid") or e.get("qid") or "").strip()
+                        if qid and qtext:
+                            evidence_quiz_rows.append({"qid": qid, "question": qtext})
+
                 if evidence:
-                    with st.expander("Why this weak area was flagged"):
-                        st.caption("Last 5 wrong quiz attempts for this concept.")
-                        seen_q = set()
-                        reason_rows = []
-                        first_quiz_seen = False
-                        for e in evidence:
-                            if e.get("type") in ("quiz", "persisted"):
-                                meta = e.get("meta", {}) or {}
-                                qtext = " ".join(str(meta.get("question") or e.get("question") or "").split())
-                                qid = str(meta.get("qid") or e.get("qid") or "").strip()
-                                if qtext:
-                                    dedupe_key = (qid, qtext.strip().lower())
-                                    if dedupe_key not in seen_q:
-                                        seen_q.add(dedupe_key)
-                                        reason_rows.append(
-                                            _format_flagged_reason(e, is_most_recent=not first_quiz_seen)
-                                        )
-                                        first_quiz_seen = True
-                                if qid and qtext:
-                                    evidence_quiz_rows.append({"qid": qid, "question": qtext})
-                            else:
-                                extra = _shorten(" ".join(str(e).split()), limit=120)
-                                if extra:
-                                    reason_rows.append(extra)
+                    show_why = st.toggle(
+                        "Why this weak area was flagged",
+                        key=f"conf_why_open_{stem}_{idx}",
+                    )
+                    if show_why:
+                        st.caption("Last 3 wrong quiz attempts for this concept.")
+                        pending_blurbs = _collect_pending_blurb_requests(real_confusions, stem)
+                        if llm and pending_blurbs:
+                            _ensure_confusion_blurbs(llm, stem, real_confusions)
+                        reason_rows = _build_reason_rows(
+                            evidence,
+                            last_qid=last_qid,
+                            stem=stem,
+                            card_idx=idx,
+                        )
                         if reason_rows:
-                            for row in reason_rows[:5]:
+                            for row in reason_rows[:3]:
                                 st.write(f"- {row}")
                         else:
                             st.write("- Repeated incorrect quiz answers for this concept.")
@@ -310,7 +583,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 delete_keys = sorted(set(delete_keys))
 
                 # Centralized action input resolution for this card
-                extracted_concept = item.get("concept_label") or item.get("concept") or concept
                 deterministic_fallback_id = (
                     item.get("store_key")
                     or item.get("card_id")

@@ -512,6 +512,8 @@ def perform_confusion_analysis(
                 (quiz_item.get("explanation") or quiz_item.get("brief_explanation") or "").strip()
                 or ((p.get("explanation") or "").strip() if mcq_id == last_qid else "")
             )
+            detailed = quiz_item.get("detailed_explanation") if isinstance(quiz_item.get("detailed_explanation"), dict) else {}
+            why_wrong = detailed.get("why_wrong") if isinstance(detailed.get("why_wrong"), dict) else {}
             evidence_meta = {
                 "store_key": store_key,
                 "qid": mcq_id,
@@ -519,7 +521,13 @@ def perform_confusion_analysis(
                 "choices": evidence_choices,
                 "answer": evidence_answer,
                 "explanation": evidence_explanation,
-                "last_chosen_answer": (p.get("last_chosen_answer") or "").strip().upper(),
+                "question_type": (quiz_item.get("question_type") or "").strip(),
+                "why_wrong": why_wrong,
+                "last_chosen_answer": (
+                    (p.get("last_chosen_answer") or "").strip().upper()
+                    if mcq_id == last_qid
+                    else ""
+                ),
                 "wrong_count": wrong_attempts,
             }
             evidence.append({
@@ -532,6 +540,17 @@ def perform_confusion_analysis(
                 break
 
         if not evidence:
+            fallback_quiz = load_quiz_item_by_id(last_qid) if last_qid else {}
+            fallback_detailed = (
+                fallback_quiz.get("detailed_explanation")
+                if isinstance(fallback_quiz.get("detailed_explanation"), dict)
+                else {}
+            )
+            fallback_why_wrong = (
+                fallback_detailed.get("why_wrong")
+                if isinstance(fallback_detailed.get("why_wrong"), dict)
+                else {}
+            )
             evidence.append({
                 "type": "quiz",
                 "qid": last_qid,
@@ -543,6 +562,8 @@ def perform_confusion_analysis(
                     "choices": (p.get("choices") or {}) if isinstance(p.get("choices"), dict) else {},
                     "answer": (p.get("answer") or "").strip().upper(),
                     "explanation": (p.get("explanation") or "").strip(),
+                    "question_type": (fallback_quiz.get("question_type") or "").strip(),
+                    "why_wrong": fallback_why_wrong,
                     "last_chosen_answer": (p.get("last_chosen_answer") or "").strip().upper(),
                     "wrong_count": wrong_attempts,
                 },

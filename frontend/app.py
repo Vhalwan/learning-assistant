@@ -1,4 +1,3 @@
-# frontend/app.py
 import os
 import sys
 import re
@@ -194,79 +193,201 @@ def _inject_page_ui_enhancements() -> None:
               ) continue;
               tagTabsByLabels(
                 tabsRoot,
-                ["Review (SRS)", "📚 Browse cards"],
+                ["Review (SRS)", "\U0001F4DA Browse cards"],
                 "la-srs-tabs-root",
                 false
               );
             }
           };
 
+          // ── Sidebar jump links: instant active state on click + scroll spy ──
+          const navTargetEl = (id) =>
+            doc.querySelector(
+              '[data-la-nav-target][id="' + id.replace(/"/g, "") + '"]'
+            ) || doc.getElementById(id);
+
+          const laSidebarNavSetActive = (id) => {
+            const navEl = doc.querySelector(".la-sidebar-nav");
+            if (!navEl || !id) return;
+            navEl.querySelectorAll("a[href^='#']").forEach((link) => {
+              const active = (link.getAttribute("href") || "") === "#" + id;
+              link.classList.toggle("active", active);
+              if (active) link.setAttribute("aria-current", "location");
+              else link.removeAttribute("aria-current");
+            });
+          };
+
+          const laSidebarNavPickActive = () => {
+            const navEl = doc.querySelector(".la-sidebar-nav");
+            if (!navEl) return;
+            const links = Array.from(navEl.querySelectorAll("a[href^='#']"));
+            if (!links.length) return;
+
+            const offset = 160;
+            let current = null;
+
+            for (const link of links) {
+              const sid = (link.getAttribute("href") || "").slice(1);
+              if (!sid) continue;
+              const el = navTargetEl(sid);
+              if (!el) continue;
+              if (current === null) current = sid;
+              if (el.getBoundingClientRect().top - offset <= 0) current = sid;
+            }
+
+            if (current) laSidebarNavSetActive(current);
+          };
+
+          const collectScrollRoots = () => {
+            const roots = new Set();
+            const push = (n) => {
+              if (n && (n === doc.documentElement || n === doc.body)) roots.add(n);
+              else if (n && n.nodeType === 1) roots.add(n);
+            };
+            push(doc.documentElement);
+            push(doc.body);
+            const mainSec =
+              doc.querySelector('section[data-testid="stMain"]') ||
+              doc.querySelector("section.main");
+            if (mainSec) {
+              let w = mainSec;
+              while (w && w !== doc.body) {
+                const cs = parent.getComputedStyle(w);
+                const oy = cs.overflowY;
+                if (
+                  (oy === "auto" || oy === "scroll" || oy === "overlay") &&
+                  w.scrollHeight > w.clientHeight + 2
+                ) {
+                  push(w);
+                }
+                w = w.parentElement;
+              }
+            }
+            const appVc = doc.querySelector('[data-testid="stAppViewContainer"]');
+            if (appVc) {
+              let w = appVc;
+              while (w && w !== doc.body) {
+                const cs = parent.getComputedStyle(w);
+                const oy = cs.overflowY;
+                if (
+                  (oy === "auto" || oy === "scroll" || oy === "overlay") &&
+                  w.scrollHeight > w.clientHeight + 2
+                ) {
+                  push(w);
+                }
+                w = w.parentElement;
+              }
+            }
+            const probe =
+              doc.querySelector("[data-la-nav-target][id]") || doc.getElementById("study");
+            let p = probe;
+            while (p && p !== doc.body) {
+              const par = p.parentElement;
+              if (par) {
+                const cs = parent.getComputedStyle(par);
+                const oy = cs.overflowY;
+                if (
+                  (oy === "auto" || oy === "scroll" || oy === "overlay") &&
+                  par.scrollHeight > par.clientHeight + 2
+                ) {
+                  push(par);
+                }
+              }
+              p = par;
+            }
+            return roots;
+          };
+
+          if (!doc.__laOnScrollPickNav) {
+            doc.__laOnScrollPickNav = () => {
+              if (doc.__laScrollSpyRaf) {
+                parent.cancelAnimationFrame(doc.__laScrollSpyRaf);
+              }
+              doc.__laScrollSpyRaf = parent.requestAnimationFrame(laSidebarNavPickActive);
+            };
+          }
+
           const enhanceNav = () => {
             const nav = doc.querySelector(".la-sidebar-nav");
             if (!nav) return;
 
-            const links = Array.from(nav.querySelectorAll("a[href^='#']"));
-            if (!links.length) return;
+            const schedulePickActive = doc.__laOnScrollPickNav;
 
-            const sections = links
-              .map((link) => {
-                const id = (link.getAttribute("href") || "").slice(1);
-                let el =
-                  doc.getElementById(id) ||
-                  doc.querySelector('[data-la-nav-target][id="' + id + '"]');
-                if (!el) return null;
-                return { id, el, link };
-              })
-              .filter(Boolean);
-
-            if (!sections.length) return;
-
-            const setActive = (id) => {
-              links.forEach((link) => {
-                const active = (link.getAttribute("href") || "") === "#" + id;
-                link.classList.toggle("active", active);
-                if (active) {
-                  link.setAttribute("aria-current", "location");
-                } else {
-                  link.removeAttribute("aria-current");
-                }
-              });
-            };
-
-            const pickActive = () => {
-              const offset = 140;
-              let current = sections[0].id;
-              let bestTop = -Infinity;
-              for (const { id, el } of sections) {
-                const top = el.getBoundingClientRect().top;
-                if (top - offset <= 0 && top > bestTop) {
-                  bestTop = top;
-                  current = id;
-                }
-              }
-              setActive(current);
-            };
-
-            if (nav.__laSpyBound) {
-              pickActive();
-              return;
+            if (!doc.__laScrollSpyBound) {
+              doc.__laScrollSpyBound = true;
+              const onScroll = doc.__laOnScrollPickNav;
+              parent.addEventListener("scroll", onScroll, { passive: true, capture: true });
+              doc.addEventListener("scroll", onScroll, { passive: true, capture: true });
+              parent.addEventListener("resize", onScroll, { passive: true });
             }
-            nav.__laSpyBound = true;
 
-            pickActive();
-            const scrollRoots = [
-              doc.querySelector("section.main"),
-              doc.querySelector('[data-testid="stAppViewContainer"]'),
-              doc.documentElement,
-              parent,
-            ].filter(Boolean);
-
-            scrollRoots.forEach((root) => {
-              root.addEventListener("scroll", pickActive, { passive: true });
+            if (!doc.__laScrollSpySeenRoots) {
+              doc.__laScrollSpySeenRoots = new WeakSet();
+            }
+            const onScroll = doc.__laOnScrollPickNav;
+            collectScrollRoots().forEach((node) => {
+              if (doc.__laScrollSpySeenRoots.has(node)) return;
+              doc.__laScrollSpySeenRoots.add(node);
+              node.addEventListener("scroll", onScroll, { passive: true, capture: true });
             });
-            parent.addEventListener("scroll", pickActive, { passive: true });
-            window.addEventListener("resize", pickActive, { passive: true });
+
+            if (!doc.__laSidebarNavClickBound) {
+              doc.__laSidebarNavClickBound = true;
+              doc.addEventListener(
+                "click",
+                (e) => {
+                  const a = e.target && e.target.closest
+                    ? e.target.closest(".la-sidebar-nav a[href^='#']")
+                    : null;
+                  if (!a) return;
+                  const sid = (a.getAttribute("href") || "").slice(1);
+                  if (!sid) return;
+                  const el = navTargetEl(sid);
+                  if (!el) return;
+                  e.preventDefault();
+                  laSidebarNavSetActive(sid);
+                  el.scrollIntoView({ behavior: "instant", block: "start" });
+                  try {
+                    if (parent.history && parent.history.replaceState) {
+                      parent.history.replaceState(null, "", "#" + sid);
+                    }
+                  } catch (err) {}
+                  parent.requestAnimationFrame(() => {
+                    laSidebarNavSetActive(sid);
+                    laSidebarNavPickActive();
+                  });
+                },
+                true
+              );
+            }
+
+            // Streamlit scrolls nested divs, not the iframe window — use the parent
+            // viewport IntersectionObserver so spy updates whenever section headers move.
+            const IO = parent.IntersectionObserver;
+            if (IO) {
+              if (!doc.__laNavSectionIO) {
+                doc.__laNavSectionIO = new IO(
+                  () => {
+                    schedulePickActive();
+                  },
+                  { root: null, threshold: [0, 0.01, 0.05, 0.25, 0.5, 1] }
+                );
+              }
+              if (!doc.__laNavIOSeen) {
+                doc.__laNavIOSeen = new WeakSet();
+              }
+              doc.querySelectorAll("[data-la-nav-target][id]").forEach((el) => {
+                if (doc.__laNavIOSeen.has(el)) return;
+                doc.__laNavIOSeen.add(el);
+                try {
+                  doc.__laNavSectionIO.observe(el);
+                } catch (err) {}
+              });
+            }
+
+            schedulePickActive();
           };
+          // ── End sidebar nav ───────────────────────────────────────────────
 
           const enhanceStudyInput = () => {
             doc.querySelectorAll(".la-study-question-marker").forEach((marker) => {
@@ -278,17 +399,47 @@ def _inject_page_ui_enhancements() -> None:
             });
           };
 
+          const findConceptCardWrapper = (marker) => {
+            let node = marker;
+            while (node && node !== doc.body) {
+              if (node.getAttribute?.("data-testid") === "stVerticalBlock") {
+                const cs = parent.getComputedStyle(node);
+                const borderWidth = parseFloat(cs.borderTopWidth) || 0;
+                if (borderWidth > 0 && cs.borderStyle !== "none") {
+                  return node;
+                }
+              }
+              node = node.parentElement;
+            }
+            const keyed = marker.closest('[class*="st-key-la_concept_card_"]');
+            if (keyed) return keyed;
+            return marker.closest('[data-testid="stVerticalBlock"]');
+          };
+
           const enhanceConceptCards = () => {
+            const applyCardStyle = (wrapper) => {
+              if (!wrapper || wrapper.dataset.laConceptStyled === "1") return;
+              wrapper.classList.add("la-concept-card-wrap");
+              wrapper.style.setProperty("position", "relative", "important");
+              wrapper.style.setProperty("border-top",    "1px solid #cfdede", "important");
+              wrapper.style.setProperty("border-right",  "1px solid #cfdede", "important");
+              wrapper.style.setProperty("border-bottom", "1px solid #cfdede", "important");
+              wrapper.style.setProperty("border-left",   "4px solid #0f766e", "important");
+              wrapper.style.setProperty("border-radius", "8px",               "important");
+              wrapper.style.setProperty("margin-bottom", "1.5rem",            "important");
+              wrapper.style.setProperty("background",    "#ffffff",           "important");
+              wrapper.style.setProperty("padding",       "0.85rem 1rem 0.65rem", "important");
+              wrapper.style.setProperty("box-shadow",    "0 6px 18px rgba(15,23,42,0.05)", "important");
+              wrapper.dataset.laConceptStyled = "1";
+            };
+
             doc.querySelectorAll(".la-concept-card-start").forEach((marker) => {
-              const wrapper = marker.closest(
-                '[data-testid="stVerticalBlockBorderWrapper"]'
-              );
-              if (!wrapper) return;
-              wrapper.style.setProperty("border", "1px solid #cfdede", "important");
-              wrapper.style.setProperty("border-left", "4px solid #0f766e", "important");
-              wrapper.style.setProperty("border-radius", "8px", "important");
-              wrapper.style.setProperty("margin-bottom", "1.5rem", "important");
-              wrapper.style.setProperty("background", "#ffffff", "important");
+              applyCardStyle(findConceptCardWrapper(marker));
+            });
+
+            doc.querySelectorAll(".la-concept-title").forEach((titleEl) => {
+              const wrapper = findConceptCardWrapper(titleEl);
+              if (wrapper && wrapper.contains(titleEl)) applyCardStyle(wrapper);
             });
           };
 
@@ -815,11 +966,12 @@ st.markdown(
         border: 1px solid transparent;
       }
       div[data-testid="stTabs"].la-srs-tabs-root button[aria-selected="true"] {
-        background: #ffffff !important;
-        color: var(--accent-strong);
-        border-color: #b8d9d5;
-        box-shadow: 0 4px 12px rgba(15, 118, 110, 0.12);
-        font-weight: 700;
+        background: linear-gradient(135deg, #0f766e, #115e59) !important;
+        color: #ffffff !important;
+        border-color: transparent !important;
+        border-width: 1px;
+        box-shadow: 0 8px 20px rgba(15, 118, 110, 0.24);
+        font-weight: 800;
       }
       div[data-testid="stTabs"].la-srs-tabs-root [data-baseweb="tab-highlight"] {
         display: none !important;
@@ -833,13 +985,13 @@ st.markdown(
 
       /* Study question input — visible border */
       div.la-study-question-marker { display: none; }
-      section.main div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] input,
-      section.main div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] > div > div {
+      section[data-testid="stMain"] div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] input,
+      section[data-testid="stMain"] div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] > div > div {
         border: 1px solid #b8c9c8 !important;
         background: #ffffff !important;
         box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.04) !important;
       }
-      section.main div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] input:focus {
+      section[data-testid="stMain"] div[data-testid="stVerticalBlock"]:has(.la-study-question-marker) [data-testid="stTextInput"] input:focus {
         border-color: var(--accent) !important;
         box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.2) !important;
       }
@@ -1053,6 +1205,7 @@ st.markdown(
         color: #0f766e !important;
         font-weight: 800 !important;
         background: rgba(15, 118, 110, 0.16) !important;
+        box-shadow: inset 3px 0 0 #0f766e !important;
       }
       hr.la-sidebar-nav-divider {
         border: none;
@@ -1183,20 +1336,25 @@ st.markdown(
         z-index: 10;
         backdrop-filter: blur(10px);
       }
-      
-      /* Weak-topic concept cards */
+
+      /* Weak-topic concept cards (Streamlit 1.52+: bordered st.container) */
       div.la-concept-card-start,
       div.la-concept-footer-marker { display: none; }
-      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) {
-        border: 1px solid #cfdede !important;
-        border-left: 4px solid var(--accent) !important;
+      section[data-testid="stMain"] .la-concept-card-wrap,
+      section[data-testid="stMain"] [class*="st-key-la_concept_card_"] {
+        position: relative;
+        border-top:    1px solid #cfdede !important;
+        border-right:  1px solid #cfdede !important;
+        border-bottom: 1px solid #cfdede !important;
+        border-left:   4px solid var(--accent) !important;
         border-radius: 8px !important;
         margin-bottom: 1.5rem !important;
         padding: 0.85rem 1rem 0.65rem !important;
         background: #ffffff !important;
         box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05) !important;
       }
-      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) [data-testid="stMetric"] {
+      section[data-testid="stMain"] .la-concept-card-wrap [data-testid="stMetric"],
+      section[data-testid="stMain"] [class*="st-key-la_concept_card_"] [data-testid="stMetric"] {
         background: #f0f9f8;
         border: 1px solid #d5ebe8;
         padding: 0.4rem 0.55rem;
@@ -1204,10 +1362,12 @@ st.markdown(
         margin-bottom: 0;
         min-height: 0;
       }
-      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) [data-testid="stMetric"] label {
+      section[data-testid="stMain"] .la-concept-card-wrap [data-testid="stMetric"] label,
+      section[data-testid="stMain"] [class*="st-key-la_concept_card_"] [data-testid="stMetric"] label {
         font-size: 0.78rem;
       }
-      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) [data-testid="stMetric"] [data-testid="stMetricValue"] {
+      section[data-testid="stMain"] .la-concept-card-wrap [data-testid="stMetric"] [data-testid="stMetricValue"],
+      section[data-testid="stMain"] [class*="st-key-la_concept_card_"] [data-testid="stMetric"] [data-testid="stMetricValue"] {
         font-size: 1.05rem;
       }
       .la-concept-title {
@@ -1221,6 +1381,11 @@ st.markdown(
         border: none;
         border-top: 1px solid #e2eceb;
         margin: 0.35rem 0 0.65rem;
+      }
+      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) [data-testid="stSelectbox"] {
+        border-top: 1px solid #d5ebe8;
+        padding-top: 0.7rem;
+        margin-top: 0.5rem;
       }
       section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) .la-concept-actions {
         background: #f4f7f7;
@@ -1352,6 +1517,7 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
+    _inject_page_ui_enhancements()
 
     if sidebar_stem:
         progress = _sidebar_progress_snapshot(sidebar_stem, limit=5)
@@ -1589,7 +1755,6 @@ if uploaded:
     # ----------------------------
     # SECTION: Study
     # ----------------------------
-    st.markdown('<a id="study"></a>', unsafe_allow_html=True)
     _section_divider(
         "Study",
         icon="📖",
@@ -1875,7 +2040,6 @@ if uploaded:
     st.markdown('<hr class="la-learn-flow-break" />', unsafe_allow_html=True)
 
     # ── Quiz ──────────────────────────────────────────────────────────────
-    st.markdown('<a id="test-yourself"></a>', unsafe_allow_html=True)
     _subsection_divider(
         "Test yourself",
         icon="📝",
@@ -1885,7 +2049,6 @@ if uploaded:
     render_quiz(st=st, stem=stem, text=text, llm=llm, hist_key=hist_key)
 
     # ── Weak topics ───────────────────────────────────────────────────────
-    st.markdown('<a id="weak-topics"></a>', unsafe_allow_html=True)
     st.markdown('<hr class="la-major-section-break" />', unsafe_allow_html=True)
     _subsection_divider(
         "Weak topics",
@@ -1903,9 +2066,8 @@ if uploaded:
     )
 
     # ── Spaced Repetition ─────────────────────────────────────────────────
-    st.markdown('<a id="srs"></a>', unsafe_allow_html=True)
     st.markdown('<hr class="la-major-section-break" />', unsafe_allow_html=True)
-    _subsection_divider(
+    _section_divider(
         "Spaced repetition (SRS)",
         icon="🗓️",
         subtitle="Review due cards, or browse and manage all saved cards.",
