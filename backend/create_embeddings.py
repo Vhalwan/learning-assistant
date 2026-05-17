@@ -65,6 +65,51 @@ def load_embeddings(path: str) -> Tuple[List[str], List[str], np.ndarray]:
     return ids, texts, vecs
 
 
+def create_embeddings_for_text_remote(
+    text,
+    stem,
+    user_id,
+    max_chars=2000,
+    overlap=200,
+    dim=EMBED_DIM,
+    batch_size=32,
+):
+    chunks = chunk_text(text, max_chars=max_chars, overlap=overlap)
+    ids = []
+    texts = []
+    for i, c in enumerate(chunks):
+        ids.append(f"uploaded_chunk_{i}")
+        texts.append(c)
+
+    provider = get_embedding_provider()
+
+    vecs = provider.embed(texts, dim=dim, batch_size=batch_size)
+    if len(vecs) != len(texts):
+        raise RuntimeError("Embedding provider returned mismatched length")
+
+    rows = []
+    for id_, txt, emb in zip(ids, texts, vecs):
+        rows.append({"id": id_, "text": txt, "embedding": [float(x) for x in emb]})
+
+    from backend.storage_client import upload_embeddings
+
+    upload_embeddings(user_id, stem, json.dumps(rows, ensure_ascii=False))
+    return rows
+
+
+def load_embeddings_remote(user_id, stem):
+    from backend.storage_client import download_embeddings
+
+    json_str = download_embeddings(user_id, stem)
+    if json_str is None:
+        raise FileNotFoundError
+    rows = json.loads(json_str)
+    ids = [r["id"] for r in rows]
+    texts = [r["text"] for r in rows]
+    vecs = np.array([r["embedding"] for r in rows], dtype=np.float32)
+    return ids, texts, vecs
+
+
 if __name__ == "__main__":
     if not os.path.exists(INPUT_TXT):
         raise SystemExit(f"Input text not found: {INPUT_TXT}. Run the PDF extractor first.")

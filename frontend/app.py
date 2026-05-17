@@ -1608,11 +1608,19 @@ if not uploaded and not st.session_state.get("current_stem"):
 # Upload + controls (unchanged logic)
 # ----------------------------
 if uploaded:
+    from backend.user_context import USE_REMOTE_STORAGE
+    from backend.storage_client import upload_pdf, upload_embeddings, download_embeddings, embeddings_exist
+    from backend.create_embeddings import create_embeddings_for_text_remote, load_embeddings_remote
+    user_id = st.session_state.get("user", {}).get("id", "")
+
     # Save uploaded file
     raw_dir = get_raw_dir()
     raw_dir.mkdir(parents=True, exist_ok=True)
     tmp_pdf = raw_dir / uploaded.name
-    tmp_pdf.write_bytes(uploaded.read())
+    pdf_bytes = uploaded.read()
+    tmp_pdf.write_bytes(pdf_bytes)
+    if USE_REMOTE_STORAGE and user_id:
+        upload_pdf(user_id, uploaded.name, pdf_bytes)
 
     # Extract text preview
     with pdfplumber.open(tmp_pdf) as pdf:
@@ -1636,7 +1644,10 @@ if uploaded:
     lecture_is_ready = False
     ids, texts, vecs = [], [], np.array([])
     try:
-        ids, texts, vecs = load_embeddings(str(embeddings_path))
+        if USE_REMOTE_STORAGE and user_id:
+            ids, texts, vecs = load_embeddings_remote(user_id, stem)
+        else:
+            ids, texts, vecs = load_embeddings(str(embeddings_path))
         lecture_is_ready = len(ids) > 0
     except Exception:
         pass
@@ -1714,10 +1725,14 @@ if uploaded:
         build_index_btn = False
 
         # Create embeddings when missing or when they are requested
-        if (not embeddings_path.exists()):
+        already_exists = (embeddings_exist(user_id, stem) if (USE_REMOTE_STORAGE and user_id) else embeddings_path.exists())
+        if not already_exists:
             try:
                 with st.spinner("Creating embeddings..."):
-                    create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
+                    if USE_REMOTE_STORAGE and user_id:
+                        create_embeddings_for_text_remote(text, stem, user_id, dim=EMBED_DIM)
+                    else:
+                        create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
             except Exception as e:
                 st.error("Failed to create embeddings.")
                 st.exception(e)
@@ -1738,7 +1753,10 @@ if uploaded:
 
         # Show a single completion status when setup is ready.
         try:
-            ids, texts, vecs = load_embeddings(str(embeddings_path))
+            if USE_REMOTE_STORAGE and user_id:
+                ids, texts, vecs = load_embeddings_remote(user_id, stem)
+            else:
+                ids, texts, vecs = load_embeddings(str(embeddings_path))
             if len(ids) > 0:
                 st.success("Lecture is ready to study")
         except Exception:

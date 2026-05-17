@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import contextvars
+import os
 from pathlib import Path
 from typing import Optional
+
+USE_REMOTE_STORAGE = os.getenv("USE_REMOTE_STORAGE", "").lower() in ("1", "true", "yes")
 
 _user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("user_id", default=None)
 
