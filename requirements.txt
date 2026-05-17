@@ -1,11 +1,12 @@
 pdfplumber
 streamlit
 numpy
-pandas
-
 fastapi
 uvicorn
 faiss-cpu
-
 google-generativeai
+google-genai
 pytest
+supabase
+python-dotenv
+requests
