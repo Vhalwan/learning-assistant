@@ -110,6 +110,107 @@ def _linked_chunks(*values: Any) -> List[str]:
     return out
 
 
+def _coerce_mcq_history(
+    raw_history: Any,
+    *,
+    card_question: str = "",
+    last_qid: str = "",
+    default_choices: Optional[Dict[str, str]] = None,
+    default_answer: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    Normalize mcq_history to deduplicated dict rows with resolvable question text.
+    """
+    out: List[Dict[str, Any]] = []
+    index_by_qid: Dict[str, int] = {}
+
+    def _upsert(
+        qid: str,
+        question: str,
+        entry_choices: Any = None,
+        entry_answer: str = "",
+    ) -> None:
+        if not qid:
+            return
+        choices = _normalize_choices(entry_choices or {})
+        answer = _clean_text(entry_answer).upper()
+        if qid in index_by_qid:
+            row = out[index_by_qid[qid]]
+            incoming_question = _clean_text(question)
+            existing_question = _clean_text(row.get("question"))
+            if incoming_question and (
+                not existing_question or len(incoming_question) > len(existing_question)
+            ):
+                row["question"] = incoming_question
+            if not row.get("choices") and choices:
+                row["choices"] = choices
+            if not _clean_text(row.get("answer")) and answer:
+                row["answer"] = answer
+            return
+        index_by_qid[qid] = len(out)
+        out.append(
+            {
+                "qid": qid,
+                "question": _clean_text(question),
+                "choices": choices,
+                "answer": answer,
+            }
+        )
+
+    for entry in (raw_history or []):
+        if isinstance(entry, dict):
+            qid = _clean_text(entry.get("qid") or entry.get("id") or entry.get("mcq_id"))
+            question = _clean_text(entry.get("question"))
+            entry_choices = entry.get("choices")
+            entry_answer = entry.get("answer") or entry.get("correct_answer")
+        else:
+            qid = _clean_text(entry)
+            question = ""
+            entry_choices = {}
+            entry_answer = ""
+
+        if not qid:
+            continue
+
+        if not question:
+            quiz_item = load_quiz_item_by_id(qid) or {}
+            question = _clean_text(quiz_item.get("question"))
+            if not entry_choices and isinstance(quiz_item.get("choices"), dict):
+                entry_choices = quiz_item.get("choices")
+            if not entry_answer:
+                entry_answer = quiz_item.get("answer") or quiz_item.get("correct_answer") or ""
+
+        _upsert(qid, question, entry_choices, entry_answer)
+
+    for row in out:
+        if _clean_text(row.get("question")):
+            continue
+        qid = _clean_text(row.get("qid"))
+        if qid == _clean_text(last_qid):
+            row["question"] = _clean_text(card_question)
+        if not _clean_text(row.get("question")) and qid:
+            quiz_item = load_quiz_item_by_id(qid) or {}
+            row["question"] = _clean_text(quiz_item.get("question"))
+            if not row.get("choices") and isinstance(quiz_item.get("choices"), dict):
+                row["choices"] = _normalize_choices(quiz_item.get("choices"))
+            if not _clean_text(row.get("answer")):
+                row["answer"] = _clean_text(quiz_item.get("answer") or quiz_item.get("correct_answer")).upper()
+
+    if not out and _clean_text(last_qid):
+        question = _clean_text(card_question)
+        if not question:
+            quiz_item = load_quiz_item_by_id(last_qid) or {}
+            question = _clean_text(quiz_item.get("question"))
+        _upsert(
+            last_qid,
+            question,
+            default_choices,
+            default_answer,
+        )
+
+    return out
+
+
 def _new_card(chunk_id: str, stem: str = "", doc_id: str = "", card_id: str = "") -> Dict[str, Any]:
     card_id = _clean_text(card_id) or build_chunk_card_id(chunk_id)
     return {
@@ -218,15 +319,15 @@ def _normalize_card_entry(entry: Dict[str, Any], store_key: str) -> Optional[Dic
     card["wrong_attempts"] = wrong_attempts
     card["correct_attempts"] = max(correct_attempts, 0)
 
-    mcq_history = [
-        _clean_text(mcq_id)
-        for mcq_id in (entry.get("mcq_history") or [])
-        if _clean_text(mcq_id)
-    ]
     last_mcq_id = _clean_text(entry.get("last_mcq_id") or entry.get("quiz_question_id") or entry.get("qid"))
-    if not mcq_history and last_mcq_id and wrong_attempts > 0:
-        mcq_history = [last_mcq_id] * wrong_attempts
-    card["mcq_history"] = mcq_history
+    card_question = _clean_text(entry.get("question") or entry.get("last_question"))
+    card["mcq_history"] = _coerce_mcq_history(
+        entry.get("mcq_history"),
+        card_question=card_question,
+        last_qid=last_mcq_id,
+        default_choices=entry.get("choices"),
+        default_answer=_clean_text(entry.get("correct_answer") or entry.get("answer")),
+    )
 
     card["first_seen"] = _clean_text(entry.get("first_seen"))
     card["last_wrong"] = _clean_text(entry.get("last_wrong"))
@@ -300,7 +401,13 @@ def _build_card_from_legacy_entry(entry: Dict[str, Any], store_key: str) -> Opti
     card["total_attempts"] = total_attempts
     card["wrong_attempts"] = wrong_attempts
     card["correct_attempts"] = max(correct_attempts, 0)
-    card["mcq_history"] = [qid] * wrong_attempts if qid and wrong_attempts > 0 else []
+    card["mcq_history"] = _coerce_mcq_history(
+        [qid] * wrong_attempts if qid and wrong_attempts > 0 else [],
+        card_question=_clean_text(question_item.get("question") or entry.get("question")),
+        last_qid=qid,
+        default_choices=question_item.get("choices") or entry.get("choices"),
+        default_answer=_clean_text(question_item.get("answer") or entry.get("correct_answer") or entry.get("answer")),
+    )
     card["first_seen"] = _clean_text(entry.get("first_seen")) or _min_non_empty(
         entry.get("first_wrong", ""),
         entry.get("first_correct", ""),
@@ -340,7 +447,25 @@ def _merge_cards(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str
     merged["total_attempts"] = _as_int(merged.get("total_attempts")) + _as_int(incoming.get("total_attempts"))
     merged["wrong_attempts"] = _as_int(merged.get("wrong_attempts")) + _as_int(incoming.get("wrong_attempts"))
     merged["correct_attempts"] = _as_int(merged.get("correct_attempts")) + _as_int(incoming.get("correct_attempts"))
-    merged["mcq_history"] = list(merged.get("mcq_history") or []) + list(incoming.get("mcq_history") or [])
+    merged_last_qid = _max_non_empty(
+        merged.get("last_mcq_id", ""),
+        merged.get("quiz_question_id", ""),
+        incoming.get("last_mcq_id", ""),
+        incoming.get("quiz_question_id", ""),
+    )
+    merged_question = _max_non_empty(
+        merged.get("question", ""),
+        merged.get("last_question", ""),
+        incoming.get("question", ""),
+        incoming.get("last_question", ""),
+    )
+    merged["mcq_history"] = _coerce_mcq_history(
+        list(merged.get("mcq_history") or []) + list(incoming.get("mcq_history") or []),
+        card_question=merged_question,
+        last_qid=merged_last_qid,
+        default_choices=merged.get("choices"),
+        default_answer=_clean_text(merged.get("correct_answer") or merged.get("answer")),
+    )
     merged["first_seen"] = _min_non_empty(merged.get("first_seen", ""), incoming.get("first_seen", ""))
     merged["last_wrong"] = _max_non_empty(merged.get("last_wrong", ""), incoming.get("last_wrong", ""))
     merged["last_correct"] = _max_non_empty(merged.get("last_correct", ""), incoming.get("last_correct", ""))
@@ -461,11 +586,14 @@ def _decorate_card(card: Dict[str, Any]) -> Dict[str, Any]:
     decorated["choices"] = _normalize_choices(decorated.get("choices"))
     decorated["answer"] = _clean_text(decorated.get("answer") or decorated.get("correct_answer")).upper()
     decorated["correct_answer"] = decorated["answer"]
-    decorated["mcq_history"] = [
-        _clean_text(mcq_id)
-        for mcq_id in (decorated.get("mcq_history") or [])
-        if _clean_text(mcq_id)
-    ]
+    last_qid = _clean_text(decorated.get("quiz_question_id") or decorated.get("last_mcq_id"))
+    decorated["mcq_history"] = _coerce_mcq_history(
+        decorated.get("mcq_history"),
+        card_question=decorated.get("question") or decorated.get("last_question"),
+        last_qid=last_qid,
+        default_choices=decorated.get("choices"),
+        default_answer=decorated.get("answer"),
+    )
     decorated["linked_chunk_ids"] = _linked_chunks(
         decorated.get("linked_chunk_ids"),
         decorated.get("chunk_id"),
@@ -618,7 +746,14 @@ def record_quiz_result(
     else:
         card["wrong_attempts"] = _as_int(card.get("wrong_attempts")) + 1
         if mcq_id:
-            card["mcq_history"] = list(card.get("mcq_history") or []) + [mcq_id]
+            evidence_entry = {
+                "qid": mcq_id,
+                "question": question_text,
+                "choices": choices,
+                "answer": answer,
+                "chosen": _clean_text(chosen_answer).upper() if chosen_answer else "",
+            }
+            card["mcq_history"] = list(card.get("mcq_history") or []) + [evidence_entry]
         card["last_wrong"] = t
 
     card["last_seen"] = t

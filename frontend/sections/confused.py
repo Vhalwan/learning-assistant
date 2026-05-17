@@ -14,13 +14,14 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import streamlit as st
 
 # handlers and backend helpers (same as in app.py)
 from frontend.handlers import perform_confusion_analysis, perform_query, delete_confusion_entries
 from backend.study_srs import SRSManager
+from backend.quiz_storage import load_quiz_item_by_id
 
 
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
@@ -49,6 +50,51 @@ def _shorten(text: str, limit: int = 140) -> str:
 def _deterministic_confusion_id(stem: str, concept_text: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_]+", "_", concept_text).strip("_")[:40] or "conf"
     return f"{stem}_{safe}"
+
+
+def _stable_card_key(stem: str, item: dict, idx: int) -> str:
+    raw = (
+        item.get("store_key")
+        or item.get("card_id")
+        or item.get("concept_bucket_key")
+        or item.get("chunk_id")
+        or f"{stem}_{idx}"
+    )
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", str(raw)).strip("_")
+    return safe[:80] or f"{stem}_{idx}"
+
+
+def _resolve_mcq_question_text(
+    qid: str,
+    question: str,
+    *,
+    item: Optional[dict] = None,
+    meta: Optional[dict] = None,
+) -> str:
+    resolved = " ".join(str(question or "").split()).strip()
+    if resolved:
+        return resolved
+    if isinstance(meta, dict):
+        resolved = " ".join(str(meta.get("question") or "").split()).strip()
+        if resolved:
+            return resolved
+    if isinstance(item, dict):
+        card_qid = str(item.get("quiz_question_id") or item.get("last_mcq_id") or "").strip()
+        if qid and qid == card_qid:
+            resolved = " ".join(
+                str(
+                    item.get("original_question")
+                    or item.get("question")
+                    or item.get("last_question")
+                    or ""
+                ).split()
+            ).strip()
+            if resolved:
+                return resolved
+    if qid:
+        quiz_item = load_quiz_item_by_id(qid) or {}
+        resolved = " ".join(str(quiz_item.get("question") or "").split()).strip()
+    return resolved
 
 
 def _build_mcq_from_item(item: dict, selected_mcq: dict) -> dict:
@@ -243,6 +289,8 @@ def _collect_pending_blurb_requests(
         seen_q: set[tuple[str, str]] = set()
 
         for e in evidence:
+            if isinstance(e, str):
+                continue
             if e.get("type") not in ("quiz", "persisted"):
                 continue
             meta = e.get("meta", {}) or {}
@@ -337,6 +385,8 @@ def _build_reason_rows(
     reason_rows: list[str] = []
     seen_q: set[tuple[str, str]] = set()
     for e in evidence:
+        if isinstance(e, str):
+            continue
         if e.get("type") in ("quiz", "persisted"):
             meta = e.get("meta", {}) or {}
             qtext = " ".join(str(meta.get("question") or e.get("question") or "").split())
@@ -451,7 +501,8 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     else:
         preview_limit = min(len(real_confusions), 5)
         for idx, item in enumerate(real_confusions[:preview_limit], start=1):
-            with st.container(border=True, key=f"la_concept_card_{stem}_{idx}"):
+            card_key = _stable_card_key(stem, item, idx)
+            with st.container(border=True, key=f"la_concept_card_{card_key}"):
                 st.markdown('<div class="la-concept-card-start"></div>', unsafe_allow_html=True)
                 concept = item.get("title") or item.get("concept") or item.get("concept_label") or "Unlabeled concept"
                 extracted_concept = item.get("concept_label") or item.get("concept") or concept
@@ -482,20 +533,38 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 # confusion store only appends to on incorrect attempts, so every
                 # entry here represents a question the user actually got wrong.
                 mcq_candidates = []
-                seen_mcq = set()
+                seen_mcq_ids: set[str] = set()
                 for e in evidence:
-                    meta = e.get("meta", {}) or {}
-                    qid = meta.get("qid") or e.get("qid")
-                    question = meta.get("question") or e.get("question") or ""
+                    if isinstance(e, str):
+                        qid = e
+                        question = ""
+                        meta = {}
+                    else:
+                        meta = e.get("meta", {}) or {}
+                        qid = meta.get("qid") or e.get("qid") or ""
+                        question = e.get("question") or meta.get("question") or ""
                     stable_id = str(qid).strip() if qid else ""
-                    dedupe_key = (stable_id, str(question).strip())
-                    if dedupe_key in seen_mcq:
+                    question = _resolve_mcq_question_text(
+                        stable_id,
+                        question,
+                        item=item,
+                        meta=meta if isinstance(meta, dict) else {},
+                    )
+                    if stable_id:
+                        if stable_id in seen_mcq_ids:
+                            for row in mcq_candidates:
+                                if row.get("id") == stable_id and not row.get("question") and question:
+                                    row["question"] = question
+                                    row["label"] = question
+                            continue
+                        seen_mcq_ids.add(stable_id)
+                    elif not question:
                         continue
-                    seen_mcq.add(dedupe_key)
-                    if not stable_id and not question:
+                    if not question:
                         continue
-                    label = question or "(question text unavailable)"
-                    mcq_candidates.append({"id": stable_id or None, "question": question, "label": label})
+                    mcq_candidates.append(
+                        {"id": stable_id or None, "question": question, "label": question}
+                    )
 
                 # Only fall back to the card's latest question if it really was a
                 # wrong attempt. The persisted `last_question`/`original_question`
@@ -504,12 +573,25 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 # leaking a correctly-answered question into the SRS dropdown.
                 if is_mcq_item and not bool(item.get("last_is_correct", False)):
                     mcq_payload = _build_mcq_from_item(item, {"id": item.get("quiz_question_id"), "question": item.get("original_question")})
-                    if mcq_payload.get("question"):
-                        fallback_id = mcq_payload.get("id") or ""
-                        fallback_label = mcq_payload.get("question")
-                        candidate = {"id": fallback_id or None, "question": mcq_payload.get("question"), "label": fallback_label}
-                        if (candidate["id"], candidate["question"]) not in seen_mcq:
-                            mcq_candidates.insert(0, candidate)
+                    fallback_id = str(mcq_payload.get("id") or "").strip()
+                    fallback_question = str(mcq_payload.get("question") or "").strip()
+                    if fallback_question:
+                        if fallback_id and fallback_id in seen_mcq_ids:
+                            for row in mcq_candidates:
+                                if row.get("id") == fallback_id and not row.get("question"):
+                                    row["question"] = fallback_question
+                                    row["label"] = fallback_question
+                        else:
+                            if fallback_id:
+                                seen_mcq_ids.add(fallback_id)
+                            mcq_candidates.insert(
+                                0,
+                                {
+                                    "id": fallback_id or None,
+                                    "question": fallback_question,
+                                    "label": fallback_question,
+                                },
+                            )
 
                 fallback_label = "No wrong-answered question available"
                 mcq_candidates = mcq_candidates[:5]
@@ -517,12 +599,12 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 if not mcq_candidates:
                     mcq_candidates = [{"id": None, "question": "", "label": fallback_label}]
 
-                selected_mcq_key = f"conf_selected_mcq_{stem}_{idx}"
+                selected_mcq_key = f"conf_selected_mcq_{stem}_{card_key}"
                 mcq_option_indices = list(range(len(mcq_candidates)))
 
                 def _mcq_option_label(option_index: int) -> str:
                     row = mcq_candidates[option_index]
-                    return (row.get("question") or row.get("label") or "").strip() or "(question text unavailable)"
+                    return (row.get("question") or row.get("label") or "").strip()
 
                 selected_mcq_index = st.selectbox(
                     "Source question for Add to SRS",
@@ -547,7 +629,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 if evidence:
                     show_why = st.toggle(
                         "Why this weak area was flagged",
-                        key=f"conf_why_open_{stem}_{idx}",
+                        key=f"conf_why_open_{stem}_{card_key}",
                     )
                     if show_why:
                         st.caption("Last 3 wrong quiz attempts for this concept.")
@@ -610,7 +692,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 secondary_action_cols = st.columns(2)
                 with primary_action_cols[0]:
                     # Explain simply (kept — student-first)
-                    explain_btn_key = f"conf_explain_{stem}_{idx}"
+                    explain_btn_key = f"conf_explain_{stem}_{card_key}"
                     if st.button("Explain simply", key=explain_btn_key, type="primary", use_container_width=True):
                         try:
                             candidate_index_path = str(index_path) if index_path and Path(index_path).exists() else None
@@ -646,7 +728,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             st.exception(e)
 
                 with primary_action_cols[1]:
-                    follow_key = f"conf_follow_{stem}_{idx}"
+                    follow_key = f"conf_follow_{stem}_{card_key}"
                     if st.button("Ask follow-up in Chat", key=follow_key, use_container_width=True):
                         follow_prompt = (
                             f"Concept: {extracted_concept}\n"
@@ -664,7 +746,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 pass
                 with secondary_action_cols[0]:
                     # ➕ Add to SRS (idempotent)
-                    add_srs_key = f"conf_add_srs_{stem}_{idx}"
+                    add_srs_key = f"conf_add_srs_{stem}_{card_key}"
                     if st.button("Add to SRS", key=add_srs_key, use_container_width=True):
                         try:
                             mgr = SRSManager()
@@ -748,7 +830,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             st.error("Failed to add to SRS.")
                             st.exception(e)
                 with secondary_action_cols[1]:
-                    delete_key = f"conf_delete_{stem}_{idx}"
+                    delete_key = f"conf_delete_{stem}_{card_key}"
                     if st.button("Reset", key=delete_key, use_container_width=True):
                         if not delete_keys:
                             st.warning("No persisted entries found to delete.")

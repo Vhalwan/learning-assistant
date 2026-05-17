@@ -25,6 +25,7 @@ from backend.confusion_store import (
     record_quiz_result as _record_quiz_result,
     get_top_confusions as _get_top_confusions,
     delete_confusion_entries as _delete_confusion_entries,
+    _coerce_mcq_history,
 )
 from backend.confusion_analysis import analyze_confusion
 # faiss builder (optional)
@@ -295,6 +296,7 @@ def record_quiz_result(
         if isinstance(question_item, dict):
             concept_label = (question_item.get("concept_label") or "").strip()
             concept_id = (question_item.get("concept_id") or "").strip()
+        print(f"[debug] qid={qid} concept_id={concept_id} concept_label={concept_label}")
         _record_quiz_result(
             qid=qid,
             question=question or "",
@@ -371,12 +373,19 @@ def _merge_persisted_by_concept(rows: List[Dict[str, Any]], stem: str = "", doc_
         base["wrong_attempts"] = int(base.get("wrong_attempts", 0) or 0) + int(incoming.get("wrong_attempts", 0) or 0)
         base["correct_attempts"] = int(base.get("correct_attempts", 0) or 0) + int(incoming.get("correct_attempts", 0) or 0)
 
-        history = []
-        for mcq_id in list(base.get("mcq_history") or []) + list(incoming.get("mcq_history") or []):
-            clean = str(mcq_id or "").strip()
-            if clean:
-                history.append(clean)
-        base["mcq_history"] = history
+        base["mcq_history"] = _coerce_mcq_history(
+            list(base.get("mcq_history") or []) + list(incoming.get("mcq_history") or []),
+            card_question=(
+                (base.get("question") or base.get("last_question") or "")
+                or (incoming.get("question") or incoming.get("last_question") or "")
+            ),
+            last_qid=(
+                (base.get("quiz_question_id") or base.get("last_mcq_id") or "")
+                or (incoming.get("quiz_question_id") or incoming.get("last_mcq_id") or "")
+            ),
+            default_choices=base.get("choices") if isinstance(base.get("choices"), dict) else incoming.get("choices"),
+            default_answer=(base.get("answer") or base.get("correct_answer") or incoming.get("answer") or ""),
+        )
 
         linked = []
         for chunk_id in (
@@ -488,7 +497,20 @@ def perform_confusion_analysis(
         last_qid = (p.get("quiz_question_id") or p.get("last_mcq_id") or "").strip()
 
         evidence: List[Dict[str, Any]] = []
-        history_ids = [str(mcq_id or "").strip() for mcq_id in (p.get("mcq_history") or []) if str(mcq_id or "").strip()]
+        history_ids = []
+        history_question_map: Dict[str, str] = {}
+        history_choices_map: Dict[str, dict] = {}
+        for entry in (p.get("mcq_history") or []):
+            if isinstance(entry, dict):
+                qid = str(entry.get("qid") or "").strip()
+                if qid:
+                    history_ids.append(qid)
+                    if entry.get("question"):
+                        history_question_map[qid] = str(entry["question"]).strip()
+                    if isinstance(entry.get("choices"), dict):
+                        history_choices_map[qid] = entry["choices"]
+            elif str(entry or "").strip():
+                history_ids.append(str(entry).strip())
         seen_qids = set()
         for mcq_id in reversed(history_ids):
             if mcq_id in seen_qids:
@@ -497,12 +519,14 @@ def perform_confusion_analysis(
             quiz_item = load_quiz_item_by_id(mcq_id) or {}
             evidence_question = (
                 (quiz_item.get("question") or "").strip()
+                or history_question_map.get(mcq_id, "")
                 or (last_question if mcq_id == last_qid else "")
             )
             evidence_choices = (
                 quiz_item.get("choices")
                 if isinstance(quiz_item.get("choices"), dict)
-                else (p.get("choices") if mcq_id == last_qid and isinstance(p.get("choices"), dict) else {})
+                else history_choices_map.get(mcq_id)
+                or (p.get("choices") if mcq_id == last_qid and isinstance(p.get("choices"), dict) else {})
             )
             evidence_answer = (
                 (quiz_item.get("answer") or "").strip().upper()

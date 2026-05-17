@@ -215,7 +215,10 @@ def _qids_linked_to_confusion_card(p: Dict[str, Any]) -> List[str]:
     for k in ("quiz_question_id", "last_mcq_id"):
         push(p.get(k))
     for raw in p.get("mcq_history") or []:
-        push(raw)
+        if isinstance(raw, dict):
+            push(raw.get("qid"))
+        else:
+            push(raw)
     push(p.get("store_key"))
     push(p.get("card_id"))
     for e in p.get("evidence") or []:
