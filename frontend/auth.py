@@ -29,6 +29,12 @@ def logout() -> None:
     except Exception:
         pass
     _clear_auth_state()
+    keys_to_clear = [
+        k for k in list(st.session_state.keys())
+        if k not in ("use_api_mode", "api_token", "use_faiss_search")
+    ]
+    for k in keys_to_clear:
+        del st.session_state[k]
 
 
 def _restore_session_from_state() -> bool:

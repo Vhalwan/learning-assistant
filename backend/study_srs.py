@@ -8,8 +8,15 @@ DEFAULT_PROGRESS_PATH = "data/processed/study_progress.json"
 INTERVALS = [1, 3, 7, 14, 30, 60, 120]
 
 class SRSManager:
-    def __init__(self, path: str = DEFAULT_PROGRESS_PATH):
-        self.path = path
+    def __init__(self, path: str = None):
+        if path is None:
+            try:
+                from backend.user_context import get_srs_path
+                self.path = str(get_srs_path())
+            except Exception:
+                self.path = DEFAULT_PROGRESS_PATH
+        else:
+            self.path = path
         self._data = self._load()
 
     def _load(self) -> Dict[str, Any]:
