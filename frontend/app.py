@@ -1759,6 +1759,7 @@ if uploaded:
                 ids, texts, vecs = load_embeddings(str(embeddings_path))
             if len(ids) > 0:
                 st.success("Lecture is ready to study")
+                st.rerun()
         except Exception:
             ids, texts, vecs = [], [], np.array([])
             st.warning("Processing not ready yet. Open Advanced reset tools if you need to recreate embeddings.")
