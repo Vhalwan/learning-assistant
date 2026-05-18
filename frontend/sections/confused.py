@@ -648,7 +648,14 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                         else:
                             st.write("- Repeated incorrect quiz answers for this concept.")
 
-                delete_keys = []
+                # Primary key: use the item's own store_key/card_id first (most reliable)
+                _primary_delete_key = (
+                    item.get("store_key")
+                    or item.get("card_id")
+                    or item.get("chunk_id")
+                    or ""
+                ).strip()
+                delete_keys = [_primary_delete_key] if _primary_delete_key else []
                 for e in evidence:
                     meta = e.get("meta", {}) or {}
                     store_key = (meta.get("store_key") or "").strip()
@@ -662,7 +669,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 store_key = qtext[:120]
                     if store_key:
                         delete_keys.append(store_key)
-                delete_keys = sorted(set(delete_keys))
+                delete_keys = list(dict.fromkeys(delete_keys))  # dedupe, primary key first
 
                 # Centralized action input resolution for this card
                 deterministic_fallback_id = (
@@ -830,20 +837,25 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             st.error("Failed to add to SRS.")
                             st.exception(e)
                 with secondary_action_cols[1]:
-                    delete_key = f"conf_delete_{stem}_{card_key}"
-                    if st.button("Reset", key=delete_key, use_container_width=True):
-                        if not delete_keys:
-                            st.warning("No persisted entries found to delete.")
-                        else:
-                            removed = delete_confusion_entries(delete_keys)
-                            st.success(f"Reset {removed} confusion card(s).")
-                            try:
+                    confirm_key = f"conf_reset_confirm_{stem}_{card_key}"
+                    if st.session_state.get(confirm_key):
+                        st.warning("Reset this confusion card?")
+                        yes_col, no_col = st.columns(2)
+                        if yes_col.button("Yes, reset", key=f"{confirm_key}_yes", use_container_width=True, type="primary"):
+                            delete_confusion_entries(delete_keys)
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                        if no_col.button("Cancel", key=f"{confirm_key}_no", use_container_width=True):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                    else:
+                        delete_key = f"conf_delete_{stem}_{card_key}"
+                        if st.button("Reset", key=delete_key, use_container_width=True):
+                            if not delete_keys:
+                                st.warning("No persisted entries found to delete.")
+                            else:
+                                st.session_state[confirm_key] = True
                                 st.rerun()
-                            except Exception:
-                                try:
-                                    st.experimental_rerun()
-                                except Exception:
-                                    pass
         if notice_rendered:
             st.session_state.pop(followup_notice_key, None)
     st.markdown("---")

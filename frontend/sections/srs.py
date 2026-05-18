@@ -279,6 +279,44 @@ def _concept_title(
     return "Other topics"
 
 
+def _streamlit_dialog(title: str):
+    dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+    if dialog is None:
+        raise RuntimeError("Streamlit dialog support is required for confirmation popups.")
+    return dialog(title)
+
+
+@_streamlit_dialog("Delete SRS card?")
+def _render_srs_delete_confirm_dialog(st_module: Any, srs_mgr: SRSManager) -> None:
+    selected = st_module.session_state.get("_srs_browse_delete_pending")
+    if not selected:
+        return
+
+    card_id = selected.get("card_id")
+    if not card_id:
+        st_module.session_state.pop("_srs_browse_delete_pending", None)
+        return
+
+    st_module.write("Delete this SRS card?")
+    action_cols = st_module.columns(2)
+    if action_cols[0].button("No", key="srs_delete_confirm_no", use_container_width=True):
+        st_module.session_state.pop("_srs_browse_delete_pending", None)
+        st_module.rerun()
+    if action_cols[1].button("Yes", key="srs_delete_confirm_yes", use_container_width=True):
+        try:
+            srs_mgr.delete_card(card_id)
+            reviewed_this_session = st_module.session_state.get("srs_reviewed_this_session", set())
+            if card_id in reviewed_this_session:
+                reviewed_this_session.discard(card_id)
+                st_module.session_state["srs_reviewed_this_session"] = reviewed_this_session
+            st_module.session_state["_srs_browse_expand_topic"] = selected.get("browse_group_title", "")
+            st_module.session_state.pop("_srs_browse_delete_pending", None)
+            st_module.success("Card removed.")
+            st_module.rerun()
+        except Exception as e:
+            st_module.error(f"Failed to remove card: {e}")
+
+
 def _parse_meta_next_due_dt(meta: Dict | None) -> datetime | None:
     meta = meta or {}
     raw = meta.get("next_due")
@@ -877,17 +915,10 @@ def _render_browse_single_card_block(
             st_module.write(explanation)
 
         if st_module.button("🗑 Remove card", key=f"browse_remove_{card_id}", use_container_width=True):
-            try:
-                srs_mgr.delete_card(card_id)
-                reviewed_this_session = st_module.session_state.get("srs_reviewed_this_session", set())
-                if card_id in reviewed_this_session:
-                    reviewed_this_session.discard(card_id)
-                    st_module.session_state["srs_reviewed_this_session"] = reviewed_this_session
-                st_module.session_state["_srs_browse_expand_topic"] = browse_group_title
-                st_module.success("Card removed.")
-                st_module.rerun()
-            except Exception as e:
-                st_module.error(f"Failed to remove card: {e}")
+            st_module.session_state["_srs_browse_delete_pending"] = {
+                "card_id": card_id,
+                "browse_group_title": browse_group_title,
+            }
 
         st_module.markdown("---")
 
@@ -914,6 +945,9 @@ def _render_browse_tab(st_module: Any, stem: str | None):
         due_cards = set(cid for cid in srs_mgr.get_due_cards() if cid in lecture_cards)
         confusion_topics = _build_confusion_topic_lookup(stem)
         expand_resume = st_module.session_state.pop("_srs_browse_expand_topic", None)
+        # Also keep the expander open while the delete confirmation dialog is showing
+        _delete_pending = st_module.session_state.get("_srs_browse_delete_pending") or {}
+        _pending_group = _delete_pending.get("browse_group_title", "")
 
         rows: List[Tuple[str, str, Dict | None, Dict | None]] = []
         for card_id in lecture_cards:
@@ -933,7 +967,10 @@ def _render_browse_tab(st_module: Any, stem: str | None):
             bucket = grouped[concept_title]
             n = len(bucket)
             card_word = "card" if n == 1 else "cards"
-            keep_open = bool(expand_resume and expand_resume == concept_title and n > 0)
+            keep_open = bool(
+                (expand_resume and expand_resume == concept_title and n > 0)
+                or (_pending_group and _pending_group == concept_title and n > 0)
+            )
             with st_module.expander(f"{concept_title} ({n} {card_word})", expanded=keep_open):
                 for card_id, meta, quiz_item in bucket:
                     _render_browse_single_card_block(
@@ -945,6 +982,8 @@ def _render_browse_tab(st_module: Any, stem: str | None):
                         due_cards,
                         concept_title,
                     )
+        if st_module.session_state.get("_srs_browse_delete_pending"):
+            _render_srs_delete_confirm_dialog(st_module, srs_mgr)
     except Exception as e:
         st_module.error("Error loading SRS data.")
         st_module.exception(e)
