@@ -15,6 +15,7 @@ from backend.user_context import set_user_id
 
 SESSION_USER_KEY = "auth_user"
 SESSION_AUTH_KEY = "auth_session"
+FORGOT_PASSWORD_KEY = "show_forgot_password"
 
 
 def _clear_auth_state() -> None:
@@ -89,70 +90,295 @@ def _persist_session(session: Any, user: Any) -> Dict[str, str]:
     return st.session_state[SESSION_USER_KEY]
 
 
+def _sync_forgot_password_link_state() -> None:
+    forgot_param = st.query_params.get("forgot_password")
+    if isinstance(forgot_param, list):
+        forgot_param = forgot_param[0] if forgot_param else None
+    if forgot_param == "1":
+        st.session_state[FORGOT_PASSWORD_KEY] = True
+        st.query_params.clear()
+    elif forgot_param == "0":
+        st.session_state[FORGOT_PASSWORD_KEY] = False
+        st.query_params.clear()
+
+
 def render_auth_screen() -> None:
+    _sync_forgot_password_link_state()
+
     st.markdown(
         """
-        <div class="app-header" style="margin-bottom: 1.5rem;">
-          <div class="app-logo">L</div>
-          <div>
-            <div class="app-title">Lectova</div>
-            <div class="app-subtitle">Sign in to continue</div>
-          </div>
+        <style>
+          .stApp {
+            background: #f8fafc;
+          }
+
+          div[data-testid="stMainBlockContainer"] {
+            max-width: 1040px;
+            padding-top: 4.5rem;
+          }
+
+          .lectova-auth-brand {
+            text-align: center;
+            margin: 0 auto 1.65rem;
+          }
+
+          .lectova-auth-name {
+            color: #0f172a;
+            font-size: clamp(2.7rem, 6vw, 4.25rem);
+            font-weight: 800;
+            line-height: 1;
+            letter-spacing: 0;
+          }
+
+          .lectova-auth-subtitle {
+            color: #64748b;
+            font-size: 1.06rem;
+            font-weight: 500;
+            margin-top: 0.7rem;
+          }
+
+          div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            box-shadow: 0 18px 50px rgba(15, 23, 42, 0.09);
+            padding: 1.35rem 1.45rem 1.5rem;
+          }
+
+          div[data-testid="stTabs"] button[data-baseweb="tab"] {
+            font-weight: 700;
+            color: #475569;
+            padding-top: 0.25rem;
+            padding-bottom: 0.65rem;
+          }
+
+          div[data-testid="stTabs"] button[aria-selected="true"] {
+            color: #0f766e;
+          }
+
+          div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+            background-color: #0f766e;
+            height: 3px;
+            border-radius: 2px;
+          }
+
+          div[data-testid="stTextInput"] {
+            margin-bottom: 0.72rem;
+          }
+
+          div[data-testid="stTextInput"] label {
+            color: #334155;
+            font-weight: 650;
+            padding-bottom: 0.25rem;
+          }
+
+          div[data-testid="stTextInput"] input {
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            min-height: 2.85rem;
+            padding: 0.75rem 0.9rem;
+            background: #ffffff;
+            color: #0f172a;
+          }
+
+          div[data-testid="stTextInput"] input:focus {
+            border-color: #0f766e;
+            box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+          }
+
+          .st-key-auth_login_password input::-ms-reveal,
+          .st-key-auth_login_password input::-ms-clear,
+          .st-key-auth_signup_password input::-ms-reveal,
+          .st-key-auth_signup_password input::-ms-clear {
+            display: none !important;
+            width: 0 !important;
+            height: 0 !important;
+          }
+
+          .st-key-auth_login_password [data-testid="InputInstructions"],
+          .st-key-auth_signup_password [data-testid="InputInstructions"] {
+            display: none !important;
+          }
+
+          div[data-testid="stButton"] > button {
+            border-radius: 8px;
+            min-height: 2.85rem;
+            font-weight: 750;
+            margin-top: 0.25rem;
+          }
+
+          div[data-testid="stButton"] > button[kind="primary"] {
+            background: #0f766e;
+            border-color: #0f766e;
+          }
+
+          div[data-testid="stButton"] > button[kind="primary"]:hover {
+            background: #115e59;
+            border-color: #115e59;
+          }
+
+          .lectova-auth-link {
+            color: #0f766e !important;
+            font-size: 0.88rem;
+            font-weight: 700;
+            text-decoration: none !important;
+          }
+
+          .lectova-auth-link:hover {
+            color: #115e59 !important;
+            text-decoration: underline !important;
+          }
+
+          .lectova-forgot-link-row {
+            margin: -0.25rem 0 0.85rem;
+            text-align: right;
+          }
+
+          .lectova-back-link-row {
+            margin-bottom: 1rem;
+          }
+        </style>
+
+        <div class="lectova-auth-brand">
+          <div class="lectova-auth-name">Lectova</div>
+          <div class="lectova-auth-subtitle">Your AI-powered lecture companion</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    email = st.text_input("Email", key="auth_email", autocomplete="email")
-    password = st.text_input(
-        "Password",
-        type="password",
-        key="auth_password",
-        autocomplete="current-password",
-    )
-
-    col_login, col_register = st.columns(2)
-    with col_login:
-        login_clicked = st.button("Log in", type="primary", use_container_width=True)
-    with col_register:
-        register_clicked = st.button("Register", use_container_width=True)
-
-    if login_clicked:
-        if not (email or "").strip() or not password:
-            st.error("Enter your email and password.")
-        else:
-            try:
-                client = get_supabase_client()
-                res = client.auth.sign_in_with_password(
-                    {"email": email.strip(), "password": password}
+    left_pad, form_col, right_pad = st.columns([1, 1.15, 1])
+    with form_col:
+        with st.container(border=True):
+            if st.session_state.get(FORGOT_PASSWORD_KEY):
+                st.markdown(
+                    """
+                    <div class="lectova-back-link-row">
+                      <a class="lectova-auth-link" href="?forgot_password=0" target="_self">
+                        &larr; Back to login
+                      </a>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
-                if not res.session or not res.user:
-                    st.error("Sign-in failed. Check your email and password.")
-                else:
-                    _persist_session(res.session, res.user)
-                    st.rerun()
-            except Exception as exc:
-                st.error(_auth_error_message(exc, registering=False))
-
-    if register_clicked:
-        if not (email or "").strip() or not password:
-            st.error("Enter your email and password.")
-        else:
-            try:
-                client = get_supabase_client()
-                res = client.auth.sign_up(
-                    {"email": email.strip(), "password": password}
+                reset_email = st.text_input(
+                    "Email",
+                    key="auth_reset_email",
+                    autocomplete="email",
+                    placeholder="you@example.com",
                 )
-                if res.session and res.user:
-                    _persist_session(res.session, res.user)
-                    st.rerun()
-                else:
-                    st.success(
-                        "Account created. If email confirmation is enabled, "
-                        "check your inbox, then log in."
-                    )
-            except Exception as exc:
-                st.error(_auth_error_message(exc, registering=True))
+                reset_clicked = st.button(
+                    "Send reset email",
+                    type="primary",
+                    use_container_width=True,
+                    key="auth_reset_submit",
+                )
+
+                if reset_clicked:
+                    if not (reset_email or "").strip():
+                        st.error("Enter your email.")
+                    else:
+                        try:
+                            client = get_supabase_client()
+                            client.auth.reset_password_email(reset_email.strip())
+                            st.success("Check your email for a reset link")
+                        except Exception as exc:
+                            st.error(str(exc))
+                return
+
+            login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
+
+            with login_tab:
+                email = st.text_input(
+                    "Email",
+                    key="auth_login_email",
+                    autocomplete="email",
+                    placeholder="you@example.com",
+                )
+                password = st.text_input(
+                    "Password",
+                    type="password",
+                    key="auth_login_password",
+                    autocomplete="current-password",
+                    placeholder="Enter your password",
+                )
+                st.markdown(
+                    """
+                    <div class="lectova-forgot-link-row">
+                      <a class="lectova-auth-link" href="?forgot_password=1" target="_self">
+                        Forgot password?
+                      </a>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                login_clicked = st.button(
+                    "Login",
+                    type="primary",
+                    use_container_width=True,
+                    key="auth_login_submit",
+                )
+
+                if login_clicked:
+                    if not (email or "").strip() or not password:
+                        st.error("Enter your email and password.")
+                    else:
+                        try:
+                            client = get_supabase_client()
+                            res = client.auth.sign_in_with_password(
+                                {"email": email.strip(), "password": password}
+                            )
+                            if not res.session or not res.user:
+                                st.error("Sign-in failed. Check your email and password.")
+                            else:
+                                _persist_session(res.session, res.user)
+                                st.rerun()
+                        except Exception as exc:
+                            st.error(_auth_error_message(exc, registering=False))
+
+            with signup_tab:
+                register_email = st.text_input(
+                    "Email",
+                    key="auth_signup_email",
+                    autocomplete="email",
+                    placeholder="you@example.com",
+                )
+                register_password = st.text_input(
+                    "Password",
+                    type="password",
+                    key="auth_signup_password",
+                    autocomplete="new-password",
+                    placeholder="Create a password",
+                )
+                register_clicked = st.button(
+                    "Sign Up",
+                    type="primary",
+                    use_container_width=True,
+                    key="auth_signup_submit",
+                )
+
+                if register_clicked:
+                    if not (register_email or "").strip() or not register_password:
+                        st.error("Enter your email and password.")
+                    else:
+                        try:
+                            client = get_supabase_client()
+                            res = client.auth.sign_up(
+                                {
+                                    "email": register_email.strip(),
+                                    "password": register_password,
+                                }
+                            )
+                            if res.session and res.user:
+                                _persist_session(res.session, res.user)
+                                st.rerun()
+                            else:
+                                st.success(
+                                    "Account created. If email confirmation is enabled, "
+                                    "check your inbox, then log in."
+                                )
+                        except Exception as exc:
+                            st.error(_auth_error_message(exc, registering=True))
 
 
 def require_auth() -> Dict[str, str]:

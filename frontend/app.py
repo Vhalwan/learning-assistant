@@ -1031,19 +1031,18 @@ st.markdown(
         margin-bottom: 1.5rem;
         box-shadow: 0 18px 38px rgba(15, 23, 42, 0.14);
       }
-      .app-logo {
-        width: 54px;
-        height: 54px;
-        border-radius: 18px;
-        background: rgba(255, 255, 255, 0.16);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 700;
-        font-size: 1.15rem;
-        letter-spacing: 0.08em;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-      }
+	      .app-logo {
+	        width: 54px;
+	        height: 54px;
+	        border-radius: 18px;
+	        background: rgba(255, 255, 255, 0.16);
+	        display: flex;
+	        align-items: center;
+	        justify-content: center;
+	        font-size: 1.55rem;
+	        line-height: 1;
+	        border: 1px solid rgba(255, 255, 255, 0.2);
+	      }
       .app-eyebrow {
         font-size: 0.8rem;
         text-transform: uppercase;
@@ -1448,7 +1447,7 @@ st.markdown(
 st.markdown(
     """
     <div class="app-header">
-      <div class="app-logo">LV</div>
+      <div class="app-logo" aria-hidden="true">L</div>
       <div>
         <div class="app-title">Lectova</div>
         <div class="app-subtitle">One lecture. Understand it, test it, remember it.</div>
