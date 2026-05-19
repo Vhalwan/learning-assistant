@@ -20,6 +20,13 @@ def _concept_payload(stem: str, concepts: List[Dict], doc_id: str = "") -> Dict:
     }
 
 
+def _load_remote_concept_payload(stem: str) -> Optional[Dict]:
+    from backend.supabase_store import load_blob
+
+    raw = load_blob(NAMESPACE_CONCEPTS, stem)
+    return raw if isinstance(raw, dict) and raw.get("concepts") is not None else None
+
+
 def _default_concept_dir() -> str:
     if get_user_id():
         return get_concept_dir()
@@ -72,26 +79,19 @@ def load_concepts(stem: str, concept_dir: Optional[str] = None) -> Optional[List
     """
     if concept_dir is None:
         concept_dir = _default_concept_dir()
-    meta = load_concepts_with_meta(stem, concept_dir=concept_dir)
+    if use_remote_store():
+        meta = _load_remote_concept_payload(stem)
+        if meta is not None:
+            concepts = meta.get("concepts")
+            return concepts if isinstance(concepts, list) and concepts else None
+
+    meta = _load_local_concepts_with_meta(stem, concept_dir=concept_dir)
     if meta and isinstance(meta.get("concepts"), list) and meta["concepts"]:
         return meta["concepts"]
     return None
 
 
-def load_concepts_with_meta(stem: str, concept_dir: Optional[str] = None) -> Optional[Dict]:
-    """
-    Load concepts plus metadata. Returns dict with keys: concepts, doc_id, stem, count.
-    """
-    if concept_dir is None:
-        concept_dir = _default_concept_dir()
-    if use_remote_store():
-        from backend.supabase_store import load_blob
-
-        raw = load_blob(NAMESPACE_CONCEPTS, stem)
-        if isinstance(raw, dict) and raw.get("concepts") is not None:
-            return raw
-        return None
-
+def _load_local_concepts_with_meta(stem: str, concept_dir: Optional[str] = None) -> Optional[Dict]:
     concept_path = get_concept_path(stem, concept_dir)
     if not os.path.exists(concept_path):
         return None
@@ -103,3 +103,17 @@ def load_concepts_with_meta(stem: str, concept_dir: Optional[str] = None) -> Opt
     except Exception:
         pass
     return None
+
+
+def load_concepts_with_meta(stem: str, concept_dir: Optional[str] = None) -> Optional[Dict]:
+    """
+    Load concepts plus metadata. Returns dict with keys: concepts, doc_id, stem, count.
+    """
+    if concept_dir is None:
+        concept_dir = _default_concept_dir()
+    if use_remote_store():
+        meta = _load_remote_concept_payload(stem)
+        if meta is not None:
+            return meta
+
+    return _load_local_concepts_with_meta(stem, concept_dir=concept_dir)
