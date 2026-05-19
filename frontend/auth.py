@@ -1,9 +1,11 @@
 """Supabase email/password auth gate for the Streamlit app."""
 from __future__ import annotations
 
+import time
 from typing import Any, Dict
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from backend.supabase_client import (
     apply_session,
@@ -16,6 +18,7 @@ from backend.user_context import set_user_id
 SESSION_USER_KEY = "auth_user"
 SESSION_AUTH_KEY = "auth_session"
 FORGOT_PASSWORD_KEY = "show_forgot_password"
+RECOVERY_SESSION_KEY = "password_recovery_session"
 
 
 def _clear_auth_state() -> None:
@@ -88,6 +91,233 @@ def _persist_session(session: Any, user: Any) -> Dict[str, str]:
     apply_session(session.access_token, session.refresh_token)
     set_user_id(st.session_state[SESSION_USER_KEY]["id"])
     return st.session_state[SESSION_USER_KEY]
+
+
+def _query_param(name: str) -> str:
+    value = st.query_params.get(name)
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value or "")
+
+
+def _inject_recovery_hash_detector() -> None:
+    components.html(
+        """
+        <script>
+        (function () {
+          const parentWindow = window.parent;
+          if (!parentWindow || !parentWindow.location) return;
+
+          const hash = parentWindow.location.hash || "";
+          if (!hash || !hash.includes("type=recovery")) return;
+
+          const hashParams = new URLSearchParams(hash.replace(/^#/, ""));
+          if (hashParams.get("type") !== "recovery" || !hashParams.get("access_token")) {
+            return;
+          }
+
+          const nextUrl = new URL(parentWindow.location.href);
+          nextUrl.hash = "";
+          [
+            "type",
+            "access_token",
+            "refresh_token",
+            "expires_at",
+            "expires_in",
+            "token_type"
+          ].forEach((key) => {
+            const value = hashParams.get(key);
+            if (value) nextUrl.searchParams.set(key, value);
+          });
+
+          parentWindow.location.replace(nextUrl.toString());
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _sync_recovery_session_from_query() -> None:
+    if _query_param("type") != "recovery":
+        return
+
+    access_token = _query_param("access_token")
+    if not access_token:
+        return
+
+    st.session_state[RECOVERY_SESSION_KEY] = {
+        "access_token": access_token,
+        "refresh_token": _query_param("refresh_token"),
+    }
+    st.session_state[FORGOT_PASSWORD_KEY] = False
+    st.query_params.clear()
+    st.rerun()
+
+
+def _render_recovery_screen() -> None:
+    st.markdown(
+        """
+        <style>
+          .stApp {
+            background: #f8fafc;
+          }
+
+          div[data-testid="stMainBlockContainer"] {
+            max-width: 1040px;
+            padding-top: 4.5rem;
+          }
+
+          .lectova-auth-brand {
+            text-align: center;
+            margin: 0 auto 1.65rem;
+          }
+
+          .lectova-auth-name {
+            color: #0f172a;
+            font-size: clamp(2.7rem, 6vw, 4.25rem);
+            font-weight: 800;
+            line-height: 1;
+            letter-spacing: 0;
+          }
+
+          .lectova-auth-subtitle {
+            color: #64748b;
+            font-size: 1.06rem;
+            font-weight: 500;
+            margin-top: 0.7rem;
+          }
+
+          div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            box-shadow: 0 18px 50px rgba(15, 23, 42, 0.09);
+            padding: 1.35rem 1.45rem 1.5rem;
+          }
+
+          div[data-testid="stTextInput"] {
+            margin-bottom: 0.72rem;
+          }
+
+          div[data-testid="stTextInput"] label {
+            color: #334155;
+            font-weight: 650;
+            padding-bottom: 0.25rem;
+          }
+
+          div[data-testid="stTextInput"] input {
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            min-height: 2.85rem;
+            padding: 0.75rem 0.9rem;
+            background: #ffffff;
+            color: #0f172a;
+          }
+
+          div[data-testid="stTextInput"] input:focus {
+            border-color: #0f766e;
+            box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+          }
+
+          .st-key-auth_new_password input::-ms-reveal,
+          .st-key-auth_new_password input::-ms-clear,
+          .st-key-auth_confirm_password input::-ms-reveal,
+          .st-key-auth_confirm_password input::-ms-clear {
+            display: none !important;
+            width: 0 !important;
+            height: 0 !important;
+          }
+
+          .st-key-auth_new_password [data-testid="InputInstructions"],
+          .st-key-auth_confirm_password [data-testid="InputInstructions"] {
+            display: none !important;
+          }
+
+          div[data-testid="stButton"] > button {
+            border-radius: 8px;
+            min-height: 2.85rem;
+            font-weight: 750;
+            margin-top: 0.25rem;
+          }
+
+          div[data-testid="stButton"] > button[kind="primary"] {
+            background: #0f766e;
+            border-color: #0f766e;
+          }
+
+          div[data-testid="stButton"] > button[kind="primary"]:hover {
+            background: #115e59;
+            border-color: #115e59;
+          }
+        </style>
+
+        <div class="lectova-auth-brand">
+          <div class="lectova-auth-name">Lectova</div>
+          <div class="lectova-auth-subtitle">Set new password</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    left_pad, form_col, right_pad = st.columns([1, 1.15, 1])
+    with form_col:
+        with st.container(border=True):
+            new_password = st.text_input(
+                "New password",
+                type="password",
+                key="auth_new_password",
+                autocomplete="new-password",
+            )
+            confirm_password = st.text_input(
+                "Confirm password",
+                type="password",
+                key="auth_confirm_password",
+                autocomplete="new-password",
+            )
+            update_clicked = st.button(
+                "Update password",
+                type="primary",
+                use_container_width=True,
+                key="auth_update_password_submit",
+            )
+
+            if not update_clicked:
+                return
+
+            if new_password != confirm_password:
+                st.error("Passwords do not match")
+                return
+            if not new_password:
+                st.error("Enter a new password.")
+                return
+
+            recovery_session = st.session_state.get(RECOVERY_SESSION_KEY) or {}
+            try:
+                client = get_supabase_client()
+                apply_session(
+                    recovery_session["access_token"],
+                    recovery_session.get("refresh_token", ""),
+                )
+                client.auth.update_user({"password": new_password})
+                st.success("Password updated — you can now log in")
+                st.session_state.pop(RECOVERY_SESSION_KEY, None)
+                _clear_auth_state()
+                time.sleep(2)
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+
+def handle_password_recovery() -> None:
+    """Show the reset-completion form when Supabase returns a recovery hash."""
+    _inject_recovery_hash_detector()
+    _sync_recovery_session_from_query()
+
+    if st.session_state.get(RECOVERY_SESSION_KEY):
+        _render_recovery_screen()
+        st.stop()
 
 
 def _sync_forgot_password_link_state() -> None:
