@@ -1487,6 +1487,8 @@ with st.sidebar:
     st.caption(_user_email)
     if st.button("Log out", use_container_width=True):
         logout()
+        st.cache_data.clear()
+        st.cache_resource.clear()
         st.rerun()
     st.markdown("---")
     st.markdown("##### Upload lecture PDF")
