@@ -111,9 +111,13 @@ def load_concepts_with_meta(stem: str, concept_dir: Optional[str] = None) -> Opt
     """
     if concept_dir is None:
         concept_dir = _default_concept_dir()
+    print(f"[debug concepts] use_remote_store={use_remote_store()}")
     if use_remote_store():
         meta = _load_remote_concept_payload(stem)
+        print(f"[debug concepts] remote result={meta}")
         if meta is not None:
             return meta
 
+    concept_path = get_concept_path(stem, concept_dir)
+    print(f"[debug concepts] falling back to local path={concept_path}")
     return _load_local_concepts_with_meta(stem, concept_dir=concept_dir)
