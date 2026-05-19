@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from backend.concept_policy import build_chunk_card_id, resolve_concept_bucket
 from backend.quiz_storage import load_quiz_item_by_id
+from backend.persistence import NAMESPACE_CONFUSION, use_remote_store
 from backend.user_context import get_confusion_path, get_user_id
 
 _FALLBACK_PATH = Path("data/processed/confusion.json")
@@ -601,7 +602,24 @@ def _decorate_card(card: Dict[str, Any]) -> Dict[str, Any]:
     return decorated
 
 
-def load_confusion(path: Optional[Path] = None) -> Dict[str, Any]:
+def _persist_confusion_remotely(path: Optional[Path] = None) -> bool:
+    if not use_remote_store():
+        return False
+    if path is None:
+        return True
+    try:
+        return Path(path).resolve() == _default_path().resolve()
+    except Exception:
+        return False
+
+
+def _load_confusion_raw(path: Optional[Path] = None) -> Dict[str, Any]:
+    if _persist_confusion_remotely(path):
+        from backend.supabase_store import load_namespace_dict
+
+        raw = load_namespace_dict(NAMESPACE_CONFUSION)
+        return raw if isinstance(raw, dict) else {}
+
     p = Path(path or _default_path())
     if not p.exists():
         return {}
@@ -610,20 +628,30 @@ def load_confusion(path: Optional[Path] = None) -> Dict[str, Any]:
             raw = json.load(f)
     except Exception:
         return {}
+    return raw if isinstance(raw, dict) else {}
 
-    if not isinstance(raw, dict):
+
+def load_confusion(path: Optional[Path] = None) -> Dict[str, Any]:
+    raw = _load_confusion_raw(path)
+    if not raw:
         return {}
 
     normalized, changed = _normalize_store(raw)
     if changed:
         try:
-            save_confusion(normalized, p)
+            save_confusion(normalized, path)
         except Exception:
             pass
     return normalized
 
 
 def save_confusion(data: Dict[str, Any], path: Optional[Path] = None) -> None:
+    if _persist_confusion_remotely(path):
+        from backend.supabase_store import save_namespace_dict
+
+        save_namespace_dict(NAMESPACE_CONFUSION, data)
+        return
+
     p = Path(path or _default_path())
     _ensure_parent(p)
     tmp = p.with_suffix(".tmp")

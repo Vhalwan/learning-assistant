@@ -5,9 +5,19 @@ import json
 import os
 from typing import Dict, List, Optional
 
+from backend.persistence import NAMESPACE_CONCEPTS, use_remote_store
 from backend.user_context import get_concept_dir, get_user_id
 
 DEFAULT_CONCEPT_DIR = "data/processed"
+
+
+def _concept_payload(stem: str, concepts: List[Dict], doc_id: str = "") -> Dict:
+    return {
+        "stem": stem,
+        "concepts": concepts,
+        "count": len(concepts),
+        "doc_id": doc_id or "",
+    }
 
 
 def _default_concept_dir() -> str:
@@ -29,14 +39,15 @@ def save_concepts(stem: str, concepts: List[Dict], concept_dir: Optional[str] = 
     """
     if concept_dir is None:
         concept_dir = _default_concept_dir()
+    data = _concept_payload(stem, concepts, doc_id=doc_id)
+    if use_remote_store():
+        from backend.supabase_store import save_blob
+
+        save_blob(NAMESPACE_CONCEPTS, stem, data)
+        return f"supabase:{NAMESPACE_CONCEPTS}/{stem}"
+
     concept_path = get_concept_path(stem, concept_dir)
     os.makedirs(os.path.dirname(concept_path) or ".", exist_ok=True)
-    data = {
-        "stem": stem,
-        "concepts": concepts,
-        "count": len(concepts),
-        "doc_id": doc_id or "",
-    }
     tmp_path = concept_path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -61,17 +72,9 @@ def load_concepts(stem: str, concept_dir: Optional[str] = None) -> Optional[List
     """
     if concept_dir is None:
         concept_dir = _default_concept_dir()
-    concept_path = get_concept_path(stem, concept_dir)
-    if not os.path.exists(concept_path):
-        return None
-    try:
-        with open(concept_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            concepts = data.get("concepts", [])
-            if isinstance(concepts, list) and concepts:
-                return concepts
-    except Exception:
-        pass
+    meta = load_concepts_with_meta(stem, concept_dir=concept_dir)
+    if meta and isinstance(meta.get("concepts"), list) and meta["concepts"]:
+        return meta["concepts"]
     return None
 
 
@@ -81,6 +84,14 @@ def load_concepts_with_meta(stem: str, concept_dir: Optional[str] = None) -> Opt
     """
     if concept_dir is None:
         concept_dir = _default_concept_dir()
+    if use_remote_store():
+        from backend.supabase_store import load_blob
+
+        raw = load_blob(NAMESPACE_CONCEPTS, stem)
+        if isinstance(raw, dict) and raw.get("concepts") is not None:
+            return raw
+        return None
+
     concept_path = get_concept_path(stem, concept_dir)
     if not os.path.exists(concept_path):
         return None

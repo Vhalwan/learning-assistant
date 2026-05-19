@@ -8,9 +8,31 @@ from typing import Dict, List, Optional
 from pathlib import Path
 
 from backend.concept_policy import resolve_concept_bucket
+from backend.persistence import NAMESPACE_QUIZ, use_remote_store
 from backend.user_context import get_quiz_dir, get_user_id
 
 DEFAULT_QUIZ_DIR = "data/processed"
+
+
+def _quiz_payload(stem: str, quiz_items: List[Dict]) -> Dict:
+    return {
+        "stem": stem,
+        "quiz_items": quiz_items,
+        "count": len(quiz_items),
+    }
+
+
+def _load_remote_quiz_payload(stem: str) -> Optional[Dict]:
+    from backend.supabase_store import load_blob
+
+    raw = load_blob(NAMESPACE_QUIZ, stem)
+    return raw if isinstance(raw, dict) else None
+
+
+def _save_remote_quiz_payload(stem: str, payload: Dict) -> None:
+    from backend.supabase_store import save_blob
+
+    save_blob(NAMESPACE_QUIZ, stem, payload)
 
 
 def _default_quiz_dir() -> str:
@@ -61,16 +83,14 @@ def save_quiz_items(stem: str, quiz_items: List[Dict], quiz_dir: Optional[str] =
     """
     if quiz_dir is None:
         quiz_dir = _default_quiz_dir()
+    data = _quiz_payload(stem, quiz_items)
+    if use_remote_store():
+        _save_remote_quiz_payload(stem, data)
+        return f"supabase:{NAMESPACE_QUIZ}/{stem}"
+
     quiz_path = get_quiz_path(stem, quiz_dir)
     os.makedirs(os.path.dirname(quiz_path) or ".", exist_ok=True)
-    
-    # Store in a format that's easy to load
-    data = {
-        "stem": stem,
-        "quiz_items": quiz_items,
-        "count": len(quiz_items)
-    }
-    
+
     # Use atomic write to prevent corruption
     tmp_path = quiz_path + ".tmp"
     try:
@@ -106,6 +126,14 @@ def load_quiz_items(stem: str, quiz_dir: Optional[str] = None) -> Optional[List[
     """
     if quiz_dir is None:
         quiz_dir = _default_quiz_dir()
+    if use_remote_store():
+        data = _load_remote_quiz_payload(stem)
+        if data:
+            items = data.get("quiz_items", [])
+            if items:
+                return [_normalize_quiz_item(item) for item in items if isinstance(item, dict)]
+        return None
+
     # Try new format first
     quiz_path = get_quiz_path(stem, quiz_dir)
     if os.path.exists(quiz_path):
@@ -162,7 +190,13 @@ def load_quiz_item_by_id(card_id: str, quiz_dir: Optional[str] = None) -> Option
         quiz_dir = _default_quiz_dir()
     if not card_id or "_" not in card_id:
         return None
-    
+
+    if use_remote_store():
+        for item in load_all_quiz_items(quiz_dir).values():
+            if item.get("id") == card_id:
+                return item
+        return None
+
     quiz_dir_path = Path(quiz_dir)
     if not quiz_dir_path.exists():
         return None
@@ -215,9 +249,25 @@ def load_all_quiz_items(quiz_dir: Optional[str] = None) -> Dict[str, Dict]:
     """
     if quiz_dir is None:
         quiz_dir = _default_quiz_dir()
-    all_items = {}
+    all_items: Dict[str, Dict] = {}
+    if use_remote_store():
+        from backend.supabase_store import list_keys, load_blob
+
+        for key in list_keys(NAMESPACE_QUIZ):
+            try:
+                data = load_blob(NAMESPACE_QUIZ, key)
+                if not isinstance(data, dict):
+                    continue
+                for item in data.get("quiz_items", []):
+                    item_id = item.get("id")
+                    if item_id:
+                        all_items[item_id] = _normalize_quiz_item(item)
+            except Exception:
+                continue
+        return all_items
+
     quiz_dir_path = Path(quiz_dir)
-    
+
     if not quiz_dir_path.exists():
         return all_items
     
