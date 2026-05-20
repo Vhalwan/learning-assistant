@@ -101,40 +101,28 @@ def _query_param(name: str) -> str:
 
 
 def _inject_recovery_hash_detector() -> None:
-    components.html(
+    st.components.v1.html(
         """
         <script>
-        (function () {
-          const parentWindow = window.parent;
-          if (!parentWindow || !parentWindow.location) return;
-
-          const hash = parentWindow.location.hash || "";
-          if (!hash || !hash.includes("type=recovery")) return;
+        setTimeout(() => {
+          const hash = window.parent.location.hash || "";
+          if (!hash.includes("type=recovery")) return;
 
           const hashParams = new URLSearchParams(hash.replace(/^#/, ""));
-          if (hashParams.get("type") !== "recovery" || !hashParams.get("access_token")) {
-            return;
-          }
+          if (hashParams.get("type") !== "recovery") return;
 
-          const nextUrl = new URL(parentWindow.location.href);
-          nextUrl.hash = "";
-          [
-            "type",
-            "access_token",
-            "refresh_token",
-            "expires_at",
-            "expires_in",
-            "token_type"
-          ].forEach((key) => {
-            const value = hashParams.get(key);
-            if (value) nextUrl.searchParams.set(key, value);
-          });
+          const queryParams = new URLSearchParams(hashParams);
+          const newUrl =
+            window.parent.location.origin +
+            window.parent.location.pathname +
+            "?" +
+            queryParams.toString();
 
-          parentWindow.location.replace(nextUrl.toString());
-        })();
+          window.parent.location.replace(newUrl);
+        }, 500);
         </script>
         """,
-        height=0,
+        height=50,
         width=0,
     )
 
