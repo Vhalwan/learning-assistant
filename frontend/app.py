@@ -161,6 +161,40 @@ def _subsection_divider(
     )
 
 
+def _render_home_empty_state() -> None:
+    """Centered welcome card shown before a lecture is uploaded."""
+    steps = [
+        ("1", "📄", "Upload", "Drop your lecture PDF in the sidebar."),
+        ("2", "📖", "Understand", "Ask questions, chat, and explore summaries."),
+        ("3", "🧠", "Remember", "Quiz yourself and review with spaced repetition."),
+    ]
+    steps_html = "".join(
+        f"""
+        <div class="la-home-step">
+          <div class="la-home-step-num">{html_mod.escape(num)}</div>
+          <div class="la-home-step-icon">{icon}</div>
+          <div class="la-home-step-title">{html_mod.escape(title)}</div>
+          <div class="la-home-step-desc">{html_mod.escape(desc)}</div>
+        </div>
+        """
+        for num, icon, title, desc in steps
+    )
+    st.markdown(
+        f"""
+        <div class="la-home-empty">
+          <div class="la-home-empty-icon">📚</div>
+          <p class="la-home-empty-lead"><strong>Upload a lecture PDF from the sidebar to get started.</strong></p>
+          <p class="la-home-empty-hint">← Start in the sidebar</p>
+          <div class="la-home-empty-how">
+            <p class="la-home-empty-kicker">How it works</p>
+            <div class="la-home-empty-steps">{steps_html}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _inject_page_ui_enhancements() -> None:
     """Tag Study/SRS tabs, fix tab underline color, and highlight sidebar nav on scroll."""
     components.html(
@@ -228,6 +262,22 @@ def _inject_page_ui_enhancements() -> None:
             });
           };
 
+          const laScrollBottomGap = () => {
+            let minGap = Infinity;
+            const measure = (el) => {
+              if (!el || el.nodeType !== 1) return;
+              const sh = el.scrollHeight;
+              const ch = el.clientHeight;
+              if (sh <= ch + 2) return;
+              const gap = sh - el.scrollTop - ch;
+              if (gap < minGap) minGap = gap;
+            };
+            measure(doc.documentElement);
+            measure(doc.body);
+            collectScrollRoots().forEach(measure);
+            return minGap === Infinity ? 0 : Math.max(0, minGap);
+          };
+
           const laSidebarNavPickActive = () => {
             const navEl = doc.querySelector(".la-sidebar-nav");
             if (!navEl) return;
@@ -244,6 +294,22 @@ def _inject_page_ui_enhancements() -> None:
               if (!el) continue;
               if (current === null) current = sid;
               if (el.getBoundingClientRect().top - offset <= 0) current = sid;
+            }
+
+            // Last section (SRS) is short: page bottom can be reached before its
+            // header crosses the offset line while weak-topics still "wins" the spy.
+            const lastLink = links[links.length - 1];
+            const lastSid = (lastLink.getAttribute("href") || "").slice(1);
+            if (lastSid && lastSid !== current) {
+              const lastEl = navTargetEl(lastSid);
+              if (lastEl) {
+                const nearBottom = laScrollBottomGap() <= 140;
+                const r = lastEl.getBoundingClientRect();
+                const vh =
+                  parent.innerHeight || doc.documentElement.clientHeight || 800;
+                const lastVisible = r.top < vh * 0.92 && r.bottom > 0;
+                if (nearBottom && lastVisible) current = lastSid;
+              }
             }
 
             if (current) laSidebarNavSetActive(current);
@@ -1410,6 +1476,94 @@ st.markdown(
         margin: 0 0 0.55rem;
         font-size: 0.92rem;
       }
+      .la-home-empty {
+        text-align: center;
+        padding: 2rem 1.5rem 1.25rem;
+        border-radius: 20px;
+        background: linear-gradient(180deg, #eef8f6 0%, #e3f2f0 100%);
+        border: 2px solid #8fc4bc;
+        color: var(--muted);
+        margin: 1.5rem 0 2rem;
+        line-height: 1.5;
+        box-shadow: 0 8px 22px rgba(15, 118, 110, 0.1);
+      }
+      .la-home-empty-icon {
+        font-size: 3rem;
+        margin-bottom: 0.75rem;
+        line-height: 1;
+        filter: saturate(1.1);
+      }
+      .la-home-empty-lead {
+        margin: 0 0 0.35rem;
+        font-size: 1.05rem;
+      }
+      .la-home-empty-lead strong {
+        color: var(--text);
+      }
+      .la-home-empty-hint {
+        margin: 0;
+        font-size: 0.88rem;
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .la-home-empty-how {
+        margin-top: 1.75rem;
+        padding-top: 1.75rem;
+        border-top: 1px solid rgba(143, 196, 188, 0.55);
+      }
+      .la-home-empty-kicker {
+        margin: 0 0 1.15rem;
+        font-size: 0.82rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+      .la-home-empty-steps {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.25rem;
+        justify-content: center;
+        text-align: center;
+      }
+      .la-home-step {
+        flex: 1 1 160px;
+        max-width: 220px;
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 0.25rem 0.85rem 0;
+        box-shadow: none;
+      }
+      .la-home-step-num {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.5rem;
+        height: 1.5rem;
+        border-radius: 999px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 0.75rem;
+        font-weight: 800;
+        margin-bottom: 0.45rem;
+      }
+      .la-home-step-icon {
+        font-size: 1.6rem;
+        margin-bottom: 0.35rem;
+        line-height: 1;
+      }
+      .la-home-step-title {
+        font-weight: 800;
+        color: var(--text);
+        font-size: 0.95rem;
+        margin-bottom: 0.25rem;
+      }
+      .la-home-step-desc {
+        font-size: 0.82rem;
+        color: var(--muted);
+        line-height: 1.45;
+      }
       .la-srs-empty {
         text-align: center;
         padding: 2rem 1.35rem;
@@ -1521,21 +1675,6 @@ with st.sidebar:
         st.caption("No lecture uploaded")
 
     st.markdown("---")
-    st.markdown("##### Jump to section")
-    st.markdown(
-        """
-        <nav class="la-sidebar-nav" aria-label="Jump to section">
-          <ul>
-            <li><a href="#study">Study</a></li>
-            <li><a href="#test-yourself">Quiz</a></li>
-            <li><a href="#weak-topics">Weak topics</a></li>
-            <li><a href="#srs">Spaced repetition (SRS)</a></li>
-          </ul>
-        </nav>
-        """,
-        unsafe_allow_html=True,
-    )
-    _inject_page_ui_enhancements()
 
     if sidebar_stem:
         progress = _sidebar_progress_snapshot(sidebar_stem, limit=5)
@@ -1553,7 +1692,6 @@ with st.sidebar:
             for topic in weak_topics
         ) or '<span class="la-sidebar-chip la-sidebar-chip-muted">No recent misses</span>'
         due_label = "card due now" if due_count == 1 else "cards due now"
-        st.markdown('<hr class="la-sidebar-nav-divider" />', unsafe_allow_html=True)
         st.markdown("##### This lecture")
         st.markdown(
             f"""
@@ -1579,6 +1717,22 @@ with st.sidebar:
             """,
             unsafe_allow_html=True,
         )
+        st.markdown('<hr class="la-sidebar-nav-divider" />', unsafe_allow_html=True)
+        st.markdown("##### Jump to section")
+        st.markdown(
+            """
+            <nav class="la-sidebar-nav" aria-label="Jump to section">
+              <ul>
+                <li><a href="#study">Study</a></li>
+                <li><a href="#test-yourself">Quiz</a></li>
+                <li><a href="#weak-topics">Weak topics</a></li>
+                <li><a href="#srs">Spaced repetition (SRS)</a></li>
+              </ul>
+            </nav>
+            """,
+            unsafe_allow_html=True,
+        )
+        _inject_page_ui_enhancements()
 
     st.markdown("---")
     with st.expander("Advanced", expanded=False):
@@ -1600,11 +1754,9 @@ with st.sidebar:
             help="Optional index for quicker retrieval on large lectures. Ordinary search still works if off.",
         )
 
-# Show instruction only if no file is uploaded or loaded
+# Show welcome card only if no file is uploaded or loaded
 if not uploaded and not st.session_state.get("current_stem"):
-    st.markdown(
-        "Upload a lecture PDF from the sidebar to get started."
-    )
+    _render_home_empty_state()
 
 # ----------------------------
 # Upload + controls (unchanged logic)

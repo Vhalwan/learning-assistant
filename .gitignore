@@ -44,3 +44,4 @@ end
 python
 uvicorn
 data/ 
+.env.example

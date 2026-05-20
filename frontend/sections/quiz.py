@@ -1,10 +1,10 @@
 """
-Quiz UI — round-based batches (1–10 questions) with per-round summaries.
+Quiz UI — round-based batches (1–20 questions) with per-round summaries.
 
   - Only the **current (latest) round** is fully inline. Earlier rounds sit in **collapsed**
     expanders once you add another round from the summary “make more questions” actions.
   - After every completed round: score, weak topics, “Continue with 5 more questions”, and
-    custom 1–10 + Generate (session flat list stays synced for Confused / SRS).
+    custom 1–20 + Generate (session flat list stays synced for Confused / SRS).
   - Overall progress (totals + weakest areas + recent rounds) appears only after 2+ rounds.
   - Per-question: brief explanation + optional “Show reasoning” expander (why_correct, why_wrong, source).
 """
@@ -539,8 +539,8 @@ def _try_append_more_questions(
     rounds_key: str,
     n_more: int,
 ) -> None:
-    """Generate up to n_more (1–10) new items and append as a new round."""
-    n_more = max(1, min(10, int(n_more)))
+    """Generate up to n_more (1–20) new items and append as a new round."""
+    n_more = max(1, min(20, int(n_more)))
     if not text:
         st_module.warning("No document text — cannot continue.")
         return
@@ -658,11 +658,11 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     cols_top = st.columns([2, 1])
     with cols_top[0]:
         n_q = st.number_input(
-            "Number of quiz items (1–10)",
+            "Number of quiz items (1–20)",
             min_value=1,
-            max_value=10,
+            max_value=20,
             value=5,
-            help="Each batch is one round. Generate 1–10 questions at a time.",
+            help="Each batch is one round. Generate 1–20 questions at a time.",
         )
     with cols_top[1]:
         gen_key = f"gen_quiz_{stem}"
@@ -837,7 +837,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                 show_continue = ri == n_rounds - 1
                 if show_continue:
                     st.markdown("")
-                    st.caption("Keep going in small batches (max 10 questions per round).")
+                    st.caption("Keep going in small batches (max 20 questions per round).")
                     cq, cc = st.columns([1, 2])
                     with cq:
                         if st.button(
@@ -859,13 +859,13 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                                 n_more=5,
                             )
                     with cc:
-                        st.markdown("**Custom batch (1–10)**")
+                        st.markdown("**Custom batch (1–20)**")
                         ic1, ic2 = st.columns([2, 1])
                         with ic1:
                             cust_n = st.number_input(
                                 "Questions",
                                 min_value=1,
-                                max_value=10,
+                                max_value=20,
                                 value=5,
                                 help="How many questions to add in the next round.",
                                 key=f"{quiz_state_key}_custom_n_r{round_label_num}_{generation_token}",
