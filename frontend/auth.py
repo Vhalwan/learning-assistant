@@ -1,8 +1,10 @@
 """Supabase email/password auth gate for the Streamlit app."""
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Dict
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -19,6 +21,16 @@ SESSION_USER_KEY = "auth_user"
 SESSION_AUTH_KEY = "auth_session"
 FORGOT_PASSWORD_KEY = "show_forgot_password"
 RECOVERY_SESSION_KEY = "password_recovery_session"
+RECOVERY_ERROR_KEY = "password_recovery_error"
+
+APP_URL_ENV_NAMES = (
+    "LECTOVA_APP_URL",
+    "APP_BASE_URL",
+    "STREAMLIT_APP_URL",
+    "PUBLIC_APP_URL",
+)
+RESET_REDIRECT_ENV = "PASSWORD_RESET_REDIRECT_URL"
+RESET_BRIDGE_ENV = "PASSWORD_RESET_BRIDGE_URL"
 
 
 def _clear_auth_state() -> None:
@@ -100,25 +112,100 @@ def _query_param(name: str) -> str:
     return str(value or "")
 
 
+def _normalize_public_url(url: str, *, keep_query: bool = False) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+
+    path = parsed.path or "/"
+    query = parsed.query if keep_query else ""
+    return urlunsplit((parsed.scheme, parsed.netloc, path, query, ""))
+
+
+def _append_query_params(url: str, params: Dict[str, str]) -> str:
+    parsed = urlsplit(url)
+    existing_params = parse_qsl(parsed.query, keep_blank_values=True)
+    merged_params = existing_params + [
+        (key, value) for key, value in params.items() if value
+    ]
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path or "/",
+            urlencode(merged_params),
+            "",
+        )
+    )
+
+
+def _current_app_url() -> str:
+    for name in APP_URL_ENV_NAMES:
+        configured_url = _normalize_public_url(os.getenv(name, ""))
+        if configured_url:
+            return configured_url
+
+    try:
+        return _normalize_public_url(str(st.context.url or ""))
+    except Exception:
+        return ""
+
+
+def _password_reset_redirect_url() -> str:
+    explicit_redirect = _normalize_public_url(
+        os.getenv(RESET_REDIRECT_ENV, ""),
+        keep_query=True,
+    )
+    if explicit_redirect:
+        return explicit_redirect
+
+    app_url = _current_app_url()
+    bridge_url = _normalize_public_url(
+        os.getenv(RESET_BRIDGE_ENV, ""),
+        keep_query=True,
+    )
+    if bridge_url and app_url:
+        return _append_query_params(bridge_url, {"next": app_url})
+    if bridge_url:
+        return bridge_url
+    return app_url
+
+
+def _save_recovery_error(message: str) -> None:
+    st.session_state[RECOVERY_ERROR_KEY] = message
+    st.session_state[FORGOT_PASSWORD_KEY] = True
+    st.query_params.clear()
+    st.rerun()
+
+
 def _inject_recovery_hash_detector() -> None:
     st.components.v1.html(
         """
         <script>
         setTimeout(() => {
-          const hash = window.parent.location.hash || "";
-          if (!hash.includes("type=recovery")) return;
+          try {
+            const parentWindow = window.parent || window.top || window;
+            const hash = parentWindow.location.hash || "";
+            if (!hash.includes("type=recovery") && !hash.includes("access_token")) return;
 
-          const hashParams = new URLSearchParams(hash.replace(/^#/, ""));
-          if (hashParams.get("type") !== "recovery") return;
+            const hashParams = new URLSearchParams(hash.replace(/^#/, ""));
+            if (hashParams.get("type") && hashParams.get("type") !== "recovery") return;
 
-          const queryParams = new URLSearchParams(hashParams);
-          const newUrl =
-            window.parent.location.origin +
-            window.parent.location.pathname +
-            "?" +
-            queryParams.toString();
+            const queryParams = new URLSearchParams(hashParams);
+            const newUrl =
+              parentWindow.location.origin +
+              parentWindow.location.pathname +
+              "?" +
+              queryParams.toString();
 
-          window.parent.location.replace(newUrl);
+            parentWindow.location.replace(newUrl);
+          } catch (error) {
+            return;
+          }
         }, 500);
         </script>
         """,
@@ -128,10 +215,45 @@ def _inject_recovery_hash_detector() -> None:
 
 
 def _sync_recovery_session_from_query() -> None:
-    if _query_param("type") != "recovery":
+    recovery_type = _query_param("type")
+    access_token = _query_param("access_token")
+    auth_code = _query_param("code")
+    error_code = _query_param("error_code") or _query_param("error")
+    error_description = _query_param("error_description")
+
+    if error_code:
+        _save_recovery_error(
+            error_description
+            or "That reset link is invalid or expired. Send yourself a new reset email."
+        )
+
+    if recovery_type and recovery_type != "recovery":
         return
 
-    access_token = _query_param("access_token")
+    if not recovery_type and not access_token and not auth_code:
+        return
+
+    if auth_code:
+        try:
+            res = get_supabase_client().auth.exchange_code_for_session(
+                {"auth_code": auth_code}
+            )
+            if not res.session:
+                _save_recovery_error(
+                    "That reset link could not be verified. Send yourself a new reset email."
+                )
+                return
+
+            st.session_state[RECOVERY_SESSION_KEY] = session_to_dict(res.session)
+            st.session_state[FORGOT_PASSWORD_KEY] = False
+            st.query_params.clear()
+            st.rerun()
+        except Exception:
+            _save_recovery_error(
+                "That reset link is invalid or expired. Send yourself a new reset email."
+            )
+        return
+
     if not access_token:
         return
 
@@ -468,6 +590,10 @@ def render_auth_screen() -> None:
     left_pad, form_col, right_pad = st.columns([1, 1.15, 1])
     with form_col:
         with st.container(border=True):
+            recovery_error = st.session_state.pop(RECOVERY_ERROR_KEY, "")
+            if recovery_error:
+                st.error(recovery_error)
+
             if st.session_state.get(FORGOT_PASSWORD_KEY):
                 st.markdown(
                     """
@@ -498,7 +624,20 @@ def render_auth_screen() -> None:
                     else:
                         try:
                             client = get_supabase_client()
-                            client.auth.reset_password_email(reset_email.strip())
+                            redirect_url = _password_reset_redirect_url()
+                            reset_options = (
+                                {"redirect_to": redirect_url} if redirect_url else None
+                            )
+                            if not redirect_url:
+                                st.warning(
+                                    "Reset email sent without a redirect URL. Set "
+                                    f"{RESET_REDIRECT_ENV} or {RESET_BRIDGE_ENV} "
+                                    "for deployed resets."
+                                )
+                            client.auth.reset_password_email(
+                                reset_email.strip(),
+                                reset_options,
+                            )
                             st.success("Check your email for a reset link")
                         except Exception as exc:
                             st.error(str(exc))
