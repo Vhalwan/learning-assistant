@@ -520,11 +520,51 @@ def _inject_page_ui_enhancements() -> None:
             });
           };
 
+          const findQuizCardWrapper = (marker) => {
+            let node = marker;
+            while (node && node !== doc.body) {
+              if (node.getAttribute?.("data-testid") === "stVerticalBlock") {
+                const cs = parent.getComputedStyle(node);
+                const borderWidth = parseFloat(cs.borderTopWidth) || 0;
+                if (borderWidth > 0 && cs.borderStyle !== "none") {
+                  return node;
+                }
+              }
+              node = node.parentElement;
+            }
+            const keyed = marker.closest('[class*="st-key-la_quiz_card_"]');
+            if (keyed) return keyed;
+            return marker.closest('[data-testid="stVerticalBlock"]');
+          };
+
+          const enhanceQuizCards = () => {
+            const applyQuizCardStyle = (wrapper) => {
+              if (!wrapper || wrapper.dataset.laQuizStyled === "1") return;
+              wrapper.classList.add("la-quiz-card-wrap");
+              wrapper.style.setProperty("position", "relative", "important");
+              wrapper.style.setProperty("border-top",    "1px solid #cfdede", "important");
+              wrapper.style.setProperty("border-right",  "1px solid #cfdede", "important");
+              wrapper.style.setProperty("border-bottom", "1px solid #cfdede", "important");
+              wrapper.style.setProperty("border-left",   "4px solid #0f766e", "important");
+              wrapper.style.setProperty("border-radius", "8px",               "important");
+              wrapper.style.setProperty("margin-bottom", "1.2rem",            "important");
+              wrapper.style.setProperty("background",    "#ffffff",           "important");
+              wrapper.style.setProperty("padding",       "0.85rem 1rem 0.65rem", "important");
+              wrapper.style.setProperty("box-shadow",    "0 6px 18px rgba(15,23,42,0.05)", "important");
+              wrapper.dataset.laQuizStyled = "1";
+            };
+
+            doc.querySelectorAll(".la-quiz-card-start").forEach((marker) => {
+              applyQuizCardStyle(findQuizCardWrapper(marker));
+            });
+          };
+
           const run = () => {
             enhanceTabs();
             enhanceNav();
             enhanceStudyInput();
             enhanceConceptCards();
+            enhanceQuizCards();
           };
 
           run();
@@ -1411,6 +1451,28 @@ st.markdown(
         padding-top: 0.55rem;
         z-index: 10;
         backdrop-filter: blur(10px);
+      }
+
+      /* Quiz question cards (Streamlit bordered st.container) */
+      div.la-quiz-card-start { display: none; }
+      section[data-testid="stMain"] .la-quiz-card-wrap,
+      section[data-testid="stMain"] [class*="st-key-la_quiz_card_"] {
+        position: relative;
+        border-top:    1px solid #cfdede !important;
+        border-right:  1px solid #cfdede !important;
+        border-bottom: 1px solid #cfdede !important;
+        border-left:   4px solid var(--accent) !important;
+        border-radius: 8px !important;
+        margin-bottom: 1.2rem !important;
+        padding: 0.85rem 1rem 0.65rem !important;
+        background: #ffffff !important;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05) !important;
+      }
+      section[data-testid="stMain"] .la-quiz-card-wrap h3,
+      section[data-testid="stMain"] [class*="st-key-la_quiz_card_"] h3 {
+        border-left: none;
+        padding-left: 0;
+        margin-top: 0.15rem;
       }
 
       /* Weak-topic concept cards (Streamlit 1.52+: bordered st.container) */

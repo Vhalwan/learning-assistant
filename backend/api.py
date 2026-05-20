@@ -11,6 +11,7 @@ Endpoints:
  - POST /chat          -> conversational chat mode with per-session history + RAG
 """
 from __future__ import annotations
+import re
 import time
 import logging
 import os
@@ -109,6 +110,10 @@ class GenerateQuizRequest(BaseModel):
     type: Optional[str] = "mcq"
     # Session-only: how many MCQs already used each chunk_id in this quiz sitting (UI-driven).
     session_chunk_counts: Optional[Dict[str, int]] = None
+    # Cached lecture concepts — skips an extra Gemini concept-extraction call when provided.
+    concepts: Optional[List[Dict[str, Any]]] = None
+    # Question stems already in this session (keep-going rounds) — avoids repeats in one batch call.
+    exclude_questions: Optional[List[str]] = None
 
 
 class ChatRequest(BaseModel):
@@ -410,18 +415,19 @@ def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(chec
             return out
 
         doc_id = hashlib.sha1((body.context_text or "").encode("utf-8")).hexdigest()[:12]
-        meta = None
-        try:
-            from backend.concept_storage import load_concepts_with_meta
-            meta = load_concepts_with_meta(body.stem)
-        except ImportError:
+        concepts = list(body.concepts or [])
+        if not concepts:
             meta = None
-        concepts = []
-        if meta and isinstance(meta, dict):
-            concepts = meta.get("concepts") or []
-            meta_doc_id = (meta.get("doc_id") or "").strip()
-            if not meta_doc_id or meta_doc_id != doc_id:
-                concepts = []
+            try:
+                from backend.concept_storage import load_concepts_with_meta
+                meta = load_concepts_with_meta(body.stem)
+            except ImportError:
+                meta = None
+            if meta and isinstance(meta, dict):
+                concepts = meta.get("concepts") or []
+                meta_doc_id = (meta.get("doc_id") or "").strip()
+                if not meta_doc_id or meta_doc_id != doc_id:
+                    concepts = []
         if not concepts:
             gen_concepts = getattr(_gen_quiz, "generate_concepts_from_context", None)
             if gen_concepts is None:
@@ -433,7 +439,19 @@ def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(chec
             except Exception:
                 pass
 
-        # generate MCQs (will call the capturing_llm above)
+        exclude_norms = None
+        if body.exclude_questions:
+            norm_fn = getattr(_gen_quiz, "_normalize_question_key", None)
+            if norm_fn:
+                exclude_norms = {norm_fn(q) for q in body.exclude_questions if q}
+            else:
+                exclude_norms = {
+                    re.sub(r"\s+", " ", (q or "").strip().lower())
+                    for q in body.exclude_questions
+                    if (q or "").strip()
+                }
+
+        # generate MCQs (typically 1–2 Gemini calls: batch + optional fill-batch)
         try:
             quiz_list = _gen_quiz.generate_mcq_from_context(
                 body.context_text,
@@ -441,6 +459,7 @@ def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(chec
                 llm_call=capturing_llm,
                 concepts=concepts,
                 session_chunk_counts=body.session_chunk_counts,
+                exclude_question_norms=exclude_norms,
             )
         except TypeError:
             try:
@@ -449,6 +468,7 @@ def post_generate_quiz_live(body: GenerateQuizRequest, _auth: Any = Depends(chec
                     n=body.n or 5,
                     llm_call=capturing_llm,
                     concepts=concepts,
+                    session_chunk_counts=body.session_chunk_counts,
                 )
             except TypeError:
                 quiz_list = _gen_quiz.generate_mcq_from_context(

@@ -1,10 +1,10 @@
 """
-Quiz UI — round-based batches (1–20 questions) with per-round summaries.
+Quiz UI — round-based batches (1–10 questions) with per-round summaries.
 
   - Only the **current (latest) round** is fully inline. Earlier rounds sit in **collapsed**
     expanders once you add another round from the summary “make more questions” actions.
   - After every completed round: score, weak topics, “Continue with 5 more questions”, and
-    custom 1–20 + Generate (session flat list stays synced for Confused / SRS).
+    custom 1–10 + Generate (session flat list stays synced for Confused / SRS).
   - Overall progress (totals + weakest areas + recent rounds) appears only after 2+ rounds.
   - Per-question: brief explanation + optional “Show reasoning” expander (why_correct, why_wrong, source).
 """
@@ -214,7 +214,6 @@ def _render_single_question(
     mark_selection_made_fn,
 ) -> Dict[str, Any]:
     """Render one MCQ card; returns metadata for aggregation / SRS batch actions."""
-    st_module.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
     qid = _stable_quiz_item_id(q)
     seen_qids[qid] = seen_qids.get(qid, 0) + 1
     key_suffix = f"{qid}_{seen_qids[qid]}" if seen_qids[qid] > 1 else qid
@@ -233,6 +232,10 @@ def _render_single_question(
     if exp_key not in st_module.session_state:
         st_module.session_state[exp_key] = False
 
+    card_key = hashlib.md5(
+        f"{quiz_state_key}|{generation_token}|{rk}{key_suffix}".encode("utf-8")
+    ).hexdigest()[:16]
+
     already_submitted = bool(st_module.session_state.get(submit_key))
 
     status_icon = ""
@@ -245,212 +248,211 @@ def _render_single_question(
         qtype_raw,
         qtype_raw.replace("_", " ").title() if qtype_raw else "",
     )
-    st_module.markdown(f"### Q{idx_in_round}{status_icon}")
-    if angle:
-        st_module.markdown(
-            f'<span style="display:inline-block;padding:0.2rem 0.65rem;border-radius:999px;'
-            f"font-size:0.82rem;font-weight:600;background:#ecfeff;color:#115e59;"
-            f'border:1px solid #99f6e4;">{angle}</span>',
-            unsafe_allow_html=True,
-        )
-    if q_text:
-        st_module.markdown(q_text)
-    st_module.markdown("---")
 
-    placeholder = "Select an answer"
-    dropdown_options = [f"{lbl}. {choices.get(lbl, '')}" for lbl in ["A", "B", "C", "D"]]
-    dropdown_with_placeholder = [placeholder] + dropdown_options
-
-    c1, c2 = st_module.columns([1, 1])
-    with c1:
-        try:
-            pre_index = 0
-            if selection_key in st_module.session_state:
-                cur = st_module.session_state.get(selection_key)
-                if cur in dropdown_with_placeholder:
-                    pre_index = dropdown_with_placeholder.index(cur)
-            st_module.selectbox(
-                "Choose an answer",
-                dropdown_with_placeholder,
-                index=pre_index,
-                key=selection_key,
-                disabled=already_submitted,
-                on_change=mark_selection_made_fn,
-                args=(selection_key,),
+    with st_module.container(border=True, key=f"la_quiz_card_{card_key}"):
+        st_module.markdown('<div class="la-quiz-card-start"></div>', unsafe_allow_html=True)
+        st_module.markdown(f"### Q{idx_in_round}{status_icon}")
+        if angle:
+            st_module.markdown(
+                f'<span style="display:inline-block;padding:0.2rem 0.65rem;border-radius:999px;'
+                f"font-size:0.82rem;font-weight:600;background:#ecfeff;color:#115e59;"
+                f'border:1px solid #99f6e4;">{angle}</span>',
+                unsafe_allow_html=True,
             )
-        except Exception:
-            st_module.selectbox(
-                "Choose an answer",
-                dropdown_with_placeholder,
-                key=selection_key,
-                disabled=already_submitted,
-                on_change=mark_selection_made_fn,
-                args=(selection_key,),
-            )
+        if q_text:
+            st_module.markdown(q_text)
+        st_module.markdown("---")
 
-    with c2:
-        st_module.markdown("**Choices:**")
-        correct_letter_upper = (answer_letter or "").strip().upper()
-        chosen_letter_post = ""
-        if already_submitted:
-            chosen_letter_post = (
-                st_module.session_state.get(submit_key, {}).get("chosen", "") or ""
-            ).strip().upper()
-        for label in ["A", "B", "C", "D"]:
-            opt = choices.get(label, "")
-            marker = ""
-            if already_submitted:
-                if label == correct_letter_upper:
-                    marker = "✅ "
-                elif label == chosen_letter_post:
-                    marker = "❌ "
-            if opt:
-                st_module.markdown(f"- {marker}**{label}.** {opt}")
-            else:
-                st_module.markdown(f"- {marker}**{label}.** _(no option)_")
+        placeholder = "Select an answer"
+        dropdown_options = [f"{lbl}. {choices.get(lbl, '')}" for lbl in ["A", "B", "C", "D"]]
+        dropdown_with_placeholder = [placeholder] + dropdown_options
 
-    chosen_letter = None
-    if already_submitted:
-        chosen_letter = st_module.session_state.get(submit_key, {}).get("chosen")
-    else:
-        sel_display = st_module.session_state.get(selection_key)
-        if sel_display and sel_display != placeholder:
-            chosen_letter = sel_display.split(".", 1)[0].strip()
-
-    with st_module.container():
-        st_module.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
-        st_module.markdown("**Actions**")
-        btn_col_left, btn_col_right = st_module.columns([1, 1])
-        with btn_col_left:
-            check_key = f"{quiz_state_key}_check_{rk}{key_suffix}"
-            check_disabled = (chosen_letter is None) or already_submitted
-            if st_module.button("Check answer", key=check_key, disabled=check_disabled, use_container_width=True):
-                is_correct = (
-                    (chosen_letter == answer_letter)
-                    if (chosen_letter and answer_letter)
-                    else False
+        c1, c2 = st_module.columns([1, 1])
+        with c1:
+            try:
+                pre_index = 0
+                if selection_key in st_module.session_state:
+                    cur = st_module.session_state.get(selection_key)
+                    if cur in dropdown_with_placeholder:
+                        pre_index = dropdown_with_placeholder.index(cur)
+                st_module.selectbox(
+                    "Choose an answer",
+                    dropdown_with_placeholder,
+                    index=pre_index,
+                    key=selection_key,
+                    disabled=already_submitted,
+                    on_change=mark_selection_made_fn,
+                    args=(selection_key,),
                 )
-                st_module.session_state[submit_key] = {
-                    "chosen": chosen_letter,
-                    "is_correct": is_correct,
-                }
-                try:
-                    record_quiz_result(
-                        qid=qid,
-                        question=q_text,
-                        is_correct=is_correct,
-                        stem=stem,
-                        question_item=q,
-                        chosen_answer=chosen_letter or "",
-                        doc_id=doc_id,
+            except Exception:
+                st_module.selectbox(
+                    "Choose an answer",
+                    dropdown_with_placeholder,
+                    key=selection_key,
+                    disabled=already_submitted,
+                    on_change=mark_selection_made_fn,
+                    args=(selection_key,),
+                )
+
+        with c2:
+            st_module.markdown("**Choices:**")
+            correct_letter_upper = (answer_letter or "").strip().upper()
+            chosen_letter_post = ""
+            if already_submitted:
+                chosen_letter_post = (
+                    st_module.session_state.get(submit_key, {}).get("chosen", "") or ""
+                ).strip().upper()
+            for label in ["A", "B", "C", "D"]:
+                opt = choices.get(label, "")
+                marker = ""
+                if already_submitted:
+                    if label == correct_letter_upper:
+                        marker = "✅ "
+                    elif label == chosen_letter_post:
+                        marker = "❌ "
+                if opt:
+                    st_module.markdown(f"- {marker}**{label}.** {opt}")
+                else:
+                    st_module.markdown(f"- {marker}**{label}.** _(no option)_")
+
+        chosen_letter = None
+        if already_submitted:
+            chosen_letter = st_module.session_state.get(submit_key, {}).get("chosen")
+        else:
+            sel_display = st_module.session_state.get(selection_key)
+            if sel_display and sel_display != placeholder:
+                chosen_letter = sel_display.split(".", 1)[0].strip()
+
+        with st_module.container():
+            st_module.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
+            st_module.markdown("**Actions**")
+            btn_col_left, btn_col_right = st_module.columns([1, 1])
+            with btn_col_left:
+                check_key = f"{quiz_state_key}_check_{rk}{key_suffix}"
+                check_disabled = (chosen_letter is None) or already_submitted
+                if st_module.button("Check answer", key=check_key, disabled=check_disabled, use_container_width=True):
+                    is_correct = (
+                        (chosen_letter == answer_letter)
+                        if (chosen_letter and answer_letter)
+                        else False
                     )
-                except Exception as e:
-                    print(f"[ui] failed to persist quiz result: {e}")
+                    st_module.session_state[submit_key] = {
+                        "chosen": chosen_letter,
+                        "is_correct": is_correct,
+                    }
+                    try:
+                        record_quiz_result(
+                            qid=qid,
+                            question=q_text,
+                            is_correct=is_correct,
+                            stem=stem,
+                            question_item=q,
+                            chosen_answer=chosen_letter or "",
+                            doc_id=doc_id,
+                        )
+                    except Exception as e:
+                        print(f"[ui] failed to persist quiz result: {e}")
 
-                st_module.session_state[exp_key] = True
-                try:
-                    st_module.experimental_rerun()
-                except Exception:
-                    pass
+                    st_module.session_state[exp_key] = True
+                    try:
+                        st_module.experimental_rerun()
+                    except Exception:
+                        pass
 
-        with btn_col_right:
-            if st_module.button("Add to SRS", key=srs_key, use_container_width=True):
-                try:
-                    mgr = SRSManager()
-                    concept_label = (q.get("concept_label") or "").strip()
-                    concept_id = (q.get("concept_id") or "").strip()
-                    topic_title = concept_label or ""
-                    mgr.ensure_card(
-                        qid,
-                        meta={
+            with btn_col_right:
+                if st_module.button("Add to SRS", key=srs_key, use_container_width=True):
+                    try:
+                        mgr = SRSManager()
+                        concept_label = (q.get("concept_label") or "").strip()
+                        concept_id = (q.get("concept_id") or "").strip()
+                        topic_title = concept_label or ""
+                        mgr.ensure_card(
+                            qid,
+                            meta={
+                                "question": q_text or "",
+                                "choices": choices or {},
+                                "answer": answer_letter,
+                                "brief_explanation": brief_explanation,
+                                "detailed_explanation": detailed_explanation,
+                                "stem": stem,
+                                "item_type": "mcq",
+                                "origin": "quiz_mcq",
+                                "quiz_question_id": qid,
+                                "source_reason": "Added from quiz review",
+                                "concept_label": concept_label,
+                                "concept_id": concept_id,
+                                "title": topic_title,
+                                "concept": topic_title,
+                            },
+                        )
+                        if "srs_quiz_items_cache" not in st_module.session_state:
+                            st_module.session_state["srs_quiz_items_cache"] = {}
+                        st_module.session_state["srs_quiz_items_cache"][qid] = {
+                            "id": qid,
                             "question": q_text or "",
                             "choices": choices or {},
                             "answer": answer_letter,
                             "brief_explanation": brief_explanation,
                             "detailed_explanation": detailed_explanation,
-                            "stem": stem,
                             "item_type": "mcq",
                             "origin": "quiz_mcq",
-                            "quiz_question_id": qid,
-                            "source_reason": "Added from quiz review",
                             "concept_label": concept_label,
                             "concept_id": concept_id,
-                            "title": topic_title,
-                            "concept": topic_title,
-                        },
-                    )
-                    if "srs_quiz_items_cache" not in st_module.session_state:
-                        st_module.session_state["srs_quiz_items_cache"] = {}
-                    st_module.session_state["srs_quiz_items_cache"][qid] = {
-                        "id": qid,
-                        "question": q_text or "",
-                        "choices": choices or {},
-                        "answer": answer_letter,
-                        "brief_explanation": brief_explanation,
-                        "detailed_explanation": detailed_explanation,
-                        "item_type": "mcq",
-                        "origin": "quiz_mcq",
-                        "concept_label": concept_label,
-                        "concept_id": concept_id,
-                    }
-                    st_module.session_state[f"{srs_key}_done"] = True
-                    st_module.info("Added to SRS.")
-                    try:
-                        st_module.rerun()
-                    except Exception:
+                        }
+                        st_module.session_state[f"{srs_key}_done"] = True
+                        st_module.info("Added to SRS.")
                         try:
-                            st_module.experimental_rerun()
+                            st_module.rerun()
                         except Exception:
-                            pass
-                except Exception as e:
-                    st_module.error("Failed to register SRS card.")
-                    st_module.exception(e)
+                            try:
+                                st_module.experimental_rerun()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        st_module.error("Failed to register SRS card.")
+                        st_module.exception(e)
 
-    st_module.markdown("")
+        submitted = st_module.session_state.get(submit_key)
+        if submitted:
+            chosen = submitted.get("chosen")
+            is_correct = submitted.get("is_correct", False)
 
-    submitted = st_module.session_state.get(submit_key)
-    if submitted:
-        chosen = submitted.get("chosen")
-        is_correct = submitted.get("is_correct", False)
-
-        if is_correct:
-            st_module.success("✅ Correct — well done!")
-        else:
-            correct_display = "(not provided)"
-            if answer_letter and choices.get(answer_letter):
-                correct_display = f"{answer_letter}. {choices.get(answer_letter)}"
-            if chosen:
-                chosen_text = choices.get(chosen, "")
-                st_module.error(
-                    f"❌ Incorrect — you chose **{chosen}**. {chosen_text}\n\n"
-                    f"**Correct:** {correct_display}"
-                )
+            if is_correct:
+                st_module.success("✅ Correct — well done!")
             else:
-                st_module.error(f"❌ Incorrect.\n\n**Correct:** {correct_display}")
+                correct_display = "(not provided)"
+                if answer_letter and choices.get(answer_letter):
+                    correct_display = f"{answer_letter}. {choices.get(answer_letter)}"
+                if chosen:
+                    chosen_text = choices.get(chosen, "")
+                    st_module.error(
+                        f"❌ Incorrect — you chose **{chosen}**. {chosen_text}\n\n"
+                        f"**Correct:** {correct_display}"
+                    )
+                else:
+                    st_module.error(f"❌ Incorrect.\n\n**Correct:** {correct_display}")
 
-        effective_brief = brief_explanation or _fallback_brief(q_text, choices, answer_letter)
-        if effective_brief:
-            st_module.markdown(effective_brief)
+            effective_brief = brief_explanation or _fallback_brief(q_text, choices, answer_letter)
+            if effective_brief:
+                st_module.markdown(effective_brief)
 
-        has_detail = bool(
-            (detailed_explanation.get("why_correct") or "").strip()
-            or any(
-                (detailed_explanation.get("why_wrong") or {}).get(l, "").strip()
-                for l in ["A", "B", "C", "D"]
-                if l != (answer_letter or "").upper()
-            )
-            or (detailed_explanation.get("source_chunk") or "").strip()
-        )
-
-        if has_detail:
-            with st_module.expander("🔽 Show reasoning"):
-                _render_detailed_explanation(
-                    detailed_explanation,
-                    choices,
-                    answer_letter or "",
+            has_detail = bool(
+                (detailed_explanation.get("why_correct") or "").strip()
+                or any(
+                    (detailed_explanation.get("why_wrong") or {}).get(l, "").strip()
+                    for l in ["A", "B", "C", "D"]
+                    if l != (answer_letter or "").upper()
                 )
+                or (detailed_explanation.get("source_chunk") or "").strip()
+            )
 
-    st_module.markdown("---")
+            if has_detail:
+                with st_module.expander("🔽 Show reasoning"):
+                    _render_detailed_explanation(
+                        detailed_explanation,
+                        choices,
+                        answer_letter or "",
+                    )
 
     return {
         "question": q,
@@ -539,8 +541,8 @@ def _try_append_more_questions(
     rounds_key: str,
     n_more: int,
 ) -> None:
-    """Generate up to n_more (1–20) new items and append as a new round."""
-    n_more = max(1, min(20, int(n_more)))
+    """Generate up to n_more (1–10) new items and append as a new round."""
+    n_more = max(1, min(10, int(n_more)))
     if not text:
         st_module.warning("No document text — cannot continue.")
         return
@@ -550,6 +552,11 @@ def _try_append_more_questions(
             if not flat:
                 flat = st_module.session_state.get(quiz_state_key, []) or []
             chunk_counts = _quiz_session_chunk_counts(flat)
+            exclude_q = [
+                (item.get("question") or "").strip()
+                for item in flat
+                if (item.get("question") or "").strip()
+            ][:20]
             if st_module.session_state.get("use_api_mode", False):
                 more_items, _ = generate_quiz(
                     stem=stem,
@@ -560,6 +567,7 @@ def _try_append_more_questions(
                     token=st_module.session_state.get("api_token", "") or "",
                     llm_call=None,
                     session_chunk_counts=chunk_counts,
+                    exclude_questions=exclude_q,
                 )
             else:
                 more_items, _ = generate_quiz(
@@ -569,6 +577,7 @@ def _try_append_more_questions(
                     use_api_mode=False,
                     llm_call=llm,
                     session_chunk_counts=chunk_counts,
+                    exclude_questions=exclude_q,
                 )
 
             existing_ids = {(item.get("id") or "") for item in flat if item.get("id")}
@@ -658,11 +667,11 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     cols_top = st.columns([2, 1])
     with cols_top[0]:
         n_q = st.number_input(
-            "Number of quiz items (1–20)",
+            "Number of quiz items (1–10)",
             min_value=1,
-            max_value=20,
+            max_value=10,
             value=5,
-            help="Each batch is one round. Generate 1–20 questions at a time.",
+            help="Each batch is one round. Generate 1–10 questions at a time.",
         )
     with cols_top[1]:
         gen_key = f"gen_quiz_{stem}"
@@ -774,20 +783,19 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
             seen_qids_round: Dict[str, int] = {}
             round_render_items: List[Dict[str, Any]] = []
             for j, q in enumerate(items, start=1):
-                with st.container():
-                    ritem = _render_single_question(
-                        st,
-                        stem=stem,
-                        doc_id=doc_id,
-                        quiz_state_key=quiz_state_key,
-                        generation_token=generation_token,
-                        q=q,
-                        idx_in_round=j,
-                        round_idx=ri,
-                        seen_qids=seen_qids_round,
-                        mark_selection_made_fn=_mark_selection_made_local,
-                    )
-                    round_render_items.append(ritem)
+                ritem = _render_single_question(
+                    st,
+                    stem=stem,
+                    doc_id=doc_id,
+                    quiz_state_key=quiz_state_key,
+                    generation_token=generation_token,
+                    q=q,
+                    idx_in_round=j,
+                    round_idx=ri,
+                    seen_qids=seen_qids_round,
+                    mark_selection_made_fn=_mark_selection_made_local,
+                )
+                round_render_items.append(ritem)
             quiz_render_items.extend(round_render_items)
 
             answered, correct, _, total_r_live = _round_progress(round_render_items, st)
@@ -837,7 +845,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                 show_continue = ri == n_rounds - 1
                 if show_continue:
                     st.markdown("")
-                    st.caption("Keep going in small batches (max 20 questions per round).")
+                    st.caption("Keep going in small batches (max 10 questions per round).")
                     cq, cc = st.columns([1, 2])
                     with cq:
                         if st.button(
@@ -859,13 +867,13 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                                 n_more=5,
                             )
                     with cc:
-                        st.markdown("**Custom batch (1–20)**")
+                        st.markdown("**Custom batch (1–10)**")
                         ic1, ic2 = st.columns([2, 1])
                         with ic1:
                             cust_n = st.number_input(
                                 "Questions",
                                 min_value=1,
-                                max_value=20,
+                                max_value=10,
                                 value=5,
                                 help="How many questions to add in the next round.",
                                 key=f"{quiz_state_key}_custom_n_r{round_label_num}_{generation_token}",

@@ -661,6 +661,7 @@ def generate_quiz(
     token: str = "",
     llm_call = None,
     session_chunk_counts: Optional[Dict[str, int]] = None,
+    exclude_questions: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[float]]:
     """Generate MCQ quiz items. Returns (quiz_items, latency)"""
     def _ensure_concept_fields(items: List[Dict[str, Any]]):
@@ -675,6 +676,20 @@ def generate_quiz(
                 itm["concept_id"] = slugify_concept_id(concept_label, fallback="concept")
 
     api_base = api_base or os.getenv("API_BASE", "http://localhost:8000")
+    doc_id = hashlib.sha1((context_text or "").encode("utf-8")).hexdigest()[:12]
+    concepts: List[Dict[str, Any]] = []
+    if _load_concepts_with_meta:
+        meta = _load_concepts_with_meta(stem)
+        if meta and isinstance(meta, dict):
+            concepts = meta.get("concepts") or []
+            meta_doc_id = (meta.get("doc_id") or "").strip()
+            if not meta_doc_id or meta_doc_id != doc_id:
+                concepts = []
+
+    exclude_payload: Optional[List[str]] = None
+    if exclude_questions:
+        exclude_payload = [str(q).strip() for q in exclude_questions if str(q).strip()][:20]
+
     if use_api_mode:
         url = f"{api_base.rstrip('/')}/generate_quiz_live"
         payload = {
@@ -684,10 +699,15 @@ def generate_quiz(
             "type": "mcq",
             "session_chunk_counts": session_chunk_counts,
         }
+        if concepts:
+            payload["concepts"] = concepts
+        if exclude_payload:
+            payload["exclude_questions"] = exclude_payload
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        timeout_s = min(180, max(60, 35 + 12 * int(n)))
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout_s)
         resp.raise_for_status()
         out = resp.json()
         quiz_items = out.get("quiz", []) or []
@@ -698,14 +718,6 @@ def generate_quiz(
         _ensure_concept_fields(quiz_items)
         return quiz_items, latency
     else:
-        doc_id = hashlib.sha1((context_text or "").encode("utf-8")).hexdigest()[:12]
-        meta = _load_concepts_with_meta(stem) if _load_concepts_with_meta else None
-        concepts = []
-        if meta and isinstance(meta, dict):
-            concepts = meta.get("concepts") or []
-            meta_doc_id = (meta.get("doc_id") or "").strip()
-            if not meta_doc_id or meta_doc_id != doc_id:
-                concepts = []
         if not concepts:
             if _generate_concepts_from_context is None:
                 concepts = []
@@ -715,6 +727,15 @@ def generate_quiz(
                 save_concepts(stem, concepts, doc_id=doc_id)
             except Exception:
                 pass
+        exclude_norms = None
+        if exclude_payload:
+            try:
+                from backend.generate_quiz import _normalize_question_key
+                exclude_norms = {_normalize_question_key(q) for q in exclude_payload}
+            except Exception:
+                import re as _re
+                exclude_norms = {_re.sub(r"\s+", " ", q.strip().lower()) for q in exclude_payload}
+
         try:
             quiz_items = generate_mcq_from_context(
                 context_text,
@@ -722,11 +743,16 @@ def generate_quiz(
                 llm_call=llm_call,
                 concepts=concepts,
                 session_chunk_counts=session_chunk_counts,
+                exclude_question_norms=exclude_norms,
             )
         except TypeError:
             try:
                 quiz_items = generate_mcq_from_context(
-                    context_text, n=int(n), llm_call=llm_call, concepts=concepts
+                    context_text,
+                    n=int(n),
+                    llm_call=llm_call,
+                    concepts=concepts,
+                    session_chunk_counts=session_chunk_counts,
                 )
             except TypeError:
                 quiz_items = generate_mcq_from_context(context_text, n=int(n), llm_call=llm_call)
