@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from backend.supabase_client import (
     apply_session,
@@ -97,6 +98,62 @@ def _query_param(name: str) -> str:
     if isinstance(value, list):
         value = value[0] if value else ""
     return str(value or "")
+
+
+def _inject_recovery_hash_detector() -> None:
+    components.html(
+        """
+        <script>
+        (function () {
+          const parentWindow = window.parent;
+          if (!parentWindow || !parentWindow.location) return;
+
+          const hash = parentWindow.location.hash || "";
+          if (!hash || !hash.includes("type=recovery")) return;
+
+          const hashParams = new URLSearchParams(hash.replace(/^#/, ""));
+          if (hashParams.get("type") !== "recovery" || !hashParams.get("access_token")) {
+            return;
+          }
+
+          const nextUrl = new URL(parentWindow.location.href);
+          nextUrl.hash = "";
+          [
+            "type",
+            "access_token",
+            "refresh_token",
+            "expires_at",
+            "expires_in",
+            "token_type"
+          ].forEach((key) => {
+            const value = hashParams.get(key);
+            if (value) nextUrl.searchParams.set(key, value);
+          });
+
+          parentWindow.location.replace(nextUrl.toString());
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _sync_recovery_session_from_query() -> None:
+    if _query_param("type") != "recovery":
+        return
+
+    access_token = _query_param("access_token")
+    if not access_token:
+        return
+
+    st.session_state[RECOVERY_SESSION_KEY] = {
+        "access_token": access_token,
+        "refresh_token": _query_param("refresh_token"),
+    }
+    st.session_state[FORGOT_PASSWORD_KEY] = False
+    st.query_params.clear()
+    st.rerun()
 
 
 def _render_recovery_screen() -> None:
@@ -254,17 +311,9 @@ def _render_recovery_screen() -> None:
 
 
 def handle_password_recovery() -> None:
-    """Show the reset-completion form when Supabase returns recovery query params."""
-    if _query_param("type") == "recovery":
-        access_token = _query_param("access_token")
-        if access_token:
-            st.session_state[RECOVERY_SESSION_KEY] = {
-                "access_token": access_token,
-                "refresh_token": _query_param("refresh_token"),
-            }
-            st.session_state[FORGOT_PASSWORD_KEY] = False
-            st.query_params.clear()
-            st.rerun()
+    """Show the reset-completion form when Supabase returns a recovery hash."""
+    _inject_recovery_hash_detector()
+    _sync_recovery_session_from_query()
 
     if st.session_state.get(RECOVERY_SESSION_KEY):
         _render_recovery_screen()
