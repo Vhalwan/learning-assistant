@@ -325,11 +325,9 @@ def render(st: Any, stem: str, llm):
 
     # Input form (clear_on_submit=True so Streamlit clears the input automatically)
     with st.form(key=f"chat_form_{stem}", clear_on_submit=True):
-        # Use text_area for multi-line input display
-        # Explicitly set value from session_state to show pending follow-up prompts
+        # Use text_area for multi-line input display; pending/clear prompts set chat_input_* above
         user_msg = st.text_area(
             "Message to assistant",
-            value=st.session_state.get(f"chat_input_{stem}", ""),
             key=f"chat_input_{stem}",
             placeholder="Type your message here...",
             height=100,
