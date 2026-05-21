@@ -1846,6 +1846,7 @@ if uploaded:
     # derive the stem and paths
     stem = tmp_pdf.stem
     doc_id = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:12]
+    st.session_state[f"doc_id_{stem}"] = doc_id
     embeddings_path = get_embeddings_path(stem)
     index_path = get_index_path(stem)
     st.session_state["current_stem"] = stem

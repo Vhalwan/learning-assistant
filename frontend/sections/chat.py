@@ -34,6 +34,44 @@ CHAT_SECTION_ANCHOR = "la-chat-section-anchor"
 
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
 
+
+def _doc_id_for_stem(st: Any, stem: str) -> str:
+    return str(st.session_state.get(f"doc_id_{stem}", "") or "").strip()
+
+
+def _try_load_persisted_chat(st: Any, stem: str, hist_key: str) -> None:
+    if st.session_state.get(hist_key):
+        return
+    try:
+        from backend.chat_history_store import load_chat_history
+
+        loaded = load_chat_history(stem, doc_id=_doc_id_for_stem(st, stem))
+        if loaded:
+            st.session_state[hist_key] = loaded
+    except Exception:
+        pass
+
+
+def _persist_chat_history(st: Any, stem: str, hist_key: str) -> None:
+    try:
+        from backend.chat_history_store import save_chat_history
+
+        messages = st.session_state.get(hist_key, []) or []
+        if not messages:
+            return
+        save_chat_history(stem, messages, doc_id=_doc_id_for_stem(st, stem))
+    except Exception:
+        pass
+
+
+def _clear_persisted_chat_history(st: Any, stem: str) -> None:
+    try:
+        from backend.chat_history_store import delete_chat_history
+
+        delete_chat_history(stem, doc_id=_doc_id_for_stem(st, stem))
+    except Exception:
+        pass
+
 # --------------------------
 # Quiz helpers (chat mode)
 # --------------------------
@@ -367,6 +405,8 @@ def _submit_chat_message_impl(
                 })
                 st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
 
+            _persist_chat_history(st, stem, hist_key)
+
             st.session_state[mod_reset_key] = True
             st.session_state[clear_input_key] = True
 
@@ -444,6 +484,8 @@ def render(
     if history_toggle_key not in st.session_state:
         st.session_state[history_toggle_key] = False
 
+    _try_load_persisted_chat(st, stem, hist_key)
+
     st.markdown(
         f'<div id="{CHAT_SECTION_ANCHOR}" style="scroll-margin-top:5.5rem;"></div>',
         unsafe_allow_html=True,
@@ -514,6 +556,7 @@ def render(
     with action_cols[2]:
         if st.button("🧹 Clear chat", key=f"clear_chat_{stem}", use_container_width=True):
             st.session_state[hist_key] = []
+            _clear_persisted_chat_history(st, stem)
             st.success("Chat cleared.")
 
     st.markdown("---")
