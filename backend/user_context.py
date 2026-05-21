@@ -6,7 +6,17 @@ import os
 from pathlib import Path
 from typing import Optional
 
-USE_REMOTE_STORAGE = os.getenv("USE_REMOTE_STORAGE", "").lower() in ("1", "true", "yes")
+def _use_remote_storage() -> bool:
+    flag = (os.getenv("USE_REMOTE_STORAGE") or "").strip().lower()
+    if flag in ("0", "false", "no"):
+        return False
+    if flag in ("1", "true", "yes"):
+        return True
+    # Default on when Supabase is configured (opt out with USE_REMOTE_STORAGE=false).
+    return bool((os.getenv("SUPABASE_URL") or "").strip() and (os.getenv("SUPABASE_ANON_KEY") or "").strip())
+
+
+USE_REMOTE_STORAGE = _use_remote_storage()
 
 _user_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("user_id", default=None)
 

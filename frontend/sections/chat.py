@@ -48,8 +48,8 @@ def _try_load_persisted_chat(st: Any, stem: str, hist_key: str) -> None:
         loaded = load_chat_history(stem, doc_id=_doc_id_for_stem(st, stem))
         if loaded:
             st.session_state[hist_key] = loaded
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[chat] load active history failed stem={stem}: {e}")
 
 
 def _persist_chat_history(st: Any, stem: str, hist_key: str) -> None:
@@ -60,8 +60,8 @@ def _persist_chat_history(st: Any, stem: str, hist_key: str) -> None:
         if not messages:
             return
         save_chat_history(stem, messages, doc_id=_doc_id_for_stem(st, stem))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[chat] persist active history failed stem={stem}: {e}")
 
 
 def _clear_persisted_chat_history(st: Any, stem: str) -> None:
@@ -69,8 +69,34 @@ def _clear_persisted_chat_history(st: Any, stem: str) -> None:
         from backend.chat_history_store import delete_chat_history
 
         delete_chat_history(stem, doc_id=_doc_id_for_stem(st, stem))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[chat] clear active history failed stem={stem}: {e}")
+
+
+def _try_load_saved_chats(st: Any, stem: str, saved_chats_key: str) -> None:
+    sync_key = f"saved_chats_synced_{stem}"
+    if st.session_state.get(sync_key):
+        return
+    st.session_state[sync_key] = True
+    try:
+        from backend.saved_chats_store import load_saved_chats
+
+        loaded = load_saved_chats(stem, doc_id=_doc_id_for_stem(st, stem))
+        if loaded is not None:
+            st.session_state[saved_chats_key] = loaded
+    except Exception as e:
+        print(f"[chat] load saved conversations failed stem={stem}: {e}")
+
+
+def _persist_saved_chats(st: Any, stem: str, saved_chats_key: str) -> None:
+    try:
+        from backend.saved_chats_store import save_saved_chats
+
+        items = st.session_state.get(saved_chats_key, []) or []
+        save_saved_chats(stem, items, doc_id=_doc_id_for_stem(st, stem))
+        print(f"[chat] saved conversations persisted stem={stem} count={len(items)}")
+    except Exception as e:
+        print(f"[chat] persist saved conversations failed stem={stem}: {e}")
 
 # --------------------------
 # Quiz helpers (chat mode)
@@ -486,6 +512,7 @@ def render(
         st.session_state[history_toggle_key] = False
 
     _try_load_persisted_chat(st, stem, hist_key)
+    _try_load_saved_chats(st, stem, saved_chats_key)
 
     st.markdown(
         f'<div id="{CHAT_SECTION_ANCHOR}" style="scroll-margin-top:5.5rem;"></div>',
@@ -545,6 +572,9 @@ def render(
                     "created": datetime.utcnow().isoformat(),
                 }
                 st.session_state[saved_chats_key].insert(0, new_item)
+                print(f"[chat] save button stem={stem}")
+                _persist_chat_history(st, stem, hist_key)
+                _persist_saved_chats(st, stem, saved_chats_key)
                 st.success("Conversation saved.")
 
     # Single history toggle button
@@ -599,6 +629,7 @@ def render(
                     # Load and return to chat view
                     if btns[0].button("Load in Chat", key=f"load_saved_{stem}_{idx}", use_container_width=True):
                         st.session_state[hist_key] = item.get("history", []) or []
+                        _persist_chat_history(st, stem, hist_key)
                         st.session_state[history_toggle_key] = False
                         st.success(f"Loaded: {item.get('title')}")
                         try:
@@ -608,6 +639,7 @@ def render(
                     # Delete
                     if btns[1].button("Delete", key=f"del_saved_{stem}_{idx}", use_container_width=True):
                         st.session_state[saved_chats_key].pop(idx)
+                        _persist_saved_chats(st, stem, saved_chats_key)
                         st.success("Deleted saved conversation.")
                         try:
                             st.rerun()

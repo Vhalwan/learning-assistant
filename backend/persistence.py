@@ -7,6 +7,7 @@ NAMESPACE_QUIZ = "quiz"
 NAMESPACE_CONCEPTS = "concepts"
 NAMESPACE_CONFUSION = "confusion"
 NAMESPACE_SRS = "srs"
+NAMESPACE_SAVED_CHATS = "saved_chats"
 
 
 def use_remote_store() -> bool:
