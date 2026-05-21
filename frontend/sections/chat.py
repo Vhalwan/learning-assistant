@@ -405,6 +405,7 @@ def _submit_chat_message_impl(
                 })
                 st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
 
+            print(f"[chat] about to persist stem={stem}")
             _persist_chat_history(st, stem, hist_key)
 
             st.session_state[mod_reset_key] = True

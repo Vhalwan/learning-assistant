@@ -15,16 +15,26 @@ def _table():
 
 def save_chat_history(stem: str, messages: List[Dict[str, Any]], doc_id: str = "") -> None:
     """Upsert the active chat thread for user_id + doc_id + stem."""
+    doc_id_clean = (doc_id or "").strip()
+    user_id = get_user_id() or ""
+    print(
+        f"[chat_history] saving user_id={user_id} stem={stem} "
+        f"doc_id={doc_id_clean} messages={len(messages)}"
+    )
     if not use_remote_store():
         return
-    row = {
-        "user_id": require_user_id(),
-        "doc_id": (doc_id or "").strip(),
-        "stem": stem,
-        "messages": messages,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _table().upsert(row, on_conflict="user_id,doc_id,stem").execute()
+    try:
+        row = {
+            "user_id": require_user_id(),
+            "doc_id": doc_id_clean,
+            "stem": stem,
+            "messages": messages,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        result = _table().upsert(row, on_conflict="user_id,doc_id,stem").execute()
+        print(f"[chat_history] save result: {result}")
+    except Exception as e:
+        print(f"[chat_history] save error: {e}")
 
 
 def load_chat_history(stem: str, doc_id: str = "") -> Optional[List[Dict[str, Any]]]:
