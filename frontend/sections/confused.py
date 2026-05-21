@@ -607,17 +607,16 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     return (row.get("question") or row.get("label") or "").strip()
 
                 selected_mcq_index = st.selectbox(
-                    "Source question for Add to SRS",
+                    "Question to add to SRS",
                     options=mcq_option_indices,
                     format_func=_mcq_option_label,
                     key=selected_mcq_key,
                     help="Explain simply and Ask follow-up in Chat use the concept directly. Pick a question here only for Add to SRS.",
                 )
-                st.caption("The picker only affects Add to SRS. Explain simply and Chat follow-up always use the concept itself.")
                 selected_mcq = mcq_candidates[selected_mcq_index]
-                st.caption("Type: MCQ confusion item" if is_mcq_item else "Type: Concept confusion item")
+                if not is_mcq_item:
+                    st.caption("Type: Concept confusion item")
 
-                last_qid = str(item.get("quiz_question_id") or item.get("last_mcq_id") or "").strip()
                 for e in evidence:
                     if e.get("type") in ("quiz", "persisted"):
                         meta = e.get("meta", {}) or {}
@@ -625,28 +624,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                         qid = str(meta.get("qid") or e.get("qid") or "").strip()
                         if qid and qtext:
                             evidence_quiz_rows.append({"qid": qid, "question": qtext})
-
-                if evidence:
-                    show_why = st.toggle(
-                        "Why this weak area was flagged",
-                        key=f"conf_why_open_{stem}_{card_key}",
-                    )
-                    if show_why:
-                        st.caption("Last 3 wrong quiz attempts for this concept.")
-                        pending_blurbs = _collect_pending_blurb_requests(real_confusions, stem)
-                        if llm and pending_blurbs:
-                            _ensure_confusion_blurbs(llm, stem, real_confusions)
-                        reason_rows = _build_reason_rows(
-                            evidence,
-                            last_qid=last_qid,
-                            stem=stem,
-                            card_idx=idx,
-                        )
-                        if reason_rows:
-                            for row in reason_rows[:3]:
-                                st.write(f"- {row}")
-                        else:
-                            st.write("- Repeated incorrect quiz answers for this concept.")
 
                 # Primary key: use the item's own store_key/card_id first (most reliable)
                 _primary_delete_key = (
@@ -697,6 +674,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 )
                 primary_action_cols = st.columns(2)
                 secondary_action_cols = st.columns(2)
+                explain_result = None
                 with primary_action_cols[0]:
                     # Explain simply (kept — student-first)
                     explain_btn_key = f"conf_explain_{stem}_{card_key}"
@@ -713,7 +691,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 "Compact evidence snippets:\n"
                                 f"{chr(10).join(compact_evidence) if compact_evidence else '- None available'}"
                             )
-                            resp = perform_query(
+                            explain_result = perform_query(
                                 question=explain_q,
                                 embeddings_path=str(embeddings_path),
                                 top_k=3,
@@ -724,12 +702,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 token=st.session_state.get("api_token", "") or "",
                                 llm_call=llm,
                             )
-                            st.markdown("**Explanation**")
-                            st.write(resp.get("answer", "(no answer returned)"))
-                            if resp.get("retrieved"):
-                                with st.expander("Show retrieved chunks used for this explanation"):
-                                    for rc in resp.get("retrieved", []):
-                                        st.write(rc.get("text", "")[:1000] + ("..." if len(rc.get("text", "")) > 1000 else ""))
                         except Exception as e:
                             st.error("Failed to generate explanation.")
                             st.exception(e)
@@ -856,6 +828,14 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             else:
                                 st.session_state[confirm_key] = True
                                 st.rerun()
+
+                if explain_result is not None:
+                    st.markdown("**Explanation**")
+                    st.write(explain_result.get("answer", "(no answer returned)"))
+                    if explain_result.get("retrieved"):
+                        with st.expander("Show retrieved chunks used for this explanation"):
+                            for rc in explain_result.get("retrieved", []):
+                                st.write(rc.get("text", "")[:1000] + ("..." if len(rc.get("text", "")) > 1000 else ""))
         if notice_rendered:
             st.session_state.pop(followup_notice_key, None)
     st.markdown("---")
