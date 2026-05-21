@@ -121,8 +121,14 @@ def build_chat_html(
     max_height: int = 520,
     width: str = "100%",
     container_id: Optional[str] = None,
+    scroll_align: str = "bottom",
 ) -> Tuple[str, int]:
-    """Build a scrollable chat transcript HTML block."""
+    """Build a scrollable chat transcript HTML block.
+
+    scroll_align:
+      - "bottom": show the end of the transcript (default)
+      - "last_user": align the latest user bubble to the top so the reply reads downward
+    """
     cid = container_id or f"chat_{int(time.time() * 1000)}"
     msg_blocks: List[str] = []
     for turn in chat_history or []:
@@ -223,12 +229,38 @@ def build_chat_html(
 
     <script>
       const container = document.getElementById("{cid}_wrap");
-      if (container) {{
+      const scrollAlign = {json.dumps(scroll_align)};
+      function applyChatScroll() {{
+          if (!container) return;
+          if (scrollAlign === "last_user") {{
+              const users = container.querySelectorAll(".msg.user");
+              if (users.length) {{
+                  const lastUser = users[users.length - 1];
+                  const pad = 6;
+                  container.scrollTop = Math.max(0, lastUser.offsetTop - pad);
+                  return;
+              }}
+          }}
           container.scrollTop = container.scrollHeight;
       }}
+      applyChatScroll();
+      setTimeout(applyChatScroll, 0);
+      setTimeout(applyChatScroll, 80);
+      setTimeout(applyChatScroll, 200);
       window["{cid}_scrollToBottom"] = function() {{
           const c = document.getElementById("{cid}_wrap");
           if (c) c.scrollTop = c.scrollHeight;
+      }};
+      window["{cid}_scrollToLastUser"] = function() {{
+          const c = document.getElementById("{cid}_wrap");
+          if (!c) return;
+          const users = c.querySelectorAll(".msg.user");
+          if (!users.length) {{
+              c.scrollTop = c.scrollHeight;
+              return;
+          }}
+          const lastUser = users[users.length - 1];
+          c.scrollTop = Math.max(0, lastUser.offsetTop - 6);
       }};
     </script>
     """

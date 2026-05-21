@@ -175,6 +175,7 @@ def _submit_chat_message(
     """Run the chat send pipeline. Returns True if a message was sent."""
     loading_key = f"chat_followup_loading_{stem}"
     scroll_key = f"scroll_to_chat_{stem}"
+    scroll_align_key = f"chat_scroll_align_{stem}"
     try:
         return _submit_chat_message_impl(
             st,
@@ -194,6 +195,7 @@ def _submit_chat_message(
             from_confusion_followup=from_confusion_followup,
             show_spinner=show_spinner,
             scroll_key=scroll_key,
+            scroll_align_key=scroll_align_key,
         )
     finally:
         st.session_state.pop(loading_key, None)
@@ -218,6 +220,7 @@ def _submit_chat_message_impl(
     from_confusion_followup: bool,
     show_spinner: bool,
     scroll_key: str,
+    scroll_align_key: str,
 ) -> bool:
     """Inner send pipeline (loading flag cleared by wrapper)."""
     if not embeddings_ready:
@@ -372,6 +375,7 @@ def _submit_chat_message_impl(
             else:
                 st.session_state[pending_quiz_key] = None
 
+            st.session_state[scroll_align_key] = "last_user"
             if from_confusion_followup:
                 st.session_state[scroll_key] = True
                 st.session_state[f"open_chat_tab_{stem}"] = True
@@ -642,8 +646,12 @@ def render(
             content = strip_retrieval_artifacts(content)
         display_history.append({"role": role, "content": content})
 
-    # use a taller max height so chat uses more vertical space
-    chat_html, chat_height = build_chat_html(display_history, max_height=720)
+    scroll_align = st.session_state.pop(f"chat_scroll_align_{stem}", "bottom")
+    chat_html, chat_height = build_chat_html(
+        display_history,
+        max_height=720,
+        scroll_align=scroll_align,
+    )
 
     with chat_container:
         st.markdown('<div class="chat-fade-top"></div>', unsafe_allow_html=True)
@@ -652,8 +660,11 @@ def render(
         with header_cols[0]:
             st.markdown(f"**Conversation — {len(chat_history)} turns**")
         with header_cols[1]:
-            # quick "scroll to bottom" affordance (just an informative hint; actual scrolling handled by component)
-            st.caption("Auto-scroll enabled")
+            st.caption(
+                "Latest message at top"
+                if scroll_align == "last_user"
+                else "Auto-scroll enabled"
+            )
 
         components.html(chat_html, height=chat_height, scrolling=False)
 
