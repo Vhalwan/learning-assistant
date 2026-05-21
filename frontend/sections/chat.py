@@ -12,9 +12,10 @@ This file preserves all logic, call signatures, and session_state keys exactly.
 import os
 import uuid
 import re
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Dict, Tuple
+from typing import Any, List, Dict, Tuple, Optional
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -26,7 +27,10 @@ from frontend.runtime_ui_helpers import (
     strip_retrieval_artifacts,
     trim_history_to_max_turns,
     build_chat_html,
+    scroll_to_anchor,
 )
+
+CHAT_SECTION_ANCHOR = "la-chat-section-anchor"
 
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
 
@@ -149,7 +153,253 @@ def _derive_default_chat_title(history: List[Dict[str, Any]], fallback_index: in
     return f"Saved chat {fallback_index}"
 
 
-def render(st: Any, stem: str, llm):
+def _submit_chat_message(
+    st: Any,
+    *,
+    user_msg: str,
+    stem: str,
+    hist_key: str,
+    embeddings_path: Path,
+    index_path: Path,
+    embeddings_ready: bool,
+    chat_k: int,
+    explain_new: bool,
+    include_example: bool,
+    turn_quiz: bool,
+    llm,
+    mod_reset_key: str,
+    clear_input_key: str,
+    from_confusion_followup: bool = False,
+    show_spinner: bool = True,
+) -> bool:
+    """Run the chat send pipeline. Returns True if a message was sent."""
+    loading_key = f"chat_followup_loading_{stem}"
+    scroll_key = f"scroll_to_chat_{stem}"
+    try:
+        return _submit_chat_message_impl(
+            st,
+            user_msg=user_msg,
+            stem=stem,
+            hist_key=hist_key,
+            embeddings_path=embeddings_path,
+            index_path=index_path,
+            embeddings_ready=embeddings_ready,
+            chat_k=chat_k,
+            explain_new=explain_new,
+            include_example=include_example,
+            turn_quiz=turn_quiz,
+            llm=llm,
+            mod_reset_key=mod_reset_key,
+            clear_input_key=clear_input_key,
+            from_confusion_followup=from_confusion_followup,
+            show_spinner=show_spinner,
+            scroll_key=scroll_key,
+        )
+    finally:
+        st.session_state.pop(loading_key, None)
+
+
+def _submit_chat_message_impl(
+    st: Any,
+    *,
+    user_msg: str,
+    stem: str,
+    hist_key: str,
+    embeddings_path: Path,
+    index_path: Path,
+    embeddings_ready: bool,
+    chat_k: int,
+    explain_new: bool,
+    include_example: bool,
+    turn_quiz: bool,
+    llm,
+    mod_reset_key: str,
+    clear_input_key: str,
+    from_confusion_followup: bool,
+    show_spinner: bool,
+    scroll_key: str,
+) -> bool:
+    """Inner send pipeline (loading flag cleared by wrapper)."""
+    if not embeddings_ready:
+        st.error("Embeddings not loaded. Create embeddings first.")
+        return False
+    if not user_msg or not str(user_msg).strip():
+        st.warning("Please enter a message.")
+        return False
+
+    pending_quiz_key = f"chat_pending_quiz_{stem}"
+    pending_quiz = st.session_state.get(pending_quiz_key)
+    pending_question = ""
+    if isinstance(pending_quiz, dict):
+        pending_question = str(pending_quiz.get("question") or "").strip()
+    elif isinstance(pending_quiz, str):
+        pending_question = pending_quiz.strip()
+
+    user_msg_clean, msg_mode = _normalize_user_msg(user_msg)
+    force_question = msg_mode == "question"
+    force_answer = msg_mode == "answer"
+    force_flag_key = f"chat_force_question_{stem}"
+    force_flag = bool(st.session_state.pop(force_flag_key, False))
+    if force_flag and not force_answer:
+        force_question = True
+    looks_question = _looks_like_question(user_msg_clean)
+
+    answer_mode = False
+    if pending_question and not force_question and (force_answer or not looks_question):
+        answer_mode = True
+    else:
+        if pending_question:
+            st.session_state[pending_quiz_key] = None
+
+    payload_history = []
+    for h in st.session_state.get(hist_key, []) or []:
+        role = h.get("role")
+        content = h.get("content", "") or ""
+        if role and str(role).lower().startswith("user"):
+            content = _strip_inline_instructions(content)
+        payload_history.append({"role": role, "content": content})
+
+    modifiers = []
+    if explain_new:
+        modifiers.append("Explain as if the learner is new to the topic.")
+    if include_example:
+        modifiers.append("Include one concrete example.")
+    if turn_quiz:
+        modifiers.append(
+            "End with one quiz question (single sentence ending with '?'). "
+            "Do not add any text after the question."
+        )
+
+    if answer_mode:
+        prompt_question = (
+            "You are grading a student's answer to a quiz question about the lecture. "
+            "Use ONLY the provided context.\n\n"
+            f"Quiz question:\n{pending_question}\n\n"
+            f"Student answer:\n{user_msg_clean}\n\n"
+            "Provide a brief verdict (Correct/Partially correct/Incorrect) and a short explanation. "
+            "If incorrect or incomplete, state the correct answer succinctly."
+        )
+    else:
+        prompt_question = user_msg_clean
+
+    if modifiers:
+        prompt_question = f"{prompt_question}\n\nInstructions: " + " ".join(modifiers)
+    candidate_index_path = str(index_path) if index_path.exists() else None
+    use_faiss_search = bool(st.session_state.get("use_faiss_search", False))
+
+    spinner_msg = "Searching and generating response..."
+    spinner_ctx = st.spinner(spinner_msg) if show_spinner else nullcontext()
+    with spinner_ctx:
+        try:
+            if st.session_state.get("use_api_mode", False):
+                resp = perform_chat(
+                    question=prompt_question,
+                    embeddings_path=str(embeddings_path),
+                    history=payload_history,
+                    top_k=int(chat_k),
+                    use_faiss=bool(use_faiss_search),
+                    faiss_index_path=candidate_index_path,
+                    use_api_mode=True,
+                    api_base=os.getenv("API_BASE", API_DEFAULT),
+                    token=st.session_state.get("api_token", "") or "",
+                    llm_call=None,
+                )
+            else:
+                resp = perform_chat(
+                    question=prompt_question,
+                    embeddings_path=str(embeddings_path),
+                    history=payload_history,
+                    top_k=int(chat_k),
+                    use_faiss=bool(use_faiss_search),
+                    faiss_index_path=candidate_index_path,
+                    use_api_mode=False,
+                    llm_call=llm,
+                )
+
+            ans = resp.get("answer")
+            updated_history = resp.get("history", None)
+            retrieved = resp.get("retrieved", []) or []
+            prompt_used = resp.get("prompt")
+            provenance = resp.get("provenance")
+            display_answer = strip_retrieval_artifacts(strip_key_concepts_from_answer(ans or ""))
+
+            quiz_question = ""
+            if turn_quiz:
+                quiz_question = _extract_last_question(display_answer)
+                if not quiz_question:
+                    fallback_q = _fallback_quiz_question(retrieved)
+                    if fallback_q:
+                        display_answer = display_answer.strip()
+                        if display_answer:
+                            display_answer = f"{display_answer}\n\n{fallback_q}"
+                        else:
+                            display_answer = fallback_q
+                        quiz_question = _extract_last_question(display_answer) or fallback_q
+
+            if updated_history:
+                new_hist: List[Dict[str, str]] = []
+                for h in updated_history:
+                    role = h.get("role", "user")
+                    content_raw = h.get("content", "") or ""
+                    if role and role.lower().startswith("assistant"):
+                        content = strip_key_concepts_from_answer(content_raw)
+                    else:
+                        content = _strip_inline_instructions(content_raw)
+                    new_hist.append({"role": role, "content": content})
+                for i in range(len(new_hist) - 1, -1, -1):
+                    if (new_hist[i].get("role") or "").lower().startswith("user"):
+                        new_hist[i]["content"] = user_msg_clean
+                        break
+                for i in range(len(new_hist) - 1, -1, -1):
+                    if (new_hist[i].get("role") or "").lower().startswith("assistant"):
+                        new_hist[i]["content"] = display_answer
+                        break
+                st.session_state[hist_key] = trim_history_to_max_turns(new_hist, max_turns=60)
+            else:
+                st.session_state[hist_key].append({"role": "user", "content": user_msg_clean})
+                st.session_state[hist_key].append({
+                    "role": "assistant",
+                    "content": display_answer,
+                    "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance},
+                })
+                st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
+
+            st.session_state[mod_reset_key] = True
+            st.session_state[clear_input_key] = True
+
+            if turn_quiz and quiz_question:
+                st.session_state[pending_quiz_key] = {"question": quiz_question}
+            else:
+                st.session_state[pending_quiz_key] = None
+
+            if from_confusion_followup:
+                st.session_state[scroll_key] = True
+                st.session_state[f"open_chat_tab_{stem}"] = True
+
+            st.success("Assistant replied — chat updated.")
+            try:
+                st.rerun()
+            except Exception:
+                try:
+                    st.experimental_rerun()
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            st.error("Conversational RAG failed.")
+            st.exception(e)
+            return False
+
+
+def render(
+    st: Any,
+    stem: str,
+    llm,
+    embeddings_path: Optional[Path] = None,
+    index_path: Optional[Path] = None,
+    embeddings_ready: Optional[bool] = None,
+    use_faiss_search: Optional[bool] = None,
+):
     """
     Render the Chat / conversational RAG UI for the given document stem.
 
@@ -157,10 +407,25 @@ def render(st: Any, stem: str, llm):
         st: streamlit module (passed from app.py)
         stem: document stem (string) used to build session keys
         llm: local llm object or None
+        embeddings_path: user-scoped embeddings JSON path
+        index_path: user-scoped FAISS index path
+        embeddings_ready: whether lecture embeddings are loaded
+        use_faiss_search: whether to use FAISS for retrieval
     """
-    # Re-derive embeddings/index paths (same logic as in app.py)
-    embeddings_path = Path(f"data/processed/{stem}_embeddings.json")
-    index_path = Path(f"data/processed/{stem}_embeddings.index")
+    from backend.user_context import get_embeddings_path, get_index_path
+
+    if embeddings_path is None:
+        embeddings_path = get_embeddings_path(stem)
+    else:
+        embeddings_path = Path(embeddings_path)
+    if index_path is None:
+        index_path = get_index_path(stem)
+    else:
+        index_path = Path(index_path)
+    if embeddings_ready is None:
+        embeddings_ready = embeddings_path.exists()
+    if use_faiss_search is not None:
+        st.session_state["use_faiss_search"] = bool(use_faiss_search)
 
     # session keys (same naming as app.py)
     hist_key = f"chat_history_{stem}"
@@ -175,6 +440,10 @@ def render(st: Any, stem: str, llm):
     if history_toggle_key not in st.session_state:
         st.session_state[history_toggle_key] = False
 
+    st.markdown(
+        f'<div id="{CHAT_SECTION_ANCHOR}" style="scroll-margin-top:5.5rem;"></div>',
+        unsafe_allow_html=True,
+    )
     st.subheader("💬 Chat with the lecture (conversational)")
 
     # Apply any pending modifier reset BEFORE widgets are instantiated
@@ -306,20 +575,11 @@ def render(st: Any, stem: str, llm):
     # Main chat view: render after form handling so updated history shows immediately
     # --------------------------
     chat_container = st.container()
-
-    # Check for pending input from Confused section
-    pending_input_key = f"chat_pending_input_{stem}"
-    pending_input = st.session_state.pop(pending_input_key, None)
-    pending_loaded = False
-    if pending_input:
-        st.session_state[f"chat_input_{stem}"] = pending_input
-        st.session_state[f"chat_force_question_{stem}"] = True
-        st.session_state[f"chat_focus_input_{stem}"] = True
-        pending_loaded = True
-        st.success("Follow-up prompt loaded. Review it and send below.")
-
-    # Clear input on next run after a successful send (but don't override pending prompts)
     clear_input_key = f"chat_clear_input_{stem}"
+
+    pending_loaded = False
+
+    # Clear input on next run after a successful send
     if st.session_state.pop(clear_input_key, False) and not pending_loaded:
         st.session_state[f"chat_input_{stem}"] = ""
 
@@ -354,176 +614,22 @@ def render(st: Any, stem: str, llm):
         send_pressed = st.form_submit_button("Send")
 
         if send_pressed:
-            # Basic validation (preserve behavior)
-            if not embeddings_path.exists():
-                st.error("Embeddings not loaded. Create embeddings first.")
-            elif not user_msg or not user_msg.strip():
-                st.warning("Please enter a message.")
-            else:
-                pending_quiz_key = f"chat_pending_quiz_{stem}"
-                pending_quiz = st.session_state.get(pending_quiz_key)
-                pending_question = ""
-                if isinstance(pending_quiz, dict):
-                    pending_question = str(pending_quiz.get("question") or "").strip()
-                elif isinstance(pending_quiz, str):
-                    pending_question = pending_quiz.strip()
-
-                user_msg_clean, msg_mode = _normalize_user_msg(user_msg)
-                force_question = msg_mode == "question"
-                force_answer = msg_mode == "answer"
-                force_flag_key = f"chat_force_question_{stem}"
-                force_flag = bool(st.session_state.pop(force_flag_key, False))
-                if force_flag and not force_answer:
-                    force_question = True
-                looks_question = _looks_like_question(user_msg_clean)
-
-                # Decide if this user message should be treated as a quiz answer
-                answer_mode = False
-                if pending_question and not force_question and (force_answer or not looks_question):
-                    answer_mode = True
-                else:
-                    # user asked a new question; clear any pending quiz
-                    if pending_question:
-                        st.session_state[pending_quiz_key] = None
-
-                # Clean history before sending to model (remove auto-appended instructions)
-                payload_history = []
-                for h in st.session_state.get(hist_key, []) or []:
-                    role = h.get("role")
-                    content = h.get("content", "") or ""
-                    if role and str(role).lower().startswith("user"):
-                        content = _strip_inline_instructions(content)
-                    payload_history.append({"role": role, "content": content})
-
-                modifiers = []
-                if explain_new:
-                    modifiers.append("Explain as if the learner is new to the topic.")
-                if include_example:
-                    modifiers.append("Include one concrete example.")
-                if turn_quiz:
-                    modifiers.append("End with one quiz question (single sentence ending with '?'). Do not add any text after the question.")
-
-                if answer_mode:
-                    # Evaluate the user's answer against the prior quiz question
-                    prompt_question = (
-                        "You are grading a student's answer to a quiz question about the lecture. "
-                        "Use ONLY the provided context.\n\n"
-                        f"Quiz question:\n{pending_question}\n\n"
-                        f"Student answer:\n{user_msg_clean}\n\n"
-                        "Provide a brief verdict (Correct/Partially correct/Incorrect) and a short explanation. "
-                        "If incorrect or incomplete, state the correct answer succinctly."
-                    )
-                else:
-                    prompt_question = user_msg_clean
-
-                if modifiers:
-                    prompt_question = f"{prompt_question}\n\nInstructions: " + " ".join(modifiers)
-                candidate_index_path = str(index_path) if index_path.exists() else None
-
-                # decide use_faiss_search from session (app.py must set this before calling render)
-                use_faiss_search = bool(st.session_state.get("use_faiss_search", False))
-
-                with st.spinner("Searching and generating response..."):
-                    try:
-                        if st.session_state.get("use_api_mode", False):
-                            resp = perform_chat(
-                                question=prompt_question,
-                                embeddings_path=str(embeddings_path),
-                                history=payload_history,
-                                top_k=int(chat_k),
-                                use_faiss=bool(use_faiss_search),
-                                faiss_index_path=candidate_index_path,
-                                use_api_mode=True,
-                                api_base=os.getenv("API_BASE", API_DEFAULT),
-                                token=st.session_state.get("api_token", "") or "",
-                                llm_call=None,
-                            )
-                        else:
-                            resp = perform_chat(
-                                question=prompt_question,
-                                embeddings_path=str(embeddings_path),
-                                history=payload_history,
-                                top_k=int(chat_k),
-                                use_faiss=bool(use_faiss_search),
-                                faiss_index_path=candidate_index_path,
-                                use_api_mode=False,
-                                llm_call=llm,
-                            )
-
-                        ans = resp.get("answer")
-                        updated_history = resp.get("history", None)
-                        retrieved = resp.get("retrieved", []) or []
-                        prompt_used = resp.get("prompt")
-                        provenance = resp.get("provenance")
-                        display_answer = strip_retrieval_artifacts(strip_key_concepts_from_answer(ans or ""))
-
-                        # Ensure a quiz question exists if requested (fallback if missing)
-                        quiz_question = ""
-                        if turn_quiz:
-                            quiz_question = _extract_last_question(display_answer)
-                            if not quiz_question:
-                                fallback_q = _fallback_quiz_question(retrieved)
-                                if fallback_q:
-                                    display_answer = display_answer.strip()
-                                    if display_answer:
-                                        display_answer = f"{display_answer}\n\n{fallback_q}"
-                                    else:
-                                        display_answer = fallback_q
-                                    quiz_question = _extract_last_question(display_answer) or fallback_q
-
-                        # prefer backend-provided updated history; otherwise append user+assistant
-                        if updated_history:
-                            new_hist: List[Dict[str, str]] = []
-                            for h in updated_history:
-                                role = h.get("role", "user")
-                                content_raw = h.get("content", "") or ""
-                                if role and role.lower().startswith("assistant"):
-                                    content = strip_key_concepts_from_answer(content_raw)
-                                else:
-                                    content = _strip_inline_instructions(content_raw)
-                                new_hist.append({"role": role, "content": content})
-                            # Replace last user/assistant messages with clean versions for display
-                            for i in range(len(new_hist) - 1, -1, -1):
-                                if (new_hist[i].get("role") or "").lower().startswith("user"):
-                                    new_hist[i]["content"] = user_msg_clean
-                                    break
-                            for i in range(len(new_hist) - 1, -1, -1):
-                                if (new_hist[i].get("role") or "").lower().startswith("assistant"):
-                                    new_hist[i]["content"] = display_answer
-                                    break
-                            st.session_state[hist_key] = trim_history_to_max_turns(new_hist, max_turns=60)
-                        else:
-                            st.session_state[hist_key].append({"role": "user", "content": user_msg_clean})
-                            st.session_state[hist_key].append({
-                                "role": "assistant",
-                                "content": display_answer,
-                                "meta": {"retrieved": retrieved or [], "prompt": prompt_used, "provenance": provenance}
-                            })
-                            st.session_state[hist_key] = trim_history_to_max_turns(st.session_state[hist_key], max_turns=60)
-
-                        # Reset modifiers + clear input on next run to avoid widget state errors
-                        st.session_state[mod_reset_key] = True
-                        st.session_state[clear_input_key] = True
-
-                        # Track pending quiz question for next turn
-                        if turn_quiz and quiz_question:
-                            st.session_state[pending_quiz_key] = {"question": quiz_question}
-                        else:
-                            st.session_state[pending_quiz_key] = None
-
-                        st.success("Assistant replied — chat updated.")
-                        # Rerun so checkbox/input resets take effect immediately
-                        try:
-                            st.rerun()
-                        except Exception:
-                            try:
-                                st.experimental_rerun()
-                            except Exception:
-                                pass
-
-                    except Exception as e:
-                        st.error("Conversational RAG failed.")
-                        st.exception(e)
+            _submit_chat_message(
+                st,
+                user_msg=user_msg,
+                stem=stem,
+                hist_key=hist_key,
+                embeddings_path=embeddings_path,
+                index_path=index_path,
+                embeddings_ready=bool(embeddings_ready),
+                chat_k=int(chat_k),
+                explain_new=explain_new,
+                include_example=include_example,
+                turn_quiz=turn_quiz,
+                llm=llm,
+                mod_reset_key=mod_reset_key,
+                clear_input_key=clear_input_key,
+            )
 
     # Render the chat AFTER handling the form so latest reply is visible immediately
     chat_history = st.session_state.get(hist_key, []) or []
@@ -549,4 +655,7 @@ def render(st: Any, stem: str, llm):
             # quick "scroll to bottom" affordance (just an informative hint; actual scrolling handled by component)
             st.caption("Auto-scroll enabled")
 
-        components.html(chat_html, height=chat_height, scrolling=True)
+        components.html(chat_html, height=chat_height, scrolling=False)
+
+    if st.session_state.pop(f"scroll_to_chat_{stem}", False):
+        scroll_to_anchor(CHAT_SECTION_ANCHOR)

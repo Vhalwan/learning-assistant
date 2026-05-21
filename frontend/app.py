@@ -2249,7 +2249,15 @@ if uploaded:
     # Tab: Chat
     # -----------------------
     with tab3:
-        render_chat(st=st, stem=stem, llm=llm)
+        render_chat(
+            st=st,
+            stem=stem,
+            llm=llm,
+            embeddings_path=embeddings_path,
+            index_path=index_path,
+            embeddings_ready=lecture_is_ready,
+            use_faiss_search=use_faiss_search,
+        )
 
     hist_key = f"chat_history_{stem}"
 

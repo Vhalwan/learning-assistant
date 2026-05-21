@@ -412,6 +412,93 @@ def _build_reason_rows(
     return reason_rows
 
 
+def _render_followup_loading(message: str) -> None:
+    """Compact circle spinner and a short (~3 word) label for under-button feedback."""
+    words = (message or "Drafting chat reply").split()
+    label = html_mod.escape(" ".join(words[:3]))
+    st.markdown(
+        f"""
+        <div class="la-followup-loading" role="status" aria-live="polite">
+          <span class="la-followup-loading__ring" aria-hidden="true"></span>
+          <span class="la-followup-loading__text">{label}</span>
+        </div>
+        <style>
+        .la-followup-loading {{
+          display: flex;
+          align-items: center;
+          gap: 0.55rem;
+          margin-top: 0.45rem;
+          font-size: 0.88rem;
+          color: #4a5568;
+        }}
+        .la-followup-loading__ring {{
+          width: 16px;
+          height: 16px;
+          border: 2px solid #d8dee9;
+          border-top-color: #1a7f64;
+          border-radius: 50%;
+          animation: la-followup-spin 0.75s linear infinite;
+          flex-shrink: 0;
+        }}
+        @keyframes la-followup-spin {{
+          to {{ transform: rotate(360deg); }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _process_confusion_chat_followup(
+    st: Any,
+    stem: str,
+    embeddings_path: Path,
+    index_path: Path,
+    llm,
+    embeddings_ready: bool,
+) -> None:
+    """Auto-send a follow-up queued from a confusion card (after cards render)."""
+    pending_input_key = f"chat_pending_input_{stem}"
+    auto_send_key = f"chat_auto_send_{stem}"
+    pending_input = st.session_state.pop(pending_input_key, None)
+    if not pending_input:
+        return
+    if not st.session_state.pop(auto_send_key, False):
+        st.session_state[pending_input_key] = pending_input
+        return
+
+    from frontend.sections.chat import _submit_chat_message
+
+    hist_key = f"chat_history_{stem}"
+    mod_reset_key = f"chat_mod_reset_{stem}"
+    clear_input_key = f"chat_clear_input_{stem}"
+    chat_k = int(st.session_state.get(f"chat_k_{stem}", 3))
+    style = st.session_state.get(f"chat_style_{stem}", "Standard")
+    explain_new = style in ("Beginner friendly", "Beginner friendly + knowledge check")
+    include_example = style == "Include a practical example"
+    turn_quiz = style == "Beginner friendly + knowledge check"
+
+    st.session_state[f"chat_force_question_{stem}"] = True
+    _submit_chat_message(
+        st,
+        user_msg=pending_input,
+        stem=stem,
+        hist_key=hist_key,
+        embeddings_path=embeddings_path,
+        index_path=index_path,
+        embeddings_ready=bool(embeddings_ready),
+        chat_k=chat_k,
+        explain_new=explain_new,
+        include_example=include_example,
+        turn_quiz=turn_quiz,
+        llm=llm,
+        mod_reset_key=mod_reset_key,
+        clear_input_key=clear_input_key,
+        from_confusion_followup=True,
+        show_spinner=False,
+    )
+
+
 def _format_timestamp(value: str) -> str:
     raw = " ".join(str(value or "").split()).strip()
     if not raw:
@@ -714,8 +801,10 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             "The user struggled with this concept in recent quizzes. Explain it clearly, give simple examples, and highlight key points that might cause confusion."
                         )
                         st.session_state[f"chat_pending_input_{stem}"] = follow_prompt
+                        st.session_state[f"chat_auto_send_{stem}"] = True
+                        st.session_state[f"chat_followup_loading_{stem}"] = True
+                        st.session_state[f"chat_followup_card_{stem}"] = card_key
                         st.session_state[f"open_chat_tab_{stem}"] = True
-                        st.session_state[f"chat_focus_input_{stem}"] = True
                         try:
                             st.rerun()
                         except Exception:
@@ -723,6 +812,13 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 st.experimental_rerun()
                             except Exception:
                                 pass
+                    loading_key = f"chat_followup_loading_{stem}"
+                    card_loading_key = f"chat_followup_card_{stem}"
+                    if (
+                        st.session_state.get(loading_key)
+                        and st.session_state.get(card_loading_key) == card_key
+                    ):
+                        _render_followup_loading("Drafting chat reply")
                 with secondary_action_cols[0]:
                     # ➕ Add to SRS (idempotent)
                     add_srs_key = f"conf_add_srs_{stem}_{card_key}"
@@ -838,4 +934,15 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                                 st.write(rc.get("text", "")[:1000] + ("..." if len(rc.get("text", "")) > 1000 else ""))
         if notice_rendered:
             st.session_state.pop(followup_notice_key, None)
+
+    embeddings_ready = bool(embeddings_path and Path(embeddings_path).exists())
+    _process_confusion_chat_followup(
+        st,
+        stem=stem,
+        embeddings_path=Path(embeddings_path),
+        index_path=Path(index_path),
+        llm=llm,
+        embeddings_ready=embeddings_ready,
+    )
+    st.session_state.pop(f"chat_followup_card_{stem}", None)
     st.markdown("---")

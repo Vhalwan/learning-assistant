@@ -18,6 +18,104 @@ def _escape_html(value: str) -> str:
     return html_mod.escape(str(value)).replace("\n", "<br>")
 
 
+def _format_chat_inline_html(escaped_text: str) -> str:
+    """Apply bold/code to already HTML-escaped text."""
+    text = escaped_text
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    return text
+
+
+def format_chat_assistant_html(text: str) -> str:
+    """Render common markdown patterns in assistant chat bubbles as safe HTML."""
+    if not text:
+        return ""
+    raw = str(text).replace("\r\n", "\n")
+    lines = raw.split("\n")
+    blocks: List[str] = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        bullet = re.match(r"^[\*\-]\s+(.+)$", stripped)
+        if bullet:
+            items: List[str] = []
+            while i < len(lines):
+                s = lines[i].strip()
+                m = re.match(r"^[\*\-]\s+(.+)$", s)
+                if not m:
+                    break
+                items.append(_format_chat_inline_html(html_mod.escape(m.group(1))))
+                i += 1
+            blocks.append("<ul>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>")
+            continue
+        heading = re.match(r"^#{1,4}\s+(.+)$", stripped)
+        if heading:
+            title = _format_chat_inline_html(html_mod.escape(heading.group(1)))
+            blocks.append(f'<p class="chat-h">{title}</p>')
+            i += 1
+            continue
+        if not stripped:
+            i += 1
+            continue
+        para_lines: List[str] = []
+        while i < len(lines):
+            s = lines[i].strip()
+            if not s:
+                break
+            if re.match(r"^[\*\-]\s+", s) or re.match(r"^#{1,4}\s+", s):
+                break
+            para_lines.append(lines[i])
+            i += 1
+        if para_lines:
+            body = html_mod.escape("\n".join(para_lines))
+            body = _format_chat_inline_html(body.replace("\n", "<br>"))
+            blocks.append(f"<p>{body}</p>")
+    if blocks:
+        return "".join(blocks)
+    return _format_chat_inline_html(html_mod.escape(raw).replace("\n", "<br>"))
+
+
+def scroll_to_anchor(anchor_id: str) -> None:
+    """Best-effort scroll to an anchor in the Streamlit parent document."""
+    import streamlit.components.v1 as st_components
+
+    aid = json.dumps(anchor_id)
+    st_components.html(
+        f"""
+        <script>
+        const ID = {aid};
+        function findEl() {{
+            const byId = (doc) => (doc && doc.getElementById ? doc.getElementById(ID) : null);
+            let el = byId(window.parent.document);
+            if (el) return el;
+            const scanRoots = [window.parent.document, document];
+            for (const root of scanRoots) {{
+                if (!root || !root.querySelectorAll) continue;
+                const frames = root.querySelectorAll("iframe");
+                for (const fr of frames) {{
+                    try {{
+                        const d = fr.contentDocument;
+                        el = byId(d);
+                        if (el) return el;
+                    }} catch (e) {{}}
+                }}
+            }}
+            return byId(document);
+        }}
+        function go() {{
+            const el = findEl();
+            if (el) el.scrollIntoView({{ behavior: "smooth", block: "start" }});
+        }}
+        setTimeout(go, 0);
+        setTimeout(go, 120);
+        setTimeout(go, 400);
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 def build_chat_html(
     chat_history: List[Dict[str, str]],
     max_height: int = 520,
@@ -29,14 +127,16 @@ def build_chat_html(
     msg_blocks: List[str] = []
     for turn in chat_history or []:
         role = (turn.get("role") or "user").lower()
-        content = _escape_html(turn.get("content", "") or "")
+        raw_content = turn.get("content", "") or ""
         if role.startswith("assistant"):
+            content = format_chat_assistant_html(raw_content)
             block = f"""
             <div class="msg bot">
-              <div class="bubble">{content}</div>
+              <div class="bubble bot-rich">{content}</div>
             </div>
             """
         else:
+            content = _escape_html(raw_content)
             block = f"""
             <div class="msg user">
               <div class="bubble">{content}</div>
@@ -53,8 +153,10 @@ def build_chat_html(
         border: 1px solid #eee;
         border-radius: 8px;
         padding: 12px;
+        overflow-x: hidden;
         overflow-y: auto;
         background: #fafafa;
+        box-sizing: border-box;
       }}
       .msg {{
         margin: 6px 0;
@@ -68,6 +170,8 @@ def build_chat_html(
         line-height: 1.4;
         white-space: pre-wrap;
         word-wrap: break-word;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }}
       .msg.user {{
         justify-content: flex-end;
@@ -83,6 +187,33 @@ def build_chat_html(
         background: #ffffff;
         border: 1px solid #e6e6e6;
         border-top-left-radius: 6px;
+      }}
+      .msg.bot .bubble.bot-rich {{
+        white-space: normal;
+      }}
+      .msg.bot .bubble.bot-rich p {{
+        margin: 0.35em 0;
+      }}
+      .msg.bot .bubble.bot-rich p.chat-h {{
+        margin: 0.6em 0 0.35em;
+        font-weight: 600;
+      }}
+      .msg.bot .bubble.bot-rich ul {{
+        margin: 0.35em 0 0.5em;
+        padding-left: 1.25em;
+      }}
+      .msg.bot .bubble.bot-rich li {{
+        margin: 0.2em 0;
+      }}
+      .msg.bot .bubble.bot-rich strong {{
+        font-weight: 600;
+      }}
+      .msg.bot .bubble.bot-rich code {{
+        font-family: ui-monospace, monospace;
+        font-size: 0.92em;
+        background: #f0f4f8;
+        padding: 0.1em 0.35em;
+        border-radius: 4px;
       }}
     </style>
 
