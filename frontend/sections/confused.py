@@ -586,6 +586,46 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
     if not real_confusions:
         st.success("No wrong quiz answers are recorded for this lecture yet. When you miss a question, the matching concept will appear here.")
     else:
+        st.markdown(
+            """
+            <style>
+            section[data-testid="stMain"] .la-concept-card-wrap .la-concept-srs-label,
+            section[data-testid="stMain"] [class*="st-key-la_concept_card_"] .la-concept-srs-label {
+              font-size: 0.875rem;
+              color: rgb(49, 51, 63);
+              margin: 0 0 0.35rem;
+              line-height: 1.4;
+            }
+            section[data-testid="stMain"] .la-concept-card-wrap:has(.la-concept-srs-picker) [data-testid="stPopover"] > button,
+            section[data-testid="stMain"] [class*="st-key-la_concept_card_"]:has(.la-concept-srs-picker) [data-testid="stPopover"] > button {
+              white-space: normal !important;
+              text-align: left !important;
+              height: auto !important;
+              min-height: 2.75rem;
+              line-height: 1.4 !important;
+              word-break: break-word;
+              overflow-wrap: anywhere;
+            }
+            section[data-testid="stMain"] [data-testid="stPopoverBody"] [data-testid="stRadio"] [role="radiogroup"] label,
+            section[data-testid="stMain"] [data-testid="stPopoverBody"] [data-testid="stRadio"] [role="radiogroup"] label p,
+            section[data-testid="stMain"] [data-testid="stPopoverBody"] [data-testid="stRadio"] [role="radiogroup"] label div {
+              white-space: normal !important;
+              overflow: visible !important;
+              text-overflow: unset !important;
+              word-break: break-word;
+              overflow-wrap: anywhere;
+              line-height: 1.4 !important;
+              max-width: 100% !important;
+            }
+            section[data-testid="stMain"] [data-testid="stPopoverBody"] [data-testid="stRadio"] [role="radiogroup"] label {
+              align-items: flex-start !important;
+              height: auto !important;
+              min-height: 2.75rem;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
         preview_limit = min(len(real_confusions), 5)
         for idx, item in enumerate(real_confusions[:preview_limit], start=1):
             card_key = _stable_card_key(stem, item, idx)
@@ -693,17 +733,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     row = mcq_candidates[option_index]
                     return (row.get("question") or row.get("label") or "").strip()
 
-                selected_mcq_index = st.selectbox(
-                    "Question to add to SRS",
-                    options=mcq_option_indices,
-                    format_func=_mcq_option_label,
-                    key=selected_mcq_key,
-                    help="Explain simply and Ask follow-up in Chat use the concept directly. Pick a question here only for Add to SRS.",
-                )
-                selected_mcq = mcq_candidates[selected_mcq_index]
-                if not is_mcq_item:
-                    st.caption("Type: Concept confusion item")
-
                 for e in evidence:
                     if e.get("type") in ("quiz", "persisted"):
                         meta = e.get("meta", {}) or {}
@@ -750,9 +779,6 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 ):
                     st.info(followup_notice.get("message", "Follow-up prompt queued for chat."))
                     notice_rendered = True
-
-                selected_qid = selected_mcq.get("id")
-                selected_question = selected_mcq.get("question") or ""
 
                 st.markdown('<div class="la-concept-footer-marker"></div>', unsafe_allow_html=True)
                 st.markdown(
@@ -820,90 +846,7 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                     ):
                         _render_followup_loading("Drafting chat reply")
                 with secondary_action_cols[0]:
-                    # ➕ Add to SRS (idempotent)
-                    add_srs_key = f"conf_add_srs_{stem}_{card_key}"
-                    if st.button("Add to SRS", key=add_srs_key, use_container_width=True):
-                        try:
-                            mgr = SRSManager()
-                            # Use selected original MCQ (if available) as primary source
-                            card_id = selected_qid or deterministic_fallback_id
-                            question_text = selected_question or extracted_concept
-
-                            # fallback deterministic id derived from concept+stem
-                            if not card_id:
-                                # make a safe short token from the concept
-                                safe = re.sub(r"[^a-zA-Z0-9_]+", "_", concept).strip("_")[:40] or "conf"
-                                card_id = f"{stem}_{safe}"
-
-                                question_text = question_text or concept
-
-                            topic_heading = (
-                                (item.get("title") or item.get("concept") or item.get("concept_label") or concept or "")
-                                .strip()
-                            )
-                            if is_mcq_item:
-                                mcq_payload = _build_mcq_from_item(item, selected_mcq)
-                                card_id = card_id or mcq_payload.get("id") or deterministic_fallback_id
-                                question_text = mcq_payload.get("question") or question_text
-                                card_meta = {
-                                    "item_type": "mcq",
-                                    "origin": "confused_mcq",
-                                    "quiz_question_id": mcq_payload.get("id") or "",
-                                    "question": question_text or "",
-                                    "choices": mcq_payload.get("choices") or {},
-                                    "answer": mcq_payload.get("answer") or "",
-                                    "explanation": mcq_payload.get("explanation") or "",
-                                    "stem": stem,
-                                    "source_reason": "Added from Confused review",
-                                    "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
-                                    "concept_id": (item.get("concept_id") or "").strip(),
-                                    "concept": topic_heading or extracted_concept,
-                                    "title": topic_heading or extracted_concept,
-                                }
-                            else:
-                                card_meta = {
-                                    "item_type": "concept",
-                                    "origin": "confused_concept",
-                                    "question": question_text or "",
-                                    "stem": stem,
-                                    "source_reason": "Added from Confused review",
-                                    "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
-                                    "concept_id": (item.get("concept_id") or "").strip(),
-                                    "concept": topic_heading or extracted_concept,
-                                    "title": topic_heading or extracted_concept,
-                                }
-                            mgr.ensure_card(card_id, meta=card_meta)
-                            if "srs_quiz_items_cache" not in st.session_state:
-                                st.session_state["srs_quiz_items_cache"] = {}
-                            if is_mcq_item:
-                                st.session_state["srs_quiz_items_cache"][card_id] = {
-                                    "id": card_id,
-                                    "question": card_meta.get("question", ""),
-                                    "choices": card_meta.get("choices", {}) or {},
-                                    "answer": card_meta.get("answer", ""),
-                                    "explanation": card_meta.get("explanation", ""),
-                                    "item_type": "mcq",
-                                }
-                            else:
-                                st.session_state["srs_quiz_items_cache"][card_id] = {
-                                    "id": card_id,
-                                    "question": card_meta.get("question", ""),
-                                    "choices": {},
-                                    "answer": "",
-                                    "explanation": "",
-                                    "item_type": "concept",
-                                }
-                            st.success(f"Added to SRS: {card_id}")
-                            try:
-                                st.rerun()
-                            except Exception:
-                                try:
-                                    st.experimental_rerun()
-                                except Exception:
-                                    pass
-                        except Exception as e:
-                            st.error("Failed to add to SRS.")
-                            st.exception(e)
+                    pass
                 with secondary_action_cols[1]:
                     confirm_key = f"conf_reset_confirm_{stem}_{card_key}"
                     if st.session_state.get(confirm_key):
@@ -924,6 +867,119 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                             else:
                                 st.session_state[confirm_key] = True
                                 st.rerun()
+
+                st.markdown('<div class="la-concept-srs-picker"></div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<p class="la-concept-srs-label">Question to add to SRS</p>',
+                    unsafe_allow_html=True,
+                )
+                _srs_help = (
+                    "Explain simply and Ask follow-up in Chat use the concept directly. "
+                    "Pick a question here only for Add to SRS."
+                )
+                _saved_mcq_index = st.session_state.get(selected_mcq_key, mcq_option_indices[0])
+                if _saved_mcq_index not in mcq_option_indices:
+                    _saved_mcq_index = mcq_option_indices[0]
+                _srs_trigger_label = (_mcq_option_label(_saved_mcq_index) or "").strip()
+                if not _srs_trigger_label or _srs_trigger_label == fallback_label:
+                    _srs_trigger_label = "Choose a question"
+                with st.popover(_srs_trigger_label, use_container_width=True, help=_srs_help):
+                    selected_mcq_index = st.radio(
+                        "Question to add to SRS",
+                        options=mcq_option_indices,
+                        format_func=_mcq_option_label,
+                        key=selected_mcq_key,
+                        label_visibility="collapsed",
+                    )
+                selected_mcq = mcq_candidates[selected_mcq_index]
+                selected_qid = selected_mcq.get("id")
+                selected_question = selected_mcq.get("question") or ""
+                if not is_mcq_item:
+                    st.caption("Type: Concept confusion item")
+
+                add_srs_key = f"conf_add_srs_{stem}_{card_key}"
+                if st.button("Add to SRS", key=add_srs_key, use_container_width=True):
+                    try:
+                        mgr = SRSManager()
+                        # Use selected original MCQ (if available) as primary source
+                        card_id = selected_qid or deterministic_fallback_id
+                        question_text = selected_question or extracted_concept
+
+                        # fallback deterministic id derived from concept+stem
+                        if not card_id:
+                            # make a safe short token from the concept
+                            safe = re.sub(r"[^a-zA-Z0-9_]+", "_", concept).strip("_")[:40] or "conf"
+                            card_id = f"{stem}_{safe}"
+
+                            question_text = question_text or concept
+
+                        topic_heading = (
+                            (item.get("title") or item.get("concept") or item.get("concept_label") or concept or "")
+                            .strip()
+                        )
+                        if is_mcq_item:
+                            mcq_payload = _build_mcq_from_item(item, selected_mcq)
+                            card_id = card_id or mcq_payload.get("id") or deterministic_fallback_id
+                            question_text = mcq_payload.get("question") or question_text
+                            card_meta = {
+                                "item_type": "mcq",
+                                "origin": "confused_mcq",
+                                "quiz_question_id": mcq_payload.get("id") or "",
+                                "question": question_text or "",
+                                "choices": mcq_payload.get("choices") or {},
+                                "answer": mcq_payload.get("answer") or "",
+                                "explanation": mcq_payload.get("explanation") or "",
+                                "stem": stem,
+                                "source_reason": "Added from Confused review",
+                                "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
+                                "concept_id": (item.get("concept_id") or "").strip(),
+                                "concept": topic_heading or extracted_concept,
+                                "title": topic_heading or extracted_concept,
+                            }
+                        else:
+                            card_meta = {
+                                "item_type": "concept",
+                                "origin": "confused_concept",
+                                "question": question_text or "",
+                                "stem": stem,
+                                "source_reason": "Added from Confused review",
+                                "concept_label": (item.get("concept_label") or extracted_concept or topic_heading),
+                                "concept_id": (item.get("concept_id") or "").strip(),
+                                "concept": topic_heading or extracted_concept,
+                                "title": topic_heading or extracted_concept,
+                            }
+                        mgr.ensure_card(card_id, meta=card_meta)
+                        if "srs_quiz_items_cache" not in st.session_state:
+                            st.session_state["srs_quiz_items_cache"] = {}
+                        if is_mcq_item:
+                            st.session_state["srs_quiz_items_cache"][card_id] = {
+                                "id": card_id,
+                                "question": card_meta.get("question", ""),
+                                "choices": card_meta.get("choices", {}) or {},
+                                "answer": card_meta.get("answer", ""),
+                                "explanation": card_meta.get("explanation", ""),
+                                "item_type": "mcq",
+                            }
+                        else:
+                            st.session_state["srs_quiz_items_cache"][card_id] = {
+                                "id": card_id,
+                                "question": card_meta.get("question", ""),
+                                "choices": {},
+                                "answer": "",
+                                "explanation": "",
+                                "item_type": "concept",
+                            }
+                        st.success(f"Added to SRS: {card_id}")
+                        try:
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        st.error("Failed to add to SRS.")
+                        st.exception(e)
 
                 if explain_result is not None:
                     st.markdown("**Explanation**")

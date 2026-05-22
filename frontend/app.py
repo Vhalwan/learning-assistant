@@ -537,6 +537,41 @@ def _inject_page_ui_enhancements() -> None:
             return marker.closest('[data-testid="stVerticalBlock"]');
           };
 
+          const enhanceConceptSrsPickers = () => {
+            const applyWrap = (el) => {
+              if (!el || el.dataset.laSrsWrap === "1") return;
+              el.style.setProperty("white-space", "normal", "important");
+              el.style.setProperty("overflow-wrap", "anywhere", "important");
+              el.style.setProperty("word-break", "break-word", "important");
+              el.style.setProperty("text-overflow", "unset", "important");
+              el.style.setProperty("overflow", "visible", "important");
+              el.style.setProperty("max-width", "100%", "important");
+              el.dataset.laSrsWrap = "1";
+            };
+
+            doc
+              .querySelectorAll(
+                '.la-concept-card-wrap:has(.la-concept-srs-picker) [data-testid="stPopover"] > button, [class*="st-key-la_concept_card_"]:has(.la-concept-srs-picker) [data-testid="stPopover"] > button'
+              )
+              .forEach((btn) => {
+                applyWrap(btn);
+                btn.style.setProperty("height", "auto", "important");
+                btn.style.setProperty("min-height", "2.75rem", "important");
+                btn.style.setProperty("text-align", "left", "important");
+              });
+
+            doc
+              .querySelectorAll(
+                '[data-testid="stPopoverBody"] [data-testid="stRadio"] [role="radiogroup"] label'
+              )
+              .forEach((label) => {
+                applyWrap(label);
+                label.style.setProperty("height", "auto", "important");
+                label.style.setProperty("align-items", "flex-start", "important");
+                label.querySelectorAll("p, div, span").forEach(applyWrap);
+              });
+          };
+
           const enhanceQuizCards = () => {
             const applyQuizCardStyle = (wrapper) => {
               if (!wrapper || wrapper.dataset.laQuizStyled === "1") return;
@@ -564,6 +599,7 @@ def _inject_page_ui_enhancements() -> None:
             enhanceNav();
             enhanceStudyInput();
             enhanceConceptCards();
+            enhanceConceptSrsPickers();
             enhanceQuizCards();
           };
 
@@ -1520,7 +1556,8 @@ st.markdown(
         border-top: 1px solid #e2eceb;
         margin: 0.35rem 0 0.65rem;
       }
-      section.main [data-testid="stVerticalBlockBorderWrapper"]:has(.la-concept-card-start) [data-testid="stSelectbox"] {
+      section[data-testid="stMain"] .la-concept-card-wrap:has(.la-concept-srs-picker) [data-testid="stPopover"],
+      section[data-testid="stMain"] [class*="st-key-la_concept_card_"]:has(.la-concept-srs-picker) [data-testid="stPopover"] {
         border-top: 1px solid #d5ebe8;
         padding-top: 0.7rem;
         margin-top: 0.5rem;
