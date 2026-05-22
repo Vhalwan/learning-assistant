@@ -12,7 +12,7 @@ import html as html_mod
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -499,6 +499,12 @@ def _process_confusion_chat_followup(
     )
 
 
+def _format_time_12h(dt: datetime) -> str:
+    hour = dt.hour % 12 or 12
+    am_pm = "AM" if dt.hour < 12 else "PM"
+    return f"{hour}:{dt.minute:02d} {am_pm}"
+
+
 def _format_timestamp(value: str) -> str:
     raw = " ".join(str(value or "").split()).strip()
     if not raw:
@@ -507,7 +513,19 @@ def _format_timestamp(value: str) -> str:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except Exception:
         return raw
-    return dt.strftime("%Y-%m-%d %H:%M")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local_dt = dt.astimezone()
+    local_date = local_dt.date()
+    today = datetime.now().astimezone().date()
+    days_ago = (today - local_date).days
+    if days_ago == 0:
+        return f"Today at {_format_time_12h(local_dt)}"
+    if days_ago == 1:
+        return f"Yesterday at {_format_time_12h(local_dt)}"
+    if days_ago > 1:
+        return f"{days_ago} days ago"
+    return raw
 
 
 def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_faiss_search: bool, llm):
@@ -595,6 +613,14 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
               color: rgb(49, 51, 63);
               margin: 0 0 0.35rem;
               line-height: 1.4;
+            }
+            section[data-testid="stMain"] .la-concept-card-wrap .la-concept-srs-helper,
+            section[data-testid="stMain"] [class*="st-key-la_concept_card_"] .la-concept-srs-helper {
+              font-size: 0.75rem;
+              font-weight: 400;
+              color: #6b7280;
+              margin: -0.15rem 0 0.4rem;
+              line-height: 1.35;
             }
             section[data-testid="stMain"] .la-concept-card-wrap:has(.la-concept-srs-picker) [data-testid="stPopover"] > button,
             section[data-testid="stMain"] [class*="st-key-la_concept_card_"]:has(.la-concept-srs-picker) [data-testid="stPopover"] > button {
@@ -870,7 +896,8 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
 
                 st.markdown('<div class="la-concept-srs-picker"></div>', unsafe_allow_html=True)
                 st.markdown(
-                    '<p class="la-concept-srs-label">Question to add to SRS</p>',
+                    '<p class="la-concept-srs-label">Question to add to SRS</p>'
+                    '<p class="la-concept-srs-helper">Showing your most recent wrong attempts</p>',
                     unsafe_allow_html=True,
                 )
                 _srs_help = (
