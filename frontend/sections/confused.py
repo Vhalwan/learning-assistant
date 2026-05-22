@@ -449,6 +449,66 @@ def _render_followup_loading(message: str) -> None:
     )
 
 
+def _process_confusion_explain(
+    st: Any,
+    stem: str,
+    embeddings_path: Path,
+    index_path: Path,
+    use_faiss_search: bool,
+    llm,
+) -> None:
+    """Run a queued 'Explain simply' request from a confusion card (after cards render)."""
+    pending_key = f"conf_explain_pending_{stem}"
+    loading_key = f"conf_explain_loading_{stem}"
+    card_loading_key = f"conf_explain_card_{stem}"
+    pending = st.session_state.pop(pending_key, None)
+    if not pending:
+        return
+
+    card_key = pending.get("card_key") or ""
+    result_key = f"conf_explain_result_{stem}_{card_key}"
+    try:
+        concept = pending.get("concept") or "this concept"
+        evidence_rows = pending.get("evidence_rows") or []
+        compact_evidence = []
+        for row in evidence_rows[:2]:
+            compact_evidence.append(f"- [{row['qid']}] {_shorten(row['question'], 120)}")
+        explain_q = (
+            "You are tutoring a learner on a confusion point. "
+            "Explain simply and provide one short concrete example.\n\n"
+            f"Confused concept: {concept}\n"
+            "Compact evidence snippets:\n"
+            f"{chr(10).join(compact_evidence) if compact_evidence else '- None available'}"
+        )
+        candidate_index_path = (
+            str(index_path) if index_path and Path(index_path).exists() else None
+        )
+        st.session_state[result_key] = perform_query(
+            question=explain_q,
+            embeddings_path=str(embeddings_path),
+            top_k=3,
+            use_faiss=bool(use_faiss_search),
+            faiss_index_path=candidate_index_path,
+            use_api_mode=st.session_state.get("use_api_mode", False),
+            api_base=os.getenv("API_BASE", API_DEFAULT),
+            token=st.session_state.get("api_token", "") or "",
+            llm_call=llm,
+        )
+        try:
+            st.rerun()
+        except Exception:
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
+    except Exception as e:
+        st.error("Failed to generate explanation.")
+        st.exception(e)
+    finally:
+        st.session_state.pop(loading_key, None)
+        st.session_state.pop(card_loading_key, None)
+
+
 def _process_confusion_chat_followup(
     st: Any,
     stem: str,
@@ -813,37 +873,34 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
                 )
                 primary_action_cols = st.columns(2)
                 secondary_action_cols = st.columns(2)
-                explain_result = None
+                explain_result_key = f"conf_explain_result_{stem}_{card_key}"
+                explain_result = st.session_state.get(explain_result_key)
                 with primary_action_cols[0]:
                     # Explain simply (kept — student-first)
                     explain_btn_key = f"conf_explain_{stem}_{card_key}"
                     if st.button("Explain simply", key=explain_btn_key, type="primary", use_container_width=True):
+                        st.session_state.pop(explain_result_key, None)
+                        st.session_state[f"conf_explain_pending_{stem}"] = {
+                            "card_key": card_key,
+                            "concept": extracted_concept,
+                            "evidence_rows": list(evidence_quiz_rows[:2]),
+                        }
+                        st.session_state[f"conf_explain_loading_{stem}"] = True
+                        st.session_state[f"conf_explain_card_{stem}"] = card_key
                         try:
-                            candidate_index_path = str(index_path) if index_path and Path(index_path).exists() else None
-                            compact_evidence = []
-                            for row in evidence_quiz_rows[:2]:
-                                compact_evidence.append(f"- [{row['qid']}] {_shorten(row['question'], 120)}")
-                            explain_q = (
-                                "You are tutoring a learner on a confusion point. "
-                                "Explain simply and provide one short concrete example.\n\n"
-                                f"Confused concept: {extracted_concept}\n"
-                                "Compact evidence snippets:\n"
-                                f"{chr(10).join(compact_evidence) if compact_evidence else '- None available'}"
-                            )
-                            explain_result = perform_query(
-                                question=explain_q,
-                                embeddings_path=str(embeddings_path),
-                                top_k=3,
-                                use_faiss=bool(use_faiss_search),
-                                faiss_index_path=candidate_index_path,
-                                use_api_mode=st.session_state.get("use_api_mode", False),
-                                api_base=os.getenv("API_BASE", API_DEFAULT),
-                                token=st.session_state.get("api_token", "") or "",
-                                llm_call=llm,
-                            )
-                        except Exception as e:
-                            st.error("Failed to generate explanation.")
-                            st.exception(e)
+                            st.rerun()
+                        except Exception:
+                            try:
+                                st.experimental_rerun()
+                            except Exception:
+                                pass
+                    explain_loading_key = f"conf_explain_loading_{stem}"
+                    explain_card_key = f"conf_explain_card_{stem}"
+                    if (
+                        st.session_state.get(explain_loading_key)
+                        and st.session_state.get(explain_card_key) == card_key
+                    ):
+                        _render_followup_loading("Drafting simple explanation")
 
                 with primary_action_cols[1]:
                     follow_key = f"conf_follow_{stem}_{card_key}"
@@ -1019,6 +1076,14 @@ def render(st: Any, stem: str, embeddings_path: Path, index_path: Path, use_fais
             st.session_state.pop(followup_notice_key, None)
 
     embeddings_ready = bool(embeddings_path and Path(embeddings_path).exists())
+    _process_confusion_explain(
+        st,
+        stem=stem,
+        embeddings_path=Path(embeddings_path),
+        index_path=Path(index_path),
+        use_faiss_search=use_faiss_search,
+        llm=llm,
+    )
     _process_confusion_chat_followup(
         st,
         stem=stem,
