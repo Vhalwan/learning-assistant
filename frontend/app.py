@@ -1692,6 +1692,24 @@ st.markdown(
       /* NOTE: intentionally do NOT target section[data-testid="stSidebar"]
          or the toggle button. Modifying those breaks Streamlit's internal
          layout/toggle logic. */
+
+      /* SRS MCQ answer choice buttons — left-align text */
+      section[data-testid="stMain"] [class*="st-key-srs_choice_"] button,
+      div[data-testid="stVerticalBlock"]:has(.la-srs-choice-block) [class*="st-key-srs_choice_"] button {
+        justify-content: flex-start !important;
+        text-align: left !important;
+      }
+      section[data-testid="stMain"] [class*="st-key-srs_choice_"] button > div,
+      div[data-testid="stVerticalBlock"]:has(.la-srs-choice-block) [class*="st-key-srs_choice_"] button > div {
+        justify-content: flex-start !important;
+        text-align: left !important;
+        width: 100% !important;
+      }
+      section[data-testid="stMain"] [class*="st-key-srs_choice_"] button p,
+      div[data-testid="stVerticalBlock"]:has(.la-srs-choice-block) [class*="st-key-srs_choice_"] button p {
+        text-align: left !important;
+        width: 100% !important;
+      }
     </style>
     """,
     unsafe_allow_html=True,

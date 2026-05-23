@@ -11,7 +11,7 @@ Expose:
 """
 
 import html as html_mod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 import streamlit as st
@@ -127,13 +127,14 @@ def _format_interval(card_meta: Dict | None) -> str:
                 minutes = max(1, int(round(days * 1440)))
                 return f"{minutes} min"
             day_text = int(days) if float(days).is_integer() else round(days, 2)
-            return f"{day_text} day(s)"
+            return f"{day_text} day" if day_text == 1 else f"{day_text} days"
         except Exception:
             pass
 
     interval_idx = int(meta.get("interval_index", 0) or 0)
     interval_idx = max(0, min(interval_idx, len(INTERVALS) - 1))
-    return f"{INTERVALS[interval_idx]} day(s)"
+    val = INTERVALS[interval_idx]
+    return f"{val} day" if val == 1 else f"{val} days"
 
 
 def _is_mcq_card(quiz_item: Dict | None, card_meta: Dict | None) -> bool:
@@ -378,6 +379,28 @@ def _build_due_only_review_queue(srs_mgr: SRSManager, lecture_card_ids: List[str
     return [cid for cid in prioritized if cid in due_now]
 
 
+def _format_due_datetime_friendly(dt_utc: datetime) -> str:
+    """Render a naive-UTC due datetime as a local 'tomorrow at 2:00 PM' / 'Monday at 9:00 AM' style string."""
+    try:
+        local_dt = dt_utc.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+    except Exception:
+        local_dt = dt_utc
+
+    hour_12 = local_dt.hour % 12 or 12
+    ampm = "AM" if local_dt.hour < 12 else "PM"
+    time_str = f"{hour_12}:{local_dt.minute:02d} {ampm}"
+
+    now_local = datetime.now()
+    days_diff = (local_dt.date() - now_local.date()).days
+    if days_diff <= 0:
+        return f"today at {time_str}"
+    if days_diff == 1:
+        return f"tomorrow at {time_str}"
+    if days_diff < 7:
+        return f"{local_dt.strftime('%A')} at {time_str}"
+    return f"{local_dt.strftime('%B %d')} at {time_str}"
+
+
 def _nearest_future_review_hint(srs_mgr: SRSManager, lecture_card_ids: List[str]) -> str | None:
     """Friendly line when nothing is due: when the next lecture card becomes due."""
     now = datetime.utcnow()
@@ -390,12 +413,8 @@ def _nearest_future_review_hint(srs_mgr: SRSManager, lecture_card_ids: List[str]
             best = dt
     if best is None:
         return None
-    days_until = max(0, (best.date() - now.date()).days)
-    if days_until <= 0:
-        return None
-    if days_until == 1:
-        return "Your next SRS card(s) from this lecture are due in **about one day**."
-    return f"Your next SRS card(s) from this lecture are due in **about {days_until} days**."
+    friendly = _format_due_datetime_friendly(best)
+    return f"Your next SRS card(s) from this lecture are due **{friendly}**."
 
 
 def _load_quiz_items_for_cards(st_module: Any, quiz_state_key: str | None, card_ids: List[str]) -> Dict[str, Dict]:
@@ -442,6 +461,13 @@ def _load_quiz_items_for_cards(st_module: Any, quiz_state_key: str | None, card_
     return all_quiz_items
 
 
+def _record_session_rating(st_module: Any, card_id: str, rating: str) -> None:
+    """Track per-session card rating (hard / good / easy) for the session summary."""
+    ratings = st_module.session_state.get("srs_session_ratings", {})
+    ratings[card_id] = rating
+    st_module.session_state["srs_session_ratings"] = ratings
+
+
 def _render_review_stats(card_meta: Dict | None):
     if not card_meta:
         return
@@ -449,8 +475,8 @@ def _render_review_stats(card_meta: Dict | None):
     next_due = card_meta.get("next_due", "")
     pretty = _pretty_date_delta(next_due)
     interval_label = _format_interval(card_meta)
-    st.markdown("**Progress / Review stats**")
-    st.caption(f"Reviewed {review_count} time(s) | Interval: {interval_label} | {pretty}")
+    st.markdown("**Card stats**")
+    st.caption(f"Reviewed {review_count} times | Interval: {interval_label} | {pretty}")
 
 
 def _render_review_card_fallback(
@@ -465,8 +491,6 @@ def _render_review_card_fallback(
 ):
     with st_module.container():
         st_module.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
-        card_title = _shorten(stored_question or card_id, 80) or card_id
-        st_module.markdown(f"### Card {queue_pos} / {queue_total}: {card_title}")
 
         st_module.markdown("**Question**")
         if stored_question:
@@ -493,6 +517,7 @@ def _render_review_card_fallback(
                 use_container_width=True,
             ):
                 srs_mgr.mark_review_with_rating(card_id, "good")
+                _record_session_rating(st_module, card_id, "good")
                 reviewed_this_session.add(card_id)
                 st_module.session_state["srs_reviewed_this_session"] = reviewed_this_session
                 st_module.rerun()
@@ -504,6 +529,7 @@ def _render_review_card_fallback(
                 use_container_width=True,
             ):
                 srs_mgr.mark_review_with_rating(card_id, "hard")
+                _record_session_rating(st_module, card_id, "hard")
                 reviewed_this_session.add(card_id)
                 st_module.session_state["srs_reviewed_this_session"] = reviewed_this_session
                 st_module.rerun()
@@ -536,29 +562,12 @@ def _render_review_card(
 
     with st_module.container():
         st_module.markdown('<div class="la-card"></div>', unsafe_allow_html=True)
-        card_title = _shorten(q_text or card_id, 80) or card_id
-        st_module.markdown(f"### Card {queue_pos} / {queue_total}: {card_title}")
 
         st_module.markdown("**Question**")
         if q_text:
-            if "\n" in q_text or len(q_text) > 300:
-                st_module.text_area(
-                    label="",
-                    value=q_text,
-                    height=120,
-                    key=f"srs_qtext_{card_id}",
-                    disabled=True,
-                )
-            else:
-                st_module.write(q_text)
+            st_module.write(q_text)
         else:
             st_module.info("Question text unavailable for this card.")
-
-        if is_mcq_card and choices:
-            st_module.markdown("**Answer Choices**")
-            for label in ["A", "B", "C", "D"]:
-                if label in choices:
-                    st_module.write(f"**{label}.** {choices[label]}")
 
         st_module.markdown("---")
 
@@ -566,31 +575,19 @@ def _render_review_card(
             st_module.caption("Type: MCQ card" if is_mcq_card else "Type: Concept card")
 
             if is_mcq_card:
-                placeholder = "Select an answer"
-                options = [placeholder] + [
-                    f"{label}. {choices.get(label, '')}"
-                    for label in ["A", "B", "C", "D"]
-                    if choices.get(label, "")
-                ]
-                select_key = f"srs_select_{card_id}"
-                selected = st_module.selectbox(
-                    "Choose your answer",
-                    options=options,
-                    key=select_key,
-                )
-                check_disabled = selected == placeholder
-                if st_module.button(
-                    "Check answer",
-                    key=f"srs_check_{card_id}",
-                    disabled=check_disabled,
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    st_module.session_state[show_answer_key] = True
-                    st_module.session_state[f"srs_checked_choice_{card_id}"] = (
-                        selected.split(".", 1)[0].strip() if "." in selected else ""
-                    )
-                    st_module.rerun()
+                st_module.markdown('<div class="la-srs-choice-block"></div>', unsafe_allow_html=True)
+                for label in ["A", "B", "C", "D"]:
+                    choice_text = choices.get(label, "")
+                    if not choice_text:
+                        continue
+                    if st_module.button(
+                        f"{label}. {choice_text}",
+                        key=f"srs_choice_{card_id}_{label}",
+                        use_container_width=True,
+                    ):
+                        st_module.session_state[show_answer_key] = True
+                        st_module.session_state[f"srs_checked_choice_{card_id}"] = label
+                        st_module.rerun()
             else:
                 col_front_a, col_front_b = st_module.columns(2)
                 with col_front_a:
@@ -609,12 +606,12 @@ def _render_review_card(
                         use_container_width=True,
                     ):
                         srs_mgr.mark_review_with_rating(card_id, "hard")
+                        _record_session_rating(st_module, card_id, "hard")
                         reviewed_this_session.add(card_id)
                         st_module.session_state["srs_reviewed_this_session"] = reviewed_this_session
                         st_module.session_state[show_answer_key] = False
                         st_module.rerun()
         else:
-            st_module.markdown("**Back**")
             if is_mcq_card:
                 checked = st_module.session_state.get(f"srs_checked_choice_{card_id}", "")
                 if checked and answer_letter:
@@ -641,6 +638,7 @@ def _render_review_card(
             rating_cols = st_module.columns(3)
             if rating_cols[0].button("Hard", key=f"rate_hard_{card_id}", use_container_width=True):
                 srs_mgr.mark_review_with_rating(card_id, "hard")
+                _record_session_rating(st_module, card_id, "hard")
                 reviewed_this_session.add(card_id)
                 st_module.session_state["srs_reviewed_this_session"] = reviewed_this_session
                 st_module.session_state[show_answer_key] = False
@@ -653,6 +651,7 @@ def _render_review_card(
                 use_container_width=True,
             ):
                 srs_mgr.mark_review_with_rating(card_id, "good")
+                _record_session_rating(st_module, card_id, "good")
                 reviewed_this_session.add(card_id)
                 st_module.session_state["srs_reviewed_this_session"] = reviewed_this_session
                 st_module.session_state[show_answer_key] = False
@@ -660,6 +659,7 @@ def _render_review_card(
 
             if rating_cols[2].button("Easy", key=f"rate_easy_{card_id}", use_container_width=True):
                 srs_mgr.mark_review_with_rating(card_id, "easy")
+                _record_session_rating(st_module, card_id, "easy")
                 reviewed_this_session.add(card_id)
                 st_module.session_state["srs_reviewed_this_session"] = reviewed_this_session
                 st_module.session_state[show_answer_key] = False
@@ -780,6 +780,7 @@ def _render_review_tab(st_module: Any, stem: str | None):
                 st_module.session_state[active_key] = True
                 st_module.session_state[queue_key] = list(due_queue)
                 st_module.session_state["srs_reviewed_this_session"] = set()
+                st_module.session_state["srs_session_ratings"] = {}
                 st_module.rerun()
             return
 
@@ -807,11 +808,18 @@ def _render_review_tab(st_module: Any, stem: str | None):
                 break
 
         if not card_id_active:
+            session_ratings = st_module.session_state.get("srs_session_ratings", {}) or {}
+            correct_count = sum(1 for r in session_ratings.values() if r in ("good", "easy"))
+            incorrect_count = sum(1 for r in session_ratings.values() if r == "hard")
+            st_module.markdown(
+                f"**Session complete: {correct_count} correct, {incorrect_count} incorrect**"
+            )
             st_module.success("You've finished this review session.")
             st_module.session_state[active_key] = False
             if queue_key in st_module.session_state:
                 del st_module.session_state[queue_key]
             if st_module.button("Back to overview", key=f"srs_session_done_{stem}"):
+                st_module.session_state["srs_session_ratings"] = {}
                 st_module.rerun()
             return
 
@@ -881,7 +889,7 @@ def _render_browse_single_card_block(
 
         review_count = meta.get("review_count", 0)
         interval_label = _format_interval(meta)
-        st_module.caption(f"Status: {status_text} | Reviewed {review_count} time(s) | Interval: {interval_label}")
+        st_module.caption(f"Status: {status_text} | Reviewed {review_count} times | Interval: {interval_label}")
         st_module.caption("Type: MCQ card" if is_mcq_card else "Type: Concept card")
 
         st_module.markdown("**Question**")
@@ -927,8 +935,6 @@ def _render_browse_tab(st_module: Any, stem: str | None):
     """All lecture cards, view + delete only — grouped by concept, no SRS review actions."""
     quiz_state_key = f"quiz_items_{stem}" if stem else None
 
-    st_module.caption("Scope: This lecture · All cards · View & delete only · Grouped by concept")
-
     if not stem:
         st_module.info("Open a lecture to browse its saved cards.")
         return
@@ -940,6 +946,10 @@ def _render_browse_tab(st_module: Any, stem: str | None):
         if not lecture_cards:
             _srs_empty_state(st_module, "No SRS cards found for this lecture yet.")
             return
+
+        total_cards = len(lecture_cards)
+        card_word = "card" if total_cards == 1 else "cards"
+        st_module.caption(f"Showing all {total_cards} {card_word} from this lecture, grouped by concept")
 
         all_quiz_items = _load_quiz_items_for_cards(st_module, quiz_state_key, lecture_cards)
         due_cards = set(cid for cid in srs_mgr.get_due_cards() if cid in lecture_cards)
