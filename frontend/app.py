@@ -753,7 +753,7 @@ def _sidebar_progress_snapshot(stem: str, limit: int = 5) -> Dict[str, Any]:
 
     return {
         "score_text": f"{last_row['correct']} / {last_row['total']}" if last_row["total"] > 0 else "—",
-        "score_subtext": "last session",
+        "score_subtext": "last round score",
         "trend_text": trend_text,
         "trend_class": trend_class,
         "bar_percentages": bar_percentages,
@@ -1943,46 +1943,6 @@ if uploaded:
     if lecture_is_ready:
         st.markdown('<a id="setup-your-lecture"></a>', unsafe_allow_html=True)
         st.markdown(f"<span style='color: var(--muted); font-size: 0.9em;'>✓ Lecture ready: {current_label}</span>", unsafe_allow_html=True)
-
-        # Extracted preview accordion (collapsed)
-        with st.expander("Extracted preview", expanded=False):
-            st.write(text[:1000] + ("..." if len(text) > 1000 else ""))
-
-        # Advanced reset tools accordion (collapsed)
-        with st.expander("Advanced reset tools", expanded=False):
-            st.caption("Use these only when troubleshooting or resetting processed data.")
-            recreate_btn = False
-            build_index_btn = False
-            adv_col1, adv_col2 = st.columns([1, 1])
-            with adv_col1:
-                recreate_btn = st.button("Recreate embeddings", key="recreate_ready")
-            with adv_col2:
-                build_index_btn = st.button("Build FAISS index", key="build_index_ready")
-
-            # Build FAISS index if requested
-            if build_index_btn:
-                if not embeddings_path.exists():
-                    st.error("Cannot build FAISS index — embeddings file missing. Create embeddings first.")
-                elif not _faiss_builder_available:
-                    st.error("FAISS builder not available (faiss-cpu not installed). Install: pip install faiss-cpu")
-                else:
-                    try:
-                        with st.spinner("Building FAISS index..."):
-                            build_index(str(embeddings_path), str(index_path))
-                            st.success(f"FAISS index built: {index_path}")
-                    except Exception as e:
-                        st.error("FAISS index build failed.")
-                        st.exception(e)
-
-            # Recreate embeddings if requested
-            if recreate_btn:
-                try:
-                    with st.spinner("Creating embeddings..."):
-                        create_embeddings_for_text(text, str(embeddings_path), dim=EMBED_DIM)
-                    st.success("Embeddings recreated. Refresh the page.")
-                except Exception as e:
-                    st.error("Failed to recreate embeddings.")
-                    st.exception(e)
 
     # ========== FULL SETUP UI: Lecture not yet ready ==========
     else:
