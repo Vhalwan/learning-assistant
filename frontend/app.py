@@ -1693,6 +1693,21 @@ st.markdown(
          or the toggle button. Modifying those breaks Streamlit's internal
          layout/toggle logic. */
 
+      /* Quiz MCQ answer choice buttons — left-align text */
+      section[data-testid="stMain"] [class*="st-key-la_quiz_ans_"] button {
+        justify-content: flex-start !important;
+        text-align: left !important;
+      }
+      section[data-testid="stMain"] [class*="st-key-la_quiz_ans_"] button > div {
+        justify-content: flex-start !important;
+        text-align: left !important;
+        width: 100% !important;
+      }
+      section[data-testid="stMain"] [class*="st-key-la_quiz_ans_"] button p {
+        text-align: left !important;
+        width: 100% !important;
+      }
+
       /* SRS MCQ answer choice buttons — left-align text */
       section[data-testid="stMain"] [class*="st-key-srs_choice_"] button,
       div[data-testid="stVerticalBlock"]:has(.la-srs-choice-block) [class*="st-key-srs_choice_"] button {

@@ -184,6 +184,10 @@ def _weak_topics_from_items(render_items: List[Dict[str, Any]], st_module: Any) 
     return wrong_topic_counts
 
 
+def _count_noun(count: int, singular: str) -> str:
+    return f"{count} {singular}" if count == 1 else f"{count} {singular}s"
+
+
 def _round_progress(render_items: List[Dict[str, Any]], st_module: Any) -> Tuple[int, int, int, int]:
     """answered, correct, wrong, total"""
     total = len(render_items)
@@ -225,7 +229,6 @@ def _render_single_question(
     detailed_explanation: Dict = q.get("detailed_explanation") or {}
 
     rk = "" if round_idx == 0 else f"r{round_idx}_"
-    selection_key = f"{quiz_state_key}_sel_{generation_token}_{rk}{key_suffix}"
     submit_key = f"{quiz_state_key}_sub_{generation_token}_{rk}{key_suffix}"
     srs_key = f"{quiz_state_key}_srs_{generation_token}_{rk}{key_suffix}"
     exp_key = f"{quiz_state_key}_expander_{generation_token}_{rk}{key_suffix}"
@@ -263,154 +266,118 @@ def _render_single_question(
             st_module.markdown(q_text)
         st_module.markdown("---")
 
-        placeholder = "Select an answer"
-        dropdown_options = [f"{lbl}. {choices.get(lbl, '')}" for lbl in ["A", "B", "C", "D"]]
-        dropdown_with_placeholder = [placeholder] + dropdown_options
-
-        c1, c2 = st_module.columns([1, 1])
-        with c1:
-            try:
-                pre_index = 0
-                if selection_key in st_module.session_state:
-                    cur = st_module.session_state.get(selection_key)
-                    if cur in dropdown_with_placeholder:
-                        pre_index = dropdown_with_placeholder.index(cur)
-                st_module.selectbox(
-                    "Choose an answer",
-                    dropdown_with_placeholder,
-                    index=pre_index,
-                    key=selection_key,
-                    disabled=already_submitted,
-                    on_change=mark_selection_made_fn,
-                    args=(selection_key,),
-                )
-            except Exception:
-                st_module.selectbox(
-                    "Choose an answer",
-                    dropdown_with_placeholder,
-                    key=selection_key,
-                    disabled=already_submitted,
-                    on_change=mark_selection_made_fn,
-                    args=(selection_key,),
-                )
-
-        with c2:
-            st_module.markdown("**Choices:**")
-            correct_letter_upper = (answer_letter or "").strip().upper()
-            chosen_letter_post = ""
-            if already_submitted:
-                chosen_letter_post = (
-                    st_module.session_state.get(submit_key, {}).get("chosen", "") or ""
-                ).strip().upper()
-            for label in ["A", "B", "C", "D"]:
-                opt = choices.get(label, "")
-                marker = ""
-                if already_submitted:
-                    if label == correct_letter_upper:
-                        marker = "✅ "
-                    elif label == chosen_letter_post:
-                        marker = "❌ "
-                if opt:
-                    st_module.markdown(f"- {marker}**{label}.** {opt}")
-                else:
-                    st_module.markdown(f"- {marker}**{label}.** _(no option)_")
-
-        chosen_letter = None
+        correct_letter_upper = (answer_letter or "").strip().upper()
+        chosen_letter_post = ""
         if already_submitted:
-            chosen_letter = st_module.session_state.get(submit_key, {}).get("chosen")
-        else:
-            sel_display = st_module.session_state.get(selection_key)
-            if sel_display and sel_display != placeholder:
-                chosen_letter = sel_display.split(".", 1)[0].strip()
+            chosen_letter_post = (
+                st_module.session_state.get(submit_key, {}).get("chosen", "") or ""
+            ).strip().upper()
 
-        with st_module.container():
-            st_module.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
-            st_module.markdown("**Actions**")
-            btn_col_left, btn_col_right = st_module.columns([1, 1])
-            with btn_col_left:
-                check_key = f"{quiz_state_key}_check_{rk}{key_suffix}"
-                check_disabled = (chosen_letter is None) or already_submitted
-                if st_module.button("Check answer", key=check_key, disabled=check_disabled, use_container_width=True):
-                    is_correct = (
-                        (chosen_letter == answer_letter)
-                        if (chosen_letter and answer_letter)
-                        else False
+        for label in ["A", "B", "C", "D"]:
+            opt = choices.get(label, "")
+            marker = ""
+            if already_submitted:
+                if label == correct_letter_upper:
+                    marker = "✅ "
+                elif label == chosen_letter_post:
+                    marker = "❌ "
+            if opt:
+                btn_label = f"{marker}{label}. {opt}"
+            else:
+                btn_label = f"{marker}{label}. (no option)"
+            btn_key = f"la_quiz_ans_{card_key}_{label}"
+            if st_module.button(
+                btn_label,
+                key=btn_key,
+                disabled=already_submitted,
+                use_container_width=True,
+            ):
+                chosen_letter = label
+                is_correct = (
+                    (chosen_letter == answer_letter)
+                    if (chosen_letter and answer_letter)
+                    else False
+                )
+                st_module.session_state[submit_key] = {
+                    "chosen": chosen_letter,
+                    "is_correct": is_correct,
+                }
+                try:
+                    record_quiz_result(
+                        qid=qid,
+                        question=q_text,
+                        is_correct=is_correct,
+                        stem=stem,
+                        question_item=q,
+                        chosen_answer=chosen_letter or "",
+                        doc_id=doc_id,
                     )
-                    st_module.session_state[submit_key] = {
-                        "chosen": chosen_letter,
-                        "is_correct": is_correct,
-                    }
-                    try:
-                        record_quiz_result(
-                            qid=qid,
-                            question=q_text,
-                            is_correct=is_correct,
-                            stem=stem,
-                            question_item=q,
-                            chosen_answer=chosen_letter or "",
-                            doc_id=doc_id,
-                        )
-                    except Exception as e:
-                        print(f"[ui] failed to persist quiz result: {e}")
+                except Exception as e:
+                    print(f"[ui] failed to persist quiz result: {e}")
 
-                    st_module.session_state[exp_key] = True
+                st_module.session_state[exp_key] = True
+                try:
+                    st_module.rerun()
+                except Exception:
                     try:
                         st_module.experimental_rerun()
                     except Exception:
                         pass
 
-            with btn_col_right:
-                if st_module.button("Add to SRS", key=srs_key, use_container_width=True):
-                    try:
-                        mgr = SRSManager()
-                        concept_label = (q.get("concept_label") or "").strip()
-                        concept_id = (q.get("concept_id") or "").strip()
-                        topic_title = concept_label or ""
-                        mgr.ensure_card(
-                            qid,
-                            meta={
-                                "question": q_text or "",
-                                "choices": choices or {},
-                                "answer": answer_letter,
-                                "brief_explanation": brief_explanation,
-                                "detailed_explanation": detailed_explanation,
-                                "stem": stem,
-                                "item_type": "mcq",
-                                "origin": "quiz_mcq",
-                                "quiz_question_id": qid,
-                                "source_reason": "Added from quiz review",
-                                "concept_label": concept_label,
-                                "concept_id": concept_id,
-                                "title": topic_title,
-                                "concept": topic_title,
-                            },
-                        )
-                        if "srs_quiz_items_cache" not in st_module.session_state:
-                            st_module.session_state["srs_quiz_items_cache"] = {}
-                        st_module.session_state["srs_quiz_items_cache"][qid] = {
-                            "id": qid,
+        with st_module.container():
+            st_module.markdown('<div class="la-action-bar"></div>', unsafe_allow_html=True)
+            st_module.markdown("**Actions**")
+            if st_module.button("Add to SRS", key=srs_key, use_container_width=True):
+                try:
+                    mgr = SRSManager()
+                    concept_label = (q.get("concept_label") or "").strip()
+                    concept_id = (q.get("concept_id") or "").strip()
+                    topic_title = concept_label or ""
+                    mgr.ensure_card(
+                        qid,
+                        meta={
                             "question": q_text or "",
                             "choices": choices or {},
                             "answer": answer_letter,
                             "brief_explanation": brief_explanation,
                             "detailed_explanation": detailed_explanation,
+                            "stem": stem,
                             "item_type": "mcq",
                             "origin": "quiz_mcq",
+                            "quiz_question_id": qid,
+                            "source_reason": "Added from quiz review",
                             "concept_label": concept_label,
                             "concept_id": concept_id,
-                        }
-                        st_module.session_state[f"{srs_key}_done"] = True
-                        st_module.info("Added to SRS.")
+                            "title": topic_title,
+                            "concept": topic_title,
+                        },
+                    )
+                    if "srs_quiz_items_cache" not in st_module.session_state:
+                        st_module.session_state["srs_quiz_items_cache"] = {}
+                    st_module.session_state["srs_quiz_items_cache"][qid] = {
+                        "id": qid,
+                        "question": q_text or "",
+                        "choices": choices or {},
+                        "answer": answer_letter,
+                        "brief_explanation": brief_explanation,
+                        "detailed_explanation": detailed_explanation,
+                        "item_type": "mcq",
+                        "origin": "quiz_mcq",
+                        "concept_label": concept_label,
+                        "concept_id": concept_id,
+                    }
+                    st_module.session_state[f"{srs_key}_done"] = True
+                    st_module.info("Added to SRS.")
+                    try:
+                        st_module.rerun()
+                    except Exception:
                         try:
-                            st_module.rerun()
+                            st_module.experimental_rerun()
                         except Exception:
-                            try:
-                                st_module.experimental_rerun()
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        st_module.error("Failed to register SRS card.")
-                        st_module.exception(e)
+                            pass
+                except Exception as e:
+                    st_module.error("Failed to register SRS card.")
+                    st_module.exception(e)
 
         submitted = st_module.session_state.get(submit_key)
         if submitted:
@@ -623,7 +590,7 @@ def _try_append_more_questions(
                     del st_module.session_state["srs_disk_quiz_items_cache"]
             except Exception as e:
                 st_module.warning(f"Continued in session but failed to save to disk: {e}")
-            st_module.success(f"Added {len(appended)} new question(s) in a new round.")
+            st_module.success(f"Added {_count_noun(len(appended), 'new question')} in a new round.")
             st_module.session_state[f"la_scroll_quiz_latest_{stem}"] = True
             try:
                 st_module.rerun()
@@ -768,8 +735,6 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
         round_label_num = ri + 1
 
         base_title = f"Round {round_label_num}"
-        if ri > 0:
-            base_title += " (Additional Questions)"
 
         is_latest_round = ri == n_rounds - 1
         use_collapsible = not is_latest_round
@@ -975,7 +940,7 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
     # ── Next-step recommendations (preserved logic for missed items) ──────
     if total_answered and total_wrong > 0:
         st.markdown("### 🔁 Next step recommendations")
-        st.markdown(f"You answered {total_answered} question(s). Missed: {total_wrong}.")
+        st.markdown(f"You answered {_count_noun(total_answered, 'question')}. Missed: {total_wrong}.")
         if st.button("Add missed concepts to SRS",
                      key=f"quiz_push_missed_{stem}", use_container_width=True):
             try:
@@ -1035,12 +1000,12 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                         "concept_id": concept_id_m,
                     }
                     added += 1
-                st.success(f"Added {added} missed concept(s) to SRS.")
+                st.success(f"Added {_count_noun(added, 'missed concept')} to SRS.")
                 st.markdown("Jump to Confused section below.")
             except Exception as e:
                 st.error(f"Could not add missed concepts: {e}")
 
     elif total_answered and total_wrong == 0 and not session_fully_answered:
         st.markdown("### 🔁 Next step recommendations")
-        st.markdown(f"You answered {total_answered} question(s). Missed: 0.")
+        st.markdown(f"You answered {_count_noun(total_answered, 'question')}. Missed: 0.")
         st.markdown("Great progress so far — keep going.")
