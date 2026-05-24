@@ -232,6 +232,15 @@ def trigger_browser_reload() -> None:
     st.stop()
 
 
+def complete_sign_in() -> None:
+    """Enter the app after login without a full browser reload.
+
+    A hard reload clears the Streamlit websocket session on Heroku and drops
+    auth_user/auth_session from memory, which sends users back to the login screen.
+    """
+    st.rerun()
+
+
 def logout() -> None:
     try:
         get_supabase_client().auth.sign_out()
@@ -249,6 +258,20 @@ def logout() -> None:
     trigger_browser_reload()
 
 
+def _looks_like_auth_failure(exc: Exception) -> bool:
+    text = f"{exc} {getattr(exc, 'code', '')}".lower()
+    markers = (
+        "invalid",
+        "expired",
+        "jwt",
+        "token",
+        "session",
+        "not authenticated",
+        "refresh",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _restore_session_from_state() -> bool:
     tokens = st.session_state.get(SESSION_AUTH_KEY)
     user = st.session_state.get(SESSION_USER_KEY)
@@ -263,8 +286,9 @@ def _restore_session_from_state() -> bool:
         st.session_state[SESSION_USER_KEY] = user_to_dict(refreshed.user)
         set_user_id(st.session_state[SESSION_USER_KEY]["id"])
         return True
-    except Exception:
-        _clear_auth_state()
+    except Exception as exc:
+        if _looks_like_auth_failure(exc):
+            _clear_auth_state()
         return False
 
 
@@ -646,7 +670,7 @@ def render_auth_screen() -> None:
                                 st.error("Sign-in failed. Check your email and password.")
                             else:
                                 _persist_session(res.session, res.user)
-                                trigger_browser_reload()
+                                complete_sign_in()
                         except Exception as exc:
                             st.error(_auth_error_message(exc, registering=False))
 
@@ -685,7 +709,7 @@ def render_auth_screen() -> None:
                             )
                             if res.session and res.user:
                                 _persist_session(res.session, res.user)
-                                trigger_browser_reload()
+                                complete_sign_in()
                             else:
                                 st.success(
                                     "Account created. If email confirmation is enabled, "
