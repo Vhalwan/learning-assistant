@@ -1734,7 +1734,6 @@ st.markdown(
 st.markdown(
     """
     <div class="app-header">
-      <div class="app-logo" aria-hidden="true">L</div>
       <div>
         <div class="app-title">Lectova</div>
         <div class="app-subtitle">One lecture. Understand it, test it, remember it.</div>
