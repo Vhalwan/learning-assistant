@@ -211,6 +211,27 @@ def _clear_auth_state() -> None:
     set_user_id(None)
 
 
+def trigger_browser_reload() -> None:
+    """Full page reload so the websocket client drops stale ForwardMsg cache."""
+    components.html(
+        """
+        <script>
+        (function () {
+          try {
+            var w = window.parent || window.top || window;
+            w.location.replace(w.location.pathname + w.location.search);
+          } catch (e) {
+            (window.parent || window).location.reload();
+          }
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+    st.stop()
+
+
 def logout() -> None:
     try:
         get_supabase_client().auth.sign_out()
@@ -223,6 +244,9 @@ def logout() -> None:
     ]
     for k in keys_to_clear:
         del st.session_state[k]
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    trigger_browser_reload()
 
 
 def _restore_session_from_state() -> bool:
@@ -622,7 +646,7 @@ def render_auth_screen() -> None:
                                 st.error("Sign-in failed. Check your email and password.")
                             else:
                                 _persist_session(res.session, res.user)
-                                st.rerun()
+                                trigger_browser_reload()
                         except Exception as exc:
                             st.error(_auth_error_message(exc, registering=False))
 
@@ -661,7 +685,7 @@ def render_auth_screen() -> None:
                             )
                             if res.session and res.user:
                                 _persist_session(res.session, res.user)
-                                st.rerun()
+                                trigger_browser_reload()
                             else:
                                 st.success(
                                     "Account created. If email confirmation is enabled, "
