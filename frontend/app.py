@@ -22,7 +22,12 @@ import streamlit.components.v1 as components
 import pdfplumber
 import numpy as np
 import requests
-from frontend.auth import handle_password_recovery, require_auth, logout
+from frontend.auth import (
+    handle_password_recovery,
+    inject_auth_page_styles_if_unauthenticated,
+    require_auth,
+    logout,
+)
 from frontend.sections.confused import render as render_confused
 from frontend.sections.quiz import render as render_quiz
 from frontend.sections.srs import render_srs_section
@@ -68,6 +73,9 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="expanded"
 )
+
+# Auth CSS must be the first rendered output on login routes (before any widgets).
+inject_auth_page_styles_if_unauthenticated()
 
 handle_password_recovery()
 _auth_user = require_auth()

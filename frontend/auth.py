@@ -32,6 +32,178 @@ APP_URL_ENV_NAMES = (
 RESET_REDIRECT_ENV = "PASSWORD_RESET_REDIRECT_URL"
 RESET_BRIDGE_ENV = "PASSWORD_RESET_BRIDGE_URL"
 
+AUTH_PAGE_STYLES = """
+  .stApp,
+  [data-testid="stAppViewContainer"] {
+    background: #f8fafc !important;
+  }
+
+  div[data-testid="stMainBlockContainer"] {
+    max-width: 1040px;
+    padding-top: 4.5rem;
+  }
+
+  .lectova-auth-brand {
+    text-align: center;
+    margin: 0 auto 1.65rem;
+  }
+
+  .lectova-auth-name {
+    color: #0f172a;
+    font-size: clamp(2.7rem, 6vw, 4.25rem);
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0;
+  }
+
+  .lectova-auth-subtitle {
+    color: #64748b;
+    font-size: 1.06rem;
+    font-weight: 500;
+    margin-top: 0.7rem;
+  }
+
+  div[data-testid="stVerticalBlockBorderWrapper"] {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    box-shadow: 0 18px 50px rgba(15, 23, 42, 0.09);
+    padding: 1.35rem 1.45rem 1.5rem;
+  }
+
+  div[data-testid="stTabs"] button[data-baseweb="tab"] {
+    font-weight: 700;
+    color: #475569;
+    padding-top: 0.25rem;
+    padding-bottom: 0.65rem;
+  }
+
+  div[data-testid="stTabs"] button[aria-selected="true"] {
+    color: #0f766e;
+  }
+
+  div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+    background-color: #0f766e;
+    height: 3px;
+    border-radius: 2px;
+  }
+
+  div[data-testid="stTextInput"] {
+    margin-bottom: 0.72rem;
+  }
+
+  div[data-testid="stTextInput"] label {
+    color: #334155;
+    font-weight: 650;
+    padding-bottom: 0.25rem;
+  }
+
+  div[data-testid="stTextInput"] input {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    min-height: 2.85rem;
+    padding: 0.75rem 0.9rem;
+    background: #ffffff;
+    color: #0f172a;
+  }
+
+  div[data-testid="stTextInput"] input:focus {
+    border-color: #0f766e;
+    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+  }
+
+  .st-key-auth_login_password input::-ms-reveal,
+  .st-key-auth_login_password input::-ms-clear,
+  .st-key-auth_signup_password input::-ms-reveal,
+  .st-key-auth_signup_password input::-ms-clear,
+  .st-key-auth_new_password input::-ms-reveal,
+  .st-key-auth_new_password input::-ms-clear,
+  .st-key-auth_confirm_password input::-ms-reveal,
+  .st-key-auth_confirm_password input::-ms-clear {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
+
+  .st-key-auth_login_password [data-testid="InputInstructions"],
+  .st-key-auth_signup_password [data-testid="InputInstructions"],
+  .st-key-auth_new_password [data-testid="InputInstructions"],
+  .st-key-auth_confirm_password [data-testid="InputInstructions"] {
+    display: none !important;
+  }
+
+  div[data-testid="stButton"] > button {
+    border-radius: 8px;
+    min-height: 2.85rem;
+    font-weight: 750;
+    margin-top: 0.25rem;
+  }
+
+  div[data-testid="stButton"] > button[kind="primary"] {
+    background: #0f766e;
+    border-color: #0f766e;
+  }
+
+  div[data-testid="stButton"] > button[kind="primary"]:hover {
+    background: #115e59;
+    border-color: #115e59;
+  }
+
+  .lectova-auth-link {
+    color: #0f766e !important;
+    font-size: 0.88rem;
+    font-weight: 700;
+    text-decoration: none !important;
+  }
+
+  .lectova-auth-link:hover {
+    color: #115e59 !important;
+    text-decoration: underline !important;
+  }
+
+  .lectova-forgot-link-row {
+    margin: -0.25rem 0 0.85rem;
+    text-align: right;
+  }
+
+  .lectova-back-link-row {
+    margin-bottom: 1rem;
+  }
+"""
+
+
+def _has_auth_session_in_state() -> bool:
+    return bool(
+        st.session_state.get(SESSION_AUTH_KEY)
+        and st.session_state.get(SESSION_USER_KEY)
+    )
+
+
+def inject_auth_page_styles() -> None:
+    """Inject login-page CSS before any auth widgets render (prevents FOUC)."""
+    st.markdown(
+        f'<style id="lectova-auth-styles">{AUTH_PAGE_STYLES}</style>',
+        unsafe_allow_html=True,
+    )
+
+
+def inject_auth_page_styles_if_unauthenticated() -> None:
+    if _has_auth_session_in_state():
+        return
+    inject_auth_page_styles()
+
+
+def _render_auth_brand(subtitle: str) -> None:
+    st.markdown(
+        f"""
+        <div class="lectova-auth-brand">
+          <div class="lectova-auth-name">Lectova</div>
+          <div class="lectova-auth-subtitle">{subtitle}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 def _clear_auth_state() -> None:
     for key in (SESSION_USER_KEY, SESSION_AUTH_KEY, "current_stem", "current_pdf_filename"):
@@ -267,109 +439,8 @@ def _sync_recovery_session_from_query() -> None:
 
 
 def _render_recovery_screen() -> None:
-    st.markdown(
-        """
-        <style>
-          .stApp {
-            background: #f8fafc;
-          }
-
-          div[data-testid="stMainBlockContainer"] {
-            max-width: 1040px;
-            padding-top: 4.5rem;
-          }
-
-          .lectova-auth-brand {
-            text-align: center;
-            margin: 0 auto 1.65rem;
-          }
-
-          .lectova-auth-name {
-            color: #0f172a;
-            font-size: clamp(2.7rem, 6vw, 4.25rem);
-            font-weight: 800;
-            line-height: 1;
-            letter-spacing: 0;
-          }
-
-          .lectova-auth-subtitle {
-            color: #64748b;
-            font-size: 1.06rem;
-            font-weight: 500;
-            margin-top: 0.7rem;
-          }
-
-          div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: #ffffff;
-            border: 1px solid #e2e8f0;
-            border-radius: 8px;
-            box-shadow: 0 18px 50px rgba(15, 23, 42, 0.09);
-            padding: 1.35rem 1.45rem 1.5rem;
-          }
-
-          div[data-testid="stTextInput"] {
-            margin-bottom: 0.72rem;
-          }
-
-          div[data-testid="stTextInput"] label {
-            color: #334155;
-            font-weight: 650;
-            padding-bottom: 0.25rem;
-          }
-
-          div[data-testid="stTextInput"] input {
-            border: 1px solid #cbd5e1;
-            border-radius: 8px;
-            min-height: 2.85rem;
-            padding: 0.75rem 0.9rem;
-            background: #ffffff;
-            color: #0f172a;
-          }
-
-          div[data-testid="stTextInput"] input:focus {
-            border-color: #0f766e;
-            box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
-          }
-
-          .st-key-auth_new_password input::-ms-reveal,
-          .st-key-auth_new_password input::-ms-clear,
-          .st-key-auth_confirm_password input::-ms-reveal,
-          .st-key-auth_confirm_password input::-ms-clear {
-            display: none !important;
-            width: 0 !important;
-            height: 0 !important;
-          }
-
-          .st-key-auth_new_password [data-testid="InputInstructions"],
-          .st-key-auth_confirm_password [data-testid="InputInstructions"] {
-            display: none !important;
-          }
-
-          div[data-testid="stButton"] > button {
-            border-radius: 8px;
-            min-height: 2.85rem;
-            font-weight: 750;
-            margin-top: 0.25rem;
-          }
-
-          div[data-testid="stButton"] > button[kind="primary"] {
-            background: #0f766e;
-            border-color: #0f766e;
-          }
-
-          div[data-testid="stButton"] > button[kind="primary"]:hover {
-            background: #115e59;
-            border-color: #115e59;
-          }
-        </style>
-
-        <div class="lectova-auth-brand">
-          <div class="lectova-auth-name">Lectova</div>
-          <div class="lectova-auth-subtitle">Set new password</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    inject_auth_page_styles()
+    _render_auth_brand("Set new password")
 
     left_pad, form_col, right_pad = st.columns([1, 1.15, 1])
     with form_col:
@@ -422,6 +493,8 @@ def _render_recovery_screen() -> None:
 
 def handle_password_recovery() -> None:
     """Show the reset-completion form when Supabase returns a recovery hash."""
+    if not _has_auth_session_in_state():
+        inject_auth_page_styles()
     _inject_recovery_hash_detector()
     _sync_recovery_session_from_query()
 
@@ -444,148 +517,8 @@ def _sync_forgot_password_link_state() -> None:
 
 def render_auth_screen() -> None:
     _sync_forgot_password_link_state()
-
-    st.markdown(
-        """
-        <style>
-          .stApp {
-            background: #f8fafc;
-          }
-
-          div[data-testid="stMainBlockContainer"] {
-            max-width: 1040px;
-            padding-top: 4.5rem;
-          }
-
-          .lectova-auth-brand {
-            text-align: center;
-            margin: 0 auto 1.65rem;
-          }
-
-          .lectova-auth-name {
-            color: #0f172a;
-            font-size: clamp(2.7rem, 6vw, 4.25rem);
-            font-weight: 800;
-            line-height: 1;
-            letter-spacing: 0;
-          }
-
-          .lectova-auth-subtitle {
-            color: #64748b;
-            font-size: 1.06rem;
-            font-weight: 500;
-            margin-top: 0.7rem;
-          }
-
-          div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: #ffffff;
-            border: 1px solid #e2e8f0;
-            border-radius: 8px;
-            box-shadow: 0 18px 50px rgba(15, 23, 42, 0.09);
-            padding: 1.35rem 1.45rem 1.5rem;
-          }
-
-          div[data-testid="stTabs"] button[data-baseweb="tab"] {
-            font-weight: 700;
-            color: #475569;
-            padding-top: 0.25rem;
-            padding-bottom: 0.65rem;
-          }
-
-          div[data-testid="stTabs"] button[aria-selected="true"] {
-            color: #0f766e;
-          }
-
-          div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
-            background-color: #0f766e;
-            height: 3px;
-            border-radius: 2px;
-          }
-
-          div[data-testid="stTextInput"] {
-            margin-bottom: 0.72rem;
-          }
-
-          div[data-testid="stTextInput"] label {
-            color: #334155;
-            font-weight: 650;
-            padding-bottom: 0.25rem;
-          }
-
-          div[data-testid="stTextInput"] input {
-            border: 1px solid #cbd5e1;
-            border-radius: 8px;
-            min-height: 2.85rem;
-            padding: 0.75rem 0.9rem;
-            background: #ffffff;
-            color: #0f172a;
-          }
-
-          div[data-testid="stTextInput"] input:focus {
-            border-color: #0f766e;
-            box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
-          }
-
-          .st-key-auth_login_password input::-ms-reveal,
-          .st-key-auth_login_password input::-ms-clear,
-          .st-key-auth_signup_password input::-ms-reveal,
-          .st-key-auth_signup_password input::-ms-clear {
-            display: none !important;
-            width: 0 !important;
-            height: 0 !important;
-          }
-
-          .st-key-auth_login_password [data-testid="InputInstructions"],
-          .st-key-auth_signup_password [data-testid="InputInstructions"] {
-            display: none !important;
-          }
-
-          div[data-testid="stButton"] > button {
-            border-radius: 8px;
-            min-height: 2.85rem;
-            font-weight: 750;
-            margin-top: 0.25rem;
-          }
-
-          div[data-testid="stButton"] > button[kind="primary"] {
-            background: #0f766e;
-            border-color: #0f766e;
-          }
-
-          div[data-testid="stButton"] > button[kind="primary"]:hover {
-            background: #115e59;
-            border-color: #115e59;
-          }
-
-          .lectova-auth-link {
-            color: #0f766e !important;
-            font-size: 0.88rem;
-            font-weight: 700;
-            text-decoration: none !important;
-          }
-
-          .lectova-auth-link:hover {
-            color: #115e59 !important;
-            text-decoration: underline !important;
-          }
-
-          .lectova-forgot-link-row {
-            margin: -0.25rem 0 0.85rem;
-            text-align: right;
-          }
-
-          .lectova-back-link-row {
-            margin-bottom: 1rem;
-          }
-        </style>
-
-        <div class="lectova-auth-brand">
-          <div class="lectova-auth-name">Lectova</div>
-          <div class="lectova-auth-subtitle">Your AI-powered lecture companion</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    inject_auth_page_styles()
+    _render_auth_brand("Your AI-powered lecture companion")
 
     left_pad, form_col, right_pad = st.columns([1, 1.15, 1])
     with form_col:
