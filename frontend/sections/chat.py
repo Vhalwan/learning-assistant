@@ -358,30 +358,15 @@ def _submit_chat_message_impl(
     spinner_ctx = st.spinner(spinner_msg) if show_spinner else nullcontext()
     with spinner_ctx:
         try:
-            if st.session_state.get("use_api_mode", False):
-                resp = perform_chat(
-                    question=prompt_question,
-                    embeddings_path=str(embeddings_path),
-                    history=payload_history,
-                    top_k=int(chat_k),
-                    use_faiss=bool(use_faiss_search),
-                    faiss_index_path=candidate_index_path,
-                    use_api_mode=True,
-                    api_base=os.getenv("API_BASE", API_DEFAULT),
-                    token=st.session_state.get("api_token", "") or "",
-                    llm_call=None,
-                )
-            else:
-                resp = perform_chat(
-                    question=prompt_question,
-                    embeddings_path=str(embeddings_path),
-                    history=payload_history,
-                    top_k=int(chat_k),
-                    use_faiss=bool(use_faiss_search),
-                    faiss_index_path=candidate_index_path,
-                    use_api_mode=False,
-                    llm_call=llm,
-                )
+            resp = perform_chat(
+                question=prompt_question,
+                embeddings_path=str(embeddings_path),
+                history=payload_history,
+                top_k=int(chat_k),
+                use_faiss=bool(use_faiss_search),
+                faiss_index_path=candidate_index_path,
+                llm_call=llm,
+            )
 
             ans = resp.get("answer")
             updated_history = resp.get("history", None)

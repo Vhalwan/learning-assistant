@@ -489,9 +489,6 @@ def _process_confusion_explain(
             top_k=3,
             use_faiss=bool(use_faiss_search),
             faiss_index_path=candidate_index_path,
-            use_api_mode=st.session_state.get("use_api_mode", False),
-            api_base=os.getenv("API_BASE", API_DEFAULT),
-            token=st.session_state.get("api_token", "") or "",
             llm_call=llm,
         )
         try:

@@ -524,28 +524,14 @@ def _try_append_more_questions(
                 for item in flat
                 if (item.get("question") or "").strip()
             ][:20]
-            if st_module.session_state.get("use_api_mode", False):
-                more_items, _ = generate_quiz(
-                    stem=stem,
-                    context_text=text,
-                    n=n_more,
-                    use_api_mode=True,
-                    api_base=os.getenv("API_BASE", API_DEFAULT),
-                    token=st_module.session_state.get("api_token", "") or "",
-                    llm_call=None,
-                    session_chunk_counts=chunk_counts,
-                    exclude_questions=exclude_q,
-                )
-            else:
-                more_items, _ = generate_quiz(
-                    stem=stem,
-                    context_text=text,
-                    n=n_more,
-                    use_api_mode=False,
-                    llm_call=llm,
-                    session_chunk_counts=chunk_counts,
-                    exclude_questions=exclude_q,
-                )
+            more_items, _ = generate_quiz(
+                stem=stem,
+                context_text=text,
+                n=n_more,
+                llm_call=llm,
+                session_chunk_counts=chunk_counts,
+                exclude_questions=exclude_q,
+            )
 
             existing_ids = {(item.get("id") or "") for item in flat if item.get("id")}
             existing_qnorm = {_normalize_quiz_question_text(item.get("question") or "") for item in flat}
@@ -662,26 +648,14 @@ def render(st: Any, stem: str, text: str, llm, hist_key: str):
                 else:
                     with st.spinner("Generating quiz..."):
                         try:
-                            if st.session_state.get("use_api_mode", False):
-                                quiz_items, latency = generate_quiz(
-                                    stem=stem, context_text=text, n=int(n_q),
-                                    use_api_mode=True,
-                                    api_base=os.getenv("API_BASE", API_DEFAULT),
-                                    token=st.session_state.get("api_token", "") or "",
-                                    llm_call=None,
-                                    session_chunk_counts=None,
-                                )
-                                msg = f"Quiz generated: {len(quiz_items)} items."
-                                if latency:
-                                    msg += f" (latency: {latency:.3f}s)"
-                                st.success(msg)
-                            else:
-                                quiz_items, _ = generate_quiz(
-                                    stem=stem, context_text=text, n=int(n_q),
-                                    use_api_mode=False, llm_call=llm,
-                                    session_chunk_counts=None,
-                                )
-                                st.success(f"Quiz generated: {len(quiz_items)} items (local).")
+                            quiz_items, _ = generate_quiz(
+                                stem=stem,
+                                context_text=text,
+                                n=int(n_q),
+                                llm_call=llm,
+                                session_chunk_counts=None,
+                            )
+                            st.success(f"Quiz generated: {len(quiz_items)} items.")
 
                             st.session_state[rounds_key] = [{"items": list(quiz_items)}]
                             st.session_state[quiz_state_key] = quiz_items

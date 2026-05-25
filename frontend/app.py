@@ -820,13 +820,9 @@ def _sidebar_due_srs_count(stem: str) -> int:
     return count
 
 
-# initialize LLM (this mirrors existing behaviour)
-llm = init_llm()
-# We avoid calling st.* until after set_page_config — but keep same behavior messages
-# We'll store messages in a list and display after page config
+# LLM is initialized after the sidebar Advanced settings (user API key may override env).
+llm = None
 _startup_msgs = []
-if llm is None:
-    _startup_msgs.append(("warning", "LLM not available — using placeholders"))
 
 # Check FAISS builder availability (handlers also has this; keep for early error messages)
 try:
@@ -1752,24 +1748,12 @@ st.markdown(
 )
 
 
-# show startup msgs
-for lvl, msg in _startup_msgs:
-    if lvl == "warning":
-        st.warning(msg)
-    else:
-        st.info(msg)
-
 # ----------------------------
-# API mode toggle + token UI (defaults; widgets live in sidebar Advanced)
+# Advanced settings defaults (widgets live in sidebar Advanced)
 # ----------------------------
 API_DEFAULT = os.getenv("API_BASE", "http://localhost:8000")
-if "use_api_mode" not in st.session_state:
-    st.session_state.use_api_mode = False
-
-# read default token from env var, allow override in UI
-default_token = os.getenv("API_TOKEN", "") or ""
 if "api_token" not in st.session_state:
-    st.session_state.api_token = default_token
+    st.session_state.api_token = ""
 
 if "use_faiss_search" not in st.session_state:
     st.session_state["use_faiss_search"] = False
@@ -1873,22 +1857,33 @@ with st.sidebar:
     st.markdown("---")
     with st.expander("Advanced", expanded=False):
         st.caption("Optional technical settings. You can ignore these for normal study.")
-        st.session_state.use_api_mode = st.checkbox(
-            "Use study server instead of local",
-            value=st.session_state.use_api_mode,
-            help="When enabled, requests go to your configured API base URL.",
-        )
         st.session_state.api_token = st.text_input(
             "Use your own API key (optional)",
             value=st.session_state.api_token,
             type="password",
-            help="Defaults from your environment; entering a value overrides for this session only.",
+            help="Uses GEMINI_API_KEY from your environment by default; entering a value overrides it for this session.",
         )
+        if (st.session_state.get("api_token") or "").strip():
+            st.caption("Custom key active")
         st.session_state["use_faiss_search"] = st.checkbox(
             "Faster search for long PDFs",
             value=bool(st.session_state.get("use_faiss_search", False)),
             help="Optional index for quicker retrieval on large lectures. Ordinary search still works if off.",
         )
+
+_custom_gemini_key = (st.session_state.get("api_token") or "").strip()
+if _custom_gemini_key:
+    os.environ["GEMINI_API_KEY"] = _custom_gemini_key
+    os.environ["GOOGLE_API_KEY"] = _custom_gemini_key
+llm = init_llm(api_key=_custom_gemini_key or None)
+if llm is None:
+    _startup_msgs.append(("warning", "LLM not available — using placeholders"))
+
+for lvl, msg in _startup_msgs:
+    if lvl == "warning":
+        st.warning(msg)
+    else:
+        st.info(msg)
 
 # Show welcome card only if no file is uploaded or loaded
 if not uploaded and not st.session_state.get("current_stem"):
@@ -2107,28 +2102,14 @@ if uploaded:
                 candidate_index_path = str(index_path) if index_path.exists() else None
                 with st.spinner("Searching and preparing answer..."):
                     try:
-                        if st.session_state.use_api_mode:
-                            resp = perform_query(
-                                question=question,
-                                embeddings_path=str(embeddings_path),
-                                top_k=int(k),
-                                use_faiss=bool(use_faiss_search),
-                                faiss_index_path=candidate_index_path,
-                                use_api_mode=True,
-                                api_base=os.getenv("API_BASE", API_DEFAULT),
-                                token=st.session_state.api_token or "",
-                                llm_call=None,
-                            )
-                        else:
-                            resp = perform_query(
-                                question=question,
-                                embeddings_path=str(embeddings_path),
-                                top_k=int(k),
-                                use_faiss=bool(use_faiss_search),
-                                faiss_index_path=candidate_index_path,
-                                use_api_mode=False,
-                                llm_call=llm,
-                            )
+                        resp = perform_query(
+                            question=question,
+                            embeddings_path=str(embeddings_path),
+                            top_k=int(k),
+                            use_faiss=bool(use_faiss_search),
+                            faiss_index_path=candidate_index_path,
+                            llm_call=llm,
+                        )
 
                         ans = resp.get("answer")
                         retrieved_chunks = resp.get("retrieved", [])
@@ -2199,23 +2180,12 @@ if uploaded:
                             else:
                                 effective_top_k = None
 
-                        if st.session_state.use_api_mode:
-                            resp = perform_summary(
-                                embeddings_path=str(embeddings_path),
-                                summary_type=summary_type,
-                                top_k=effective_top_k,
-                                use_api_mode=True,
-                                api_base=os.getenv("API_BASE", API_DEFAULT),
-                                token=st.session_state.api_token or "",
-                            )
-                        else:
-                            resp = perform_summary(
-                                embeddings_path=str(embeddings_path),
-                                summary_type=summary_type,
-                                top_k=effective_top_k,
-                                use_api_mode=False,
-                                llm_call=None,
-                            )
+                        resp = perform_summary(
+                            embeddings_path=str(embeddings_path),
+                            summary_type=summary_type,
+                            top_k=effective_top_k,
+                            llm_call=llm,
+                        )
 
                         summary = resp.get("summary", "")
                         summary_display = clean_summary_text(summary, summary_type=summary_type)

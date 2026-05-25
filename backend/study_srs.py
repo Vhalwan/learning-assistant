@@ -2,59 +2,100 @@
 import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+from backend.persistence import NAMESPACE_SRS, use_remote_store
 
 DEFAULT_PROGRESS_PATH = "data/processed/study_progress.json"
 INTERVALS = [1, 3, 7, 14, 30, 60, 120]
 
+
+def _default_path() -> Path:
+    try:
+        from backend.user_context import get_srs_path
+
+        return get_srs_path()
+    except Exception:
+        return Path(DEFAULT_PROGRESS_PATH)
+
+
+def _persist_srs_remotely(path: Optional[str] = None) -> bool:
+    if not use_remote_store():
+        return False
+    if path is None:
+        return True
+    try:
+        return Path(path).resolve() == _default_path().resolve()
+    except Exception:
+        return False
+
+
+def _load_srs_raw(path: Optional[str] = None) -> Dict[str, Any]:
+    if _persist_srs_remotely(path):
+        from backend.supabase_store import load_namespace_dict
+
+        raw = load_namespace_dict(NAMESPACE_SRS)
+        return raw if isinstance(raw, dict) else {}
+
+    p = Path(path or _default_path())
+    if not p.exists():
+        return {}
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return raw if isinstance(raw, dict) else {}
+    except (json.JSONDecodeError, IOError, OSError) as e:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to load SRS data from {p}: {e}")
+        return {}
+
+
+def _save_srs_raw(data: Dict[str, Any], path: Optional[str] = None) -> None:
+    if _persist_srs_remotely(path):
+        from backend.supabase_store import save_namespace_dict
+
+        save_namespace_dict(NAMESPACE_SRS, data)
+        return
+
+    p = Path(path or _default_path())
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = p.with_suffix(p.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        if p.exists():
+            tmp_path.replace(p)
+        else:
+            tmp_path.rename(p)
+    except (IOError, OSError) as e:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to save SRS data to {p}: {e}")
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        raise
+
+
 class SRSManager:
     def __init__(self, path: str = None):
         if path is None:
-            try:
-                from backend.user_context import get_srs_path
-                self.path = str(get_srs_path())
-            except Exception:
-                self.path = DEFAULT_PROGRESS_PATH
+            self.path = str(_default_path())
         else:
             self.path = path
         self._data = self._load()
 
     def _load(self) -> Dict[str, Any]:
-        if os.path.exists(self.path):
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError, OSError) as e:
-                # Log error but return empty dict to allow recovery
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Failed to load SRS data from {self.path}: {e}")
-                return {}
-        return {}
+        return _load_srs_raw(self.path)
 
     def _save(self):
-        try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            # Use atomic write to prevent corruption
-            tmp_path = self.path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
-            # Atomic replace
-            if os.path.exists(self.path):
-                os.replace(tmp_path, self.path)
-            else:
-                os.rename(tmp_path, self.path)
-        except (IOError, OSError) as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to save SRS data to {self.path}: {e}")
-            # Try to clean up temp file
-            try:
-                if os.path.exists(self.path + ".tmp"):
-                    os.remove(self.path + ".tmp")
-            except Exception:
-                pass
-            raise
+        _save_srs_raw(self._data, self.path)
 
     def list_due_cards(self, as_of: Optional[datetime] = None) -> List[str]:
         """Return list of card_ids that are due as of `as_of` (UTC)."""
@@ -159,7 +200,6 @@ class SRSManager:
 
     def get_card_meta(self, card_id: str):
         return self._data.get(card_id)
-
 
     def update_card_meta(self, card_id: str, **meta: Any):
         """Update metadata for a card (question text, stem, etc.)."""

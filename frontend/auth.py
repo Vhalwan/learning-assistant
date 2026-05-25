@@ -249,7 +249,7 @@ def logout() -> None:
     _clear_auth_state()
     keys_to_clear = [
         k for k in list(st.session_state.keys())
-        if k not in ("use_api_mode", "api_token", "use_faiss_search")
+        if k not in ("api_token", "use_faiss_search")
     ]
     for k in keys_to_clear:
         del st.session_state[k]

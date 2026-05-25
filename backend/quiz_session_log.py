@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend.persistence import NAMESPACE_QUIZ_SESSIONS, use_remote_store
 from backend.user_context import get_processed_dir, get_user_id
 
 DEFAULT_DIR = Path("data/processed")
@@ -18,12 +19,31 @@ def _default_dir() -> Path:
     return DEFAULT_DIR
 
 
+def _data_key(stem: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in (stem or "").strip()) or "lecture"
+
+
 def _path_for_stem(stem: str) -> Path:
-    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in (stem or "").strip()) or "lecture"
-    return _default_dir() / f"{safe}_quiz_sessions.json"
+    return _default_dir() / f"{_data_key(stem)}_quiz_sessions.json"
+
+
+def _persist_quiz_sessions_remotely() -> bool:
+    return use_remote_store()
 
 
 def _load_raw(stem: str) -> Dict[str, Any]:
+    if _persist_quiz_sessions_remotely():
+        from backend.supabase_store import load_blob
+
+        raw = load_blob(NAMESPACE_QUIZ_SESSIONS, _data_key(stem))
+        if isinstance(raw, dict):
+            sess = raw.get("sessions")
+            if not isinstance(sess, list):
+                raw["sessions"] = []
+            return raw
+
+        return {"stem": stem, "sessions": []}
+
     p = _path_for_stem(stem)
     if not p.exists():
         return {"stem": stem, "sessions": []}
@@ -40,6 +60,21 @@ def _load_raw(stem: str) -> Dict[str, Any]:
         return {"stem": stem, "sessions": []}
 
 
+def _save_raw(stem: str, data: Dict[str, Any]) -> None:
+    if _persist_quiz_sessions_remotely():
+        from backend.supabase_store import save_blob
+
+        save_blob(NAMESPACE_QUIZ_SESSIONS, _data_key(stem), data)
+        return
+
+    p = _path_for_stem(stem)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(p)
+
+
 def append_quiz_session(
     stem: str,
     doc_id: str,
@@ -49,8 +84,6 @@ def append_quiz_session(
 ) -> None:
     if not (stem or "").strip() or total <= 0:
         return
-    p = _path_for_stem(stem)
-    p.parent.mkdir(parents=True, exist_ok=True)
     data = _load_raw(stem)
     acc = (float(correct) / float(total)) * 100.0 if total else 0.0
     row = {
@@ -66,10 +99,7 @@ def append_quiz_session(
         sessions = sessions[-MAX_SESSIONS:]
     data["stem"] = stem
     data["sessions"] = sessions
-    tmp = p.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    tmp.replace(p)
+    _save_raw(stem, data)
 
 
 def recent_sessions(stem: str, limit: int = 3) -> List[Dict[str, Any]]:

@@ -45,11 +45,10 @@ try:
 except ImportError:
     _generate_concepts_from_context = None
 
-def init_llm():
-    """Return callable llm if available (same behavior as original app.py)"""
+def init_llm(api_key: Optional[str] = None):
+    """Return callable llm if available. Optional api_key overrides env GEMINI_API_KEY."""
     try:
-        llm = get_llm_call()
-        return llm
+        return get_llm_call(api_key=api_key)
     except Exception:
         return None
 

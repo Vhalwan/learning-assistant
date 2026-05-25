@@ -35,12 +35,14 @@ def _retry_delay_from_error(e: Exception, attempt: int, status_hint: str = "") -
     return min(2.0 * attempt, 8.0)
 
 
-def get_llm_call() -> Optional[Callable[[str], str]]:
+def get_llm_call(api_key: Optional[str] = None) -> Optional[Callable[[str], str]]:
     """
     Return a function llm_call(prompt)->str using the GEMINI_API_KEY.
     Retries transient 429/503/timeouts; uses JSON response mode for quiz-style prompts.
+
+    If api_key is provided (non-empty), it overrides GEMINI_API_KEY / GOOGLE_API_KEY from the environment.
     """
-    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    gemini_key = (api_key or "").strip() or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not gemini_key:
         logger.info("No GEMINI_API_KEY / GOOGLE_API_KEY found -> using placeholders.")
         return None
@@ -93,7 +95,10 @@ def get_llm_call() -> Optional[Callable[[str], str]]:
                 raise last_err
             raise RuntimeError("Gemini call failed without a response")
 
-        logger.info("LLM callable ready, using GEMINI_API_KEY from environment.")
+        if (api_key or "").strip():
+            logger.info("LLM callable ready, using user-provided API key.")
+        else:
+            logger.info("LLM callable ready, using GEMINI_API_KEY from environment.")
         return _genai_call
 
     except Exception as e:
