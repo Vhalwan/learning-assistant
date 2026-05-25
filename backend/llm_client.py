@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-INVALID_GEMINI_API_KEY_MESSAGE = "Invalid API key — please check and try again"
+INVALID_GEMINI_API_KEY_MESSAGE = "Invalid API key"
 
 _last_gemini_api_key_error: Optional[str] = None
 
@@ -49,6 +49,33 @@ def pop_gemini_api_key_error() -> Optional[str]:
     msg = _last_gemini_api_key_error
     _last_gemini_api_key_error = None
     return msg
+
+
+def _gemini_key_format_ok(api_key: str) -> bool:
+    """Rough shape check before hitting the API (avoids probes on obvious typos)."""
+    key = (api_key or "").strip()
+    return key.startswith("AIza") and len(key) >= 35
+
+
+def validate_gemini_api_key(api_key: str) -> bool:
+    """Return True if the key authenticates with Gemini (invalid keys -> False)."""
+    key = (api_key or "").strip()
+    if not key:
+        return False
+    if not _gemini_key_format_ok(key):
+        return False
+    try:
+        import google.genai as genai
+
+        client = genai.Client(api_key=key)
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        client.models.generate_content(model=model_name, contents="ok")
+        return True
+    except Exception as e:
+        if is_invalid_gemini_api_key_error(e):
+            return False
+        logger.warning("Gemini key validation inconclusive (treating as valid): %s", e)
+        return True
 
 
 def _is_transient_gemini_error(e: Exception) -> bool:

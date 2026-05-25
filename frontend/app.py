@@ -55,7 +55,11 @@ from frontend.runtime_ui_helpers import (
     trim_history_to_max_turns,
     render_assistant_html,
 )
-from backend.llm_client import pop_gemini_api_key_error
+from backend.llm_client import (
+    pop_gemini_api_key_error,
+    validate_gemini_api_key,
+    INVALID_GEMINI_API_KEY_MESSAGE,
+)
 from frontend.handlers import (
     init_llm,
     create_embeddings_if_needed,
@@ -1752,6 +1756,59 @@ st.markdown(
 )
 
 
+def _sync_gemini_api_key_from_input() -> None:
+    """Validate sidebar api_token and update session flags."""
+    custom = (st.session_state.get("api_token") or "").strip()
+    prev = st.session_state.get("_api_token_prev", "")
+    needs_check = custom != prev or (
+        custom and st.session_state.get("gemini_custom_key_valid") is None
+    )
+
+    if custom != prev:
+        st.session_state["_api_token_prev"] = custom
+        if not custom:
+            st.session_state.pop("gemini_api_key_error", None)
+            st.session_state.pop("gemini_custom_key_valid", None)
+            return
+
+    if not needs_check:
+        return
+
+    if custom:
+        ok = validate_gemini_api_key(custom)
+        st.session_state["gemini_custom_key_valid"] = ok
+        if ok:
+            st.session_state.pop("gemini_api_key_error", None)
+        else:
+            st.session_state["gemini_api_key_error"] = INVALID_GEMINI_API_KEY_MESSAGE
+    else:
+        st.session_state.pop("gemini_api_key_error", None)
+        st.session_state.pop("gemini_custom_key_valid", None)
+
+
+def _apply_gemini_env_and_init_llm():
+    """Set GEMINI env vars and return llm callable (None when custom key is invalid)."""
+    custom = (st.session_state.get("api_token") or "").strip()
+    custom_valid = bool(st.session_state.get("gemini_custom_key_valid"))
+    custom_invalid = bool(custom) and not custom_valid
+
+    if custom and custom_valid:
+        os.environ["GEMINI_API_KEY"] = custom
+        os.environ["GOOGLE_API_KEY"] = custom
+    elif _DEFAULT_GEMINI_API_KEY:
+        os.environ["GEMINI_API_KEY"] = _DEFAULT_GEMINI_API_KEY
+        os.environ["GOOGLE_API_KEY"] = _DEFAULT_GEMINI_API_KEY
+    else:
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("GOOGLE_API_KEY", None)
+
+    if custom_invalid:
+        return None
+    if custom and custom_valid:
+        return init_llm(api_key=custom)
+    return init_llm(api_key=None)
+
+
 # ----------------------------
 # Advanced settings defaults (widgets live in sidebar Advanced)
 # ----------------------------
@@ -1867,7 +1924,8 @@ with st.sidebar:
             type="password",
             help="Uses GEMINI_API_KEY from your environment by default; entering a value overrides it for this session.",
         )
-        if (st.session_state.get("api_token") or "").strip():
+        _sync_gemini_api_key_from_input()
+        if st.session_state.get("gemini_custom_key_valid"):
             st.caption("Custom key active")
         if st.session_state.get("gemini_api_key_error"):
             st.error(st.session_state["gemini_api_key_error"])
@@ -1877,27 +1935,14 @@ with st.sidebar:
             help="Optional index for quicker retrieval on large lectures. Ordinary search still works if off.",
         )
 
-_custom_gemini_key = (st.session_state.get("api_token") or "").strip()
-_prev_gemini_key = st.session_state.get("_api_token_prev", "")
-if _custom_gemini_key != _prev_gemini_key:
-    st.session_state.pop("gemini_api_key_error", None)
-    st.session_state["_api_token_prev"] = _custom_gemini_key
-if _custom_gemini_key:
-    os.environ["GEMINI_API_KEY"] = _custom_gemini_key
-    os.environ["GOOGLE_API_KEY"] = _custom_gemini_key
-elif _DEFAULT_GEMINI_API_KEY:
-    os.environ["GEMINI_API_KEY"] = _DEFAULT_GEMINI_API_KEY
-    os.environ["GOOGLE_API_KEY"] = _DEFAULT_GEMINI_API_KEY
-else:
-    os.environ.pop("GEMINI_API_KEY", None)
-    os.environ.pop("GOOGLE_API_KEY", None)
-llm = init_llm(api_key=_custom_gemini_key or None)
+_sync_gemini_api_key_from_input()
+llm = _apply_gemini_env_and_init_llm()
 _api_key_err = pop_gemini_api_key_error()
 if _api_key_err:
     st.session_state["gemini_api_key_error"] = _api_key_err
-    with st.sidebar:
-        st.error(_api_key_err)
-if llm is None:
+    st.session_state["gemini_custom_key_valid"] = False
+    llm = None
+if llm is None and not st.session_state.get("gemini_api_key_error"):
     _startup_msgs.append(("warning", "LLM not available — using placeholders"))
 
 for lvl, msg in _startup_msgs:
