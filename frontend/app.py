@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 
 # Load environment variables once at startup
 load_dotenv()
+_DEFAULT_GEMINI_API_KEY = (
+    os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+).strip()
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -52,6 +55,7 @@ from frontend.runtime_ui_helpers import (
     trim_history_to_max_turns,
     render_assistant_html,
 )
+from backend.llm_client import pop_gemini_api_key_error
 from frontend.handlers import (
     init_llm,
     create_embeddings_if_needed,
@@ -1865,6 +1869,8 @@ with st.sidebar:
         )
         if (st.session_state.get("api_token") or "").strip():
             st.caption("Custom key active")
+        if st.session_state.get("gemini_api_key_error"):
+            st.error(st.session_state["gemini_api_key_error"])
         st.session_state["use_faiss_search"] = st.checkbox(
             "Faster search for long PDFs",
             value=bool(st.session_state.get("use_faiss_search", False)),
@@ -1872,10 +1878,25 @@ with st.sidebar:
         )
 
 _custom_gemini_key = (st.session_state.get("api_token") or "").strip()
+_prev_gemini_key = st.session_state.get("_api_token_prev", "")
+if _custom_gemini_key != _prev_gemini_key:
+    st.session_state.pop("gemini_api_key_error", None)
+    st.session_state["_api_token_prev"] = _custom_gemini_key
 if _custom_gemini_key:
     os.environ["GEMINI_API_KEY"] = _custom_gemini_key
     os.environ["GOOGLE_API_KEY"] = _custom_gemini_key
+elif _DEFAULT_GEMINI_API_KEY:
+    os.environ["GEMINI_API_KEY"] = _DEFAULT_GEMINI_API_KEY
+    os.environ["GOOGLE_API_KEY"] = _DEFAULT_GEMINI_API_KEY
+else:
+    os.environ.pop("GEMINI_API_KEY", None)
+    os.environ.pop("GOOGLE_API_KEY", None)
 llm = init_llm(api_key=_custom_gemini_key or None)
+_api_key_err = pop_gemini_api_key_error()
+if _api_key_err:
+    st.session_state["gemini_api_key_error"] = _api_key_err
+    with st.sidebar:
+        st.error(_api_key_err)
 if llm is None:
     _startup_msgs.append(("warning", "LLM not available — using placeholders"))
 

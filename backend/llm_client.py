@@ -7,6 +7,49 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+INVALID_GEMINI_API_KEY_MESSAGE = "Invalid API key — please check and try again"
+
+_last_gemini_api_key_error: Optional[str] = None
+
+
+def is_invalid_gemini_api_key_error(e: Exception) -> bool:
+    """True when Gemini rejected the API key (not quota/transient failures)."""
+    text = f"{e} {getattr(e, 'message', '')}".lower()
+    if any(
+        marker in text
+        for marker in (
+            "api_key_invalid",
+            "api key not valid",
+            "invalid api key",
+            "invalid_api_key",
+            "api key is invalid",
+            "incorrect api key",
+            "invalid authentication credentials",
+        )
+    ):
+        return True
+    if "permission_denied" in text and "api" in text:
+        return True
+    if "unauthenticated" in text and "api" in text:
+        return True
+    code = getattr(e, "code", None)
+    if code in (401, 403, "401", "403", "UNAUTHENTICATED", "PERMISSION_DENIED"):
+        return "api" in text or "key" in text or "credential" in text
+    return False
+
+
+def _record_gemini_api_key_error() -> None:
+    global _last_gemini_api_key_error
+    _last_gemini_api_key_error = INVALID_GEMINI_API_KEY_MESSAGE
+
+
+def pop_gemini_api_key_error() -> Optional[str]:
+    """Return and clear the latest invalid-API-key message, if any."""
+    global _last_gemini_api_key_error
+    msg = _last_gemini_api_key_error
+    _last_gemini_api_key_error = None
+    return msg
+
 
 def _is_transient_gemini_error(e: Exception) -> bool:
     s = str(e)
@@ -80,6 +123,9 @@ def get_llm_call(api_key: Optional[str] = None) -> Optional[Callable[[str], str]
                     return str(resp)
                 except Exception as e:
                     last_err = e
+                    if is_invalid_gemini_api_key_error(e):
+                        _record_gemini_api_key_error()
+                        raise
                     if attempt >= max_retries or not _is_transient_gemini_error(e):
                         raise
                     delay = _retry_delay_from_error(e, attempt)
@@ -102,5 +148,7 @@ def get_llm_call(api_key: Optional[str] = None) -> Optional[Callable[[str], str]
         return _genai_call
 
     except Exception as e:
+        if is_invalid_gemini_api_key_error(e):
+            _record_gemini_api_key_error()
         logger.warning("Failed to initialize google-genai client: %s", e)
         return None
